@@ -21,7 +21,10 @@ class JobError(Exception):
 class Job:
     goal: str
     adapter: str
-    gates: list[str]
+    # Empty gates = the job starts in the plan phase: the coding agent's first
+    # deliverable is PLAN.md + proposed_gates.yaml, confirmed via `autolab
+    # approve` into state.json. Non-empty gates skip planning entirely.
+    gates: list[str] = field(default_factory=list)
     max_iterations: int = DEFAULT_MAX_ITERATIONS
     no_progress_limit: int = DEFAULT_NO_PROGRESS_LIMIT
     iteration_timeout_seconds: int = DEFAULT_ITERATION_TIMEOUT_SECONDS
@@ -45,15 +48,15 @@ class Job:
 
         goal = raw.get("goal")
         adapter = raw.get("adapter")
-        gates = raw.get("gates")
+        gates = raw.get("gates") or []
         if not isinstance(goal, str) or not goal.strip():
             raise JobError("job.yaml: 'goal' must be a non-empty string")
         if not isinstance(adapter, str) or not adapter.strip():
             raise JobError("job.yaml: 'adapter' must be a non-empty string")
-        if not isinstance(gates, list) or not gates or not all(
+        if not isinstance(gates, list) or not all(
             isinstance(g, str) and g.strip() for g in gates
         ):
-            raise JobError("job.yaml: 'gates' must be a non-empty list of commands")
+            raise JobError("job.yaml: 'gates' must be a list of commands when present")
 
         def _pos_int(key: str, default: int) -> int:
             value = raw.get(key, default)
