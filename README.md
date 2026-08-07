@@ -69,11 +69,22 @@ If another process holds the job lock, it exits `0` silently. Stuck =
 `no_progress_limit` consecutive iterations where the failing-gate set did not
 shrink and the diff was effectively empty, or `max_iterations` reached.
 
+`loop` repeats `run-once` while it returns `10` (with `--sleep SECONDS`
+between iterations, default 5) and exits with the terminal code (`0`/`20`/`30`;
+`130` on Ctrl-C). Crash recovery needs no extra code: state is on disk, the
+next `loop` or `run-once` reconstructs and continues.
+
 ## Usage
 
 ```bash
-uv run autolab run-once path/to/job
+uv run autolab run-once path/to/job   # exactly one iteration
+uv run autolab loop path/to/job       # iterate until converged/stuck/error
 ```
+
+For unattended runs on a dev node, a template systemd user unit lives at
+`devenv/systemd/autolab@.service` (one instance per job,
+`Restart=on-failure` with stuck/error exempted). Step 5 of the autodev
+episode installs and adapts it.
 
 ## Tests
 

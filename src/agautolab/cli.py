@@ -6,6 +6,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from .loop import DEFAULT_SLEEP_SECONDS, loop
 from .run_once import run_once
 
 
@@ -20,9 +21,23 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_run_once.add_argument("job_dir", type=Path, help="Path to the job directory")
 
+    p_loop = sub.add_parser(
+        "loop", help="Run iterations until the job converges, gets stuck, or errors."
+    )
+    p_loop.add_argument("job_dir", type=Path, help="Path to the job directory")
+    p_loop.add_argument(
+        "--sleep",
+        type=float,
+        default=DEFAULT_SLEEP_SECONDS,
+        metavar="SECONDS",
+        help=f"Sleep between iterations (default {DEFAULT_SLEEP_SECONDS:g})",
+    )
+
     args = parser.parse_args(argv)
     if args.command == "run-once":
         return run_once(args.job_dir)
+    if args.command == "loop":
+        return loop(args.job_dir, sleep_seconds=args.sleep)
     parser.error(f"unknown command {args.command!r}")
     return 2
 
