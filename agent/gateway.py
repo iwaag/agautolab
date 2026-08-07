@@ -72,7 +72,14 @@ def pid_alive(pid):
 
 def drive_running():
     cur = current_run()
-    return cur if cur and pid_alive(cur.get("pid")) else None
+    if not cur:
+        return None
+    # The exit file is written by the wrapper's last command, so its presence
+    # is the authoritative "finished" signal — os.kill(pid, 0) alone still
+    # succeeds while the detached child is an unreaped zombie.
+    if (GATEWAY / f"run-{cur['run']:04d}.exit").exists():
+        return None
+    return cur if pid_alive(cur.get("pid")) else None
 
 
 def notes_status():
@@ -257,6 +264,7 @@ def main():
     if not read_token():
         sys.exit(f"refusing to start: {TOKEN_FILE} is missing or empty")
     signal.signal(signal.SIGTERM, lambda *a: sys.exit(0))
+    signal.signal(signal.SIGCHLD, signal.SIG_IGN)  # auto-reap drive.sh wrappers
     server = ThreadingHTTPServer((host, port), Handler)
     print(f"autolab-gateway listening on {host}:{port}", flush=True)
     server.serve_forever()
