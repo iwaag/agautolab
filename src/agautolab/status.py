@@ -12,7 +12,8 @@ import sys
 from pathlib import Path
 
 from .job import Job, JobError
-from .state import State, TERMINAL_STATUSES
+from .run_once import PLAN_FILE, load_proposed_gates
+from .state import AWAITING_APPROVAL, State, TERMINAL_STATUSES
 
 
 def _last_evidence_dir(job_dir: Path) -> str | None:
@@ -31,6 +32,9 @@ def collect_status(job_dir: Path) -> dict:
         "job_dir": str(job_dir),
         "status": state.status,
         "terminal": state.status in TERMINAL_STATUSES,
+        "phase": state.phase,
+        "awaiting_approval": state.status == AWAITING_APPROVAL,
+        "approved_gates": state.approved_gates,
         "iteration": state.iteration,
         "consecutive_no_progress": state.consecutive_no_progress,
         "last_gate_summary": state.last_gate_summary,
@@ -38,6 +42,13 @@ def collect_status(job_dir: Path) -> dict:
         "last_evidence": _last_evidence_dir(job_dir),
         "has_notes": (job_dir / "NOTES.md").is_file(),
     }
+    if doc["awaiting_approval"]:
+        doc["proposed_gates"] = load_proposed_gates(job_dir / "target")
+        doc["plan_file"] = (
+            f"target/{PLAN_FILE}"
+            if (job_dir / "target" / PLAN_FILE).is_file()
+            else None
+        )
     try:
         job = Job.load(job_dir)
         doc["job"] = {
@@ -57,6 +68,7 @@ def _render_text(doc: dict) -> str:
     lines = [
         f"job: {doc['job_dir']}",
         f"status: {doc['status']}" + (" (terminal)" if doc["terminal"] else ""),
+        f"phase: {doc['phase'] or '(undecided)'}",
         f"iteration: {doc['iteration']}"
         + (
             f" / max {doc['job']['max_iterations']}"
@@ -74,6 +86,11 @@ def _render_text(doc: dict) -> str:
         lines.append(f"gates: {total - len(failing)}/{total} passing")
         for g in failing:
             lines.append(f"  failing: {g}")
+    if doc["awaiting_approval"]:
+        lines.append("awaiting approval: read target/PLAN.md, then "
+                     "`autolab approve` or `autolab reject --feedback ...`")
+        for g in doc.get("proposed_gates") or []:
+            lines.append(f"  proposed: {g}")
     if doc["error"]:
         lines.append(f"error: {doc['error']}")
     if doc["last_evidence"]:
