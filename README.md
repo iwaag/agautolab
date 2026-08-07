@@ -79,7 +79,15 @@ next `loop` or `run-once` reconstructs and continues.
 ```bash
 uv run autolab run-once path/to/job   # exactly one iteration
 uv run autolab loop path/to/job       # iterate until converged/stuck/error
+uv run autolab status path/to/job     # compact read-only status (--json)
 ```
+
+With `push: true` in job.yaml, `run-once` pushes `target/` to its `origin`
+remote after each iteration commit and on reaching a terminal status;
+failures are non-fatal and recorded in `evidence/iter-NNNN/push.json`.
+
+An LLM agent operating autolab as a toolbelt should read
+[AGENT_GUIDE.md](AGENT_GUIDE.md) — the complete operator contract.
 
 For unattended runs on a dev node, a template systemd user unit lives at
 `devenv/systemd/autolab@.service` (one instance per job,

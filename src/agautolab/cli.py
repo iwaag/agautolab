@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .loop import DEFAULT_SLEEP_SECONDS, loop
 from .run_once import run_once
+from .status import status
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -33,11 +34,19 @@ def main(argv: list[str] | None = None) -> int:
         help=f"Sleep between iterations (default {DEFAULT_SLEEP_SECONDS:g})",
     )
 
+    p_status = sub.add_parser(
+        "status", help="Print compact job status (read-only, lock-free)."
+    )
+    p_status.add_argument("job_dir", type=Path, help="Path to the job directory")
+    p_status.add_argument("--json", action="store_true", help="Emit structured JSON")
+
     args = parser.parse_args(argv)
     if args.command == "run-once":
         return run_once(args.job_dir)
     if args.command == "loop":
         return loop(args.job_dir, sleep_seconds=args.sleep)
+    if args.command == "status":
+        return status(args.job_dir, as_json=args.json)
     parser.error(f"unknown command {args.command!r}")
     return 2
 

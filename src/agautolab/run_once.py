@@ -119,6 +119,26 @@ def _run_adapter_with_timeout(
             )
 
 
+def _push_target(target: Path, evidence_dir: Path) -> None:
+    """Push target/ to origin. Non-fatal: transient push failures must not
+    turn a healthy iteration into an error verdict; the result is evidence."""
+    if _git(target, "remote", "get-url", "origin", check=False).returncode != 0:
+        result = {"pushed": False, "reason": "no origin remote"}
+    else:
+        proc = _git(target, "push", "origin", "HEAD", check=False)
+        result = {
+            "pushed": proc.returncode == 0,
+            "exit_code": proc.returncode,
+            "stderr_tail": (proc.stderr or "")[-2000:],
+        }
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    (evidence_dir / "push.json").write_text(
+        json.dumps(result, indent=2) + "\n", encoding="utf-8"
+    )
+    if not result["pushed"]:
+        print(f"autolab: push skipped/failed: {result}", file=sys.stderr)
+
+
 def _made_progress(old_summary: dict | None, new_failing: set[str], diff_nonempty: bool) -> bool:
     """No progress = failing-gate set didn't shrink AND diff effectively empty."""
     if diff_nonempty:
@@ -306,6 +326,8 @@ def _run_locked(job_dir: Path) -> int:
             evidence_dir, prompt, adapter_result, adapter_timed_out,
             gate_results, diff_text, started_at,
         )
+        if job.push and (diff_nonempty or state.status in TERMINAL_STATUSES):
+            _push_target(target, evidence_dir)
         _write_notes(job_dir, iteration, state.status, gate_results, adapter_result, diff_stat)
         state.save(job_dir)
 

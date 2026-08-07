@@ -27,6 +27,9 @@ class Job:
     iteration_timeout_seconds: int = DEFAULT_ITERATION_TIMEOUT_SECONDS
     gate_timeout_seconds: int = DEFAULT_GATE_TIMEOUT_SECONDS
     adapter_config: dict = field(default_factory=dict)
+    # Push target/ to its `origin` remote after each iteration commit and on
+    # reaching a terminal status. Non-fatal on failure (recorded in evidence).
+    push: bool = False
 
     @classmethod
     def load(cls, job_dir: Path) -> "Job":
@@ -62,6 +65,10 @@ class Job:
         if not isinstance(adapter_config, dict):
             raise JobError("job.yaml: 'adapter_config' must be a mapping")
 
+        push = raw.get("push", False)
+        if not isinstance(push, bool):
+            raise JobError("job.yaml: 'push' must be a boolean")
+
         return cls(
             goal=goal,
             adapter=adapter.strip(),
@@ -75,4 +82,5 @@ class Job:
                 "gate_timeout_seconds", DEFAULT_GATE_TIMEOUT_SECONDS
             ),
             adapter_config=adapter_config,
+            push=push,
         )
