@@ -32,3 +32,22 @@ agent/drive.sh [max_sessions]                      # default 12; exits 0 complet
 `AUTOLAB_CLAUDE_BIN` overrides the binary. Sessions are never resumed — each
 one reconstructs context from MISSION + NOTES + `autolab status`, the same
 philosophy as `run-once` one level down.
+
+## Remote missions (gateway)
+
+`agent/gateway.py` is a stdlib-only HTTP front door so a mission can be
+submitted without SSH. It refuses to start without a bearer token in
+`.local/agent/gateway_token`. Routes (default `:8791`):
+
+- `POST /mission` `{"mission": "...", "max_sessions": 12}` — writes
+  `MISSION.md` and launches `drive.sh` detached; `409` while one is running
+- `GET /status` — driver liveness/exit, `NOTES.md` STATUS line, per-session
+  cost summaries, whether a game build is installed
+- `GET /log?tail=N` — tail of the current drive log
+- `GET /game/` — unauthenticated static serving of `.local/agent/serve/`
+  (a mission that ships a browser game should install its verified build
+  there)
+- `GET /healthz` — unauthenticated liveness probe
+
+Deployment to a job-runner node (checkout update, token, systemd user unit)
+is owned by the `autolab_node` role in clusterintent's `ansible_agdev`.
