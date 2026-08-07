@@ -1,0 +1,33 @@
+# Fresh agent-only Gitea on agstudio (autodev episode, Step 4).
+# No humans use this instance; the only account is autolab-agent (admin).
+# Registration is disabled; secrets (password, API token) live in
+# agautolab/.local/gitea/, never here.
+#
+#   docker compose up -d
+#
+# First-time setup (admin user, org, token) is documented in SETUP.md.
+
+services:
+  gitea:
+    image: gitea/gitea:latest
+    container_name: autodev-gitea
+    restart: unless-stopped
+    environment:
+      - USER_UID=1000
+      - USER_GID=1000
+      - GITEA__database__DB_TYPE=sqlite3
+      - GITEA__security__INSTALL_LOCK=true
+      - GITEA__server__ROOT_URL=http://agstudio.local:3000/
+      - GITEA__server__SSH_DOMAIN=agstudio.local
+      - GITEA__server__SSH_PORT=2222
+      - GITEA__service__DISABLE_REGISTRATION=true
+      - GITEA__repository__ENABLE_PUSH_CREATE_ORG=true
+      - GITEA__repository__ENABLE_PUSH_CREATE_USER=true
+    volumes:
+      - autodev_gitea_data:/data
+    ports:
+      - "3000:3000"
+      - "2222:22"
+
+volumes:
+  autodev_gitea_data:
