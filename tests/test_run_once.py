@@ -1,14 +1,20 @@
-"""End-to-end tests of the run-once contract using the fake adapter."""
+"""End-to-end tests of the run-once contract using the fake adapter.
+
+Jobs here carry gates in job.yaml, so they run the classic implement-phase
+loop directly. The plan→approve→implement flow is covered in
+test_plan_flow.py.
+"""
 
 import fcntl
 import json
 import subprocess
 from pathlib import Path
 
-import pytest
+import yaml
 
 from agautolab.run_once import run_once
 from agautolab.state import (
+    EXIT_AWAITING_APPROVAL,
     EXIT_CONTINUE,
     EXIT_CONVERGED,
     EXIT_ERROR,
@@ -17,24 +23,23 @@ from agautolab.state import (
 )
 
 
-def make_job(job_dir: Path, *, gates: list[str], adapter_config: dict | None = None,
+def make_job(job_dir: Path, *, gates: list[str] | None = None,
+             adapter_config: dict | None = None,
              max_iterations: int = 30, no_progress_limit: int = 3) -> None:
+    """gates=None writes a job.yaml without gates: the job starts in the
+    plan phase."""
     job_dir.mkdir(parents=True, exist_ok=True)
-    gate_lines = "\n".join(f'  - "{g}"' for g in gates)
-    config_lines = ""
+    doc: dict = {
+        "goal": "Toy goal for tests.",
+        "adapter": "fake",
+        "max_iterations": max_iterations,
+        "no_progress_limit": no_progress_limit,
+    }
+    if gates is not None:
+        doc["gates"] = gates
     if adapter_config:
-        config_lines = "adapter_config:\n" + "\n".join(
-            f'  {k}: "{v}"' for k, v in adapter_config.items()
-        ) + "\n"
-    (job_dir / "job.yaml").write_text(
-        "goal: |\n  Toy goal for tests.\n"
-        "adapter: fake\n"
-        f"{config_lines}"
-        f"gates:\n{gate_lines}\n"
-        f"max_iterations: {max_iterations}\n"
-        f"no_progress_limit: {no_progress_limit}\n",
-        encoding="utf-8",
-    )
+        doc["adapter_config"] = adapter_config
+    (job_dir / "job.yaml").write_text(yaml.safe_dump(doc), encoding="utf-8")
 
 
 def read_state(job_dir: Path) -> dict:
@@ -135,12 +140,14 @@ def test_stuck_on_max_iterations(tmp_path):
     assert "max_iterations" in state["error"]
 
 
-def test_awaiting_approval_auto_passes(tmp_path):
+def test_awaiting_approval_stops_without_running(tmp_path):
     job_dir = tmp_path / "job"
     make_job(job_dir, gates=["test -f progress.log"])
-    State(status="awaiting_approval", iteration=0).save(job_dir)
-    assert run_once(job_dir) == EXIT_CONVERGED
-    assert read_state(job_dir)["status"] == "converged"
+    State(status="awaiting_approval", iteration=2, phase="plan").save(job_dir)
+    assert run_once(job_dir) == EXIT_AWAITING_APPROVAL
+    state = read_state(job_dir)
+    assert state["status"] == "awaiting_approval"
+    assert state["iteration"] == 2  # nothing ran
 
 
 def test_invalid_job_yaml_errors(tmp_path):
