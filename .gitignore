@@ -1,4 +1,5 @@
 .local/
+jobs/
 .venv/
 __pycache__/
 *.pyc
