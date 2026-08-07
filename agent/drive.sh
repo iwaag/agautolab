@@ -13,7 +13,13 @@ for ((i = 1; i <= max; i++)); do
     agent/session.sh
     rc=$?
     ((rc != 0)) && echo "drive: session exited $rc (continuing; state is on disk)" >&2
-    status="$(head -n1 "$notes" 2>/dev/null || echo 'STATUS: (no notes)')"
+    # A NOTES.md older than MISSION.md is a leftover from a previous mission;
+    # its STATUS must not stop the driver for the new one.
+    if [[ -f "$notes" && ".local/agent/MISSION.md" -nt "$notes" ]]; then
+        status="STATUS: (stale notes, predates mission)"
+    else
+        status="$(head -n1 "$notes" 2>/dev/null || echo 'STATUS: (no notes)')"
+    fi
     echo "drive: after session $i: $status" >&2
     case "$status" in
         "STATUS: complete") exit 0 ;;
