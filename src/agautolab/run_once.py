@@ -92,14 +92,22 @@ def build_prompt(job: Job, state: State, notes: str | None) -> str:
     return "\n".join(parts) + "\n"
 
 
+ADAPTER_TIMEOUT_GRACE_SECONDS = 30
+
+
 def _run_adapter_with_timeout(
     adapter: adapters.Adapter, prompt: str, target: Path, timeout: int
 ) -> tuple[adapters.AdapterResult, bool]:
-    """Enforce the wall-clock timeout even for adapters that ignore it."""
+    """Enforce the wall-clock timeout even for adapters that ignore it.
+
+    The adapter gets `timeout` and is expected to enforce it itself (e.g. via
+    a subprocess timeout); the outer guard fires slightly later so a
+    well-behaved adapter's own timeout handling wins.
+    """
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
         future = pool.submit(adapter.run, prompt, target, timeout)
         try:
-            return future.result(timeout=timeout), False
+            return future.result(timeout=timeout + ADAPTER_TIMEOUT_GRACE_SECONDS), False
         except concurrent.futures.TimeoutError:
             future.cancel()
             return (
@@ -177,12 +185,15 @@ def _write_evidence(
                 "timed_out": adapter_timed_out,
                 "started_at": started_at,
                 "finished_at": datetime.now(timezone.utc).isoformat(),
+                **adapter_result.meta,
             },
             indent=2,
         )
         + "\n",
         encoding="utf-8",
     )
+    for name, content in adapter_result.artifacts.items():
+        (evidence_dir / Path(name).name).write_text(content, encoding="utf-8")
     (evidence_dir / "diff.patch").write_text(diff_text, encoding="utf-8")
     (evidence_dir / "gates.json").write_text(
         json.dumps([asdict(r) for r in gate_results], indent=2) + "\n", encoding="utf-8"

@@ -8,7 +8,7 @@ claude/codex/opencode stay swappable:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field as dataclass_field
 from pathlib import Path
 from typing import Callable, Protocol
 
@@ -17,6 +17,11 @@ from typing import Callable, Protocol
 class AdapterResult:
     output: str
     exit_code: int
+    # Structured metadata (token/cost fields etc.) merged into the
+    # iteration's adapter_result.json evidence.
+    meta: dict = dataclass_field(default_factory=dict)
+    # Extra evidence files (filename -> content) written into evidence/iter-NNNN/.
+    artifacts: dict = dataclass_field(default_factory=dict)
 
 
 class Adapter(Protocol):
@@ -42,6 +47,8 @@ def create(name: str, config: dict) -> Adapter:
     return factory(config)
 
 
-from . import fake as _fake  # noqa: E402  (registers itself on import)
+from . import claude_code as _claude_code  # noqa: E402
+from . import fake as _fake  # noqa: E402
 
 register("fake", _fake.FakeAdapter.from_config)
+register("claude_code", _claude_code.ClaudeCodeAdapter.from_config)

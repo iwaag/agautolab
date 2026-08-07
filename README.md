@@ -14,8 +14,22 @@ Design decisions and history: `pj-agdev/../devdocs/episodes/autodev/plan.md`
 - Each iteration gets a fresh prompt built from the job goal + current gate
   failures + the previous iteration's `NOTES.md` handoff.
 - Coding-agent backends are adapters with a tiny interface:
-  `run(prompt, workdir, timeout) -> {output, exit}`. The `fake` adapter
-  (appends a line to a file) makes the loop testable without tokens.
+  `run(prompt, workdir, timeout) -> {output, exit}` (plus optional structured
+  meta and evidence artifacts). The `fake` adapter (appends a line to a file)
+  makes the loop testable without tokens.
+
+## Adapters
+
+- `fake` — appends a line to a file per run; no credentials needed.
+- `claude_code` — runs `claude -p --output-format json` one-shot with
+  `cwd=target/`, prompt on stdin. Captures the stdout JSON as
+  `claude_output.json` evidence and logs token/cost fields
+  (`total_cost_usd`, `usage`, `num_turns`, …) into `adapter_result.json`.
+  `adapter_config`: `command` (binary path, default `claude`), `args`
+  (extra CLI args such as `--model` / `--allowedTools`), `skip_permissions`
+  (adds `--dangerously-skip-permissions`; policy: only on experimental
+  nodes/VMs, never on a machine holding real credentials beyond what the
+  job needs — prefer `--allowedTools` locally).
 
 ## Job directory layout
 
