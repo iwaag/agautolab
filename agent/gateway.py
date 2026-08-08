@@ -164,11 +164,28 @@ def devstyle_report():
         "why": "why",
         "was it right in hindsight": "hindsight",
     }
+    label = re.compile(r"^\s*[-*]?\s*([^:]{1,40}):\s*(.*)$")
     out = {}
-    for line in text.splitlines():
-        m = re.match(r"^\s*[-*]?\s*([^:]{1,40}):\s*(.*)$", line)
-        if m and m.group(1).strip().lower() in keys:
-            out[keys[m.group(1).strip().lower()]] = m.group(2).strip()
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        m = label.match(line)
+        if not m or m.group(1).strip().lower() not in keys:
+            continue
+        # The answers are prose in a hard-wrapped file, so a one-line read
+        # truncates them mid-sentence. Absorb the continuation lines: anything
+        # up to the next blank line, bullet, heading or `Key:` line.
+        parts = [m.group(2).strip()]
+        for nxt in lines[i + 1:]:
+            stripped = nxt.strip()
+            nm = label.match(nxt)
+            if (
+                not stripped
+                or stripped[0] in "-*#"
+                or (nm and nm.group(1).strip().lower() in keys)
+            ):
+                break
+            parts.append(stripped)
+        out[keys[m.group(1).strip().lower()]] = " ".join(p for p in parts if p)
     return out if "style_chosen" in out else None
 
 
@@ -315,7 +332,13 @@ def job_summary(job_dir):
     row = {"name": job_dir.name}
     state = read_json(job_dir / "state.json")
     if state is None:
-        row["error"] = "state.json missing or unparsable"
+        # A job the mediator has just written job.yaml for has no state.json
+        # until the first `run-once` — that is the normal start of the
+        # lifecycle, not a fault, and must not be shown as one.
+        if (job_dir / "state.json").exists():
+            row["error"] = "state.json unparsable"
+        else:
+            row["not_started"] = True
         state = {}
     row.update(
         status=state.get("status"),

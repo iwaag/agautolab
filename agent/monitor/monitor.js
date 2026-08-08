@@ -169,10 +169,9 @@ function renderJobs(doc) {
     tr.append(el("td", null, j.name));
 
     const st = el("td");
-    st.append(statusCell(j.status));
-    if (j.error || j.state_error) {
-      st.append(el("div", "fail", j.error || j.state_error));
-    }
+    st.append(
+      j.not_started ? el("span", "st st-unknown", "not started") : statusCell(j.status)
+    );
     tr.append(st);
 
     tr.append(
@@ -197,17 +196,25 @@ function renderJobs(doc) {
     // when something is wrong, so it is inline rather than a click away — on
     // its own full-width row, because gate commands are long enough to
     // squeeze every other column to nothing if they share a cell.
-    for (const g of (j.last_gate_summary || {}).failing || []) {
-      const fail = el("tr", "job");
-      fail.onclick = tr.onclick;
-      fail.append(el("td"));
-      const td = el("td", "fail wrap", "failing: " + g);
-      td.colSpan = 5;  // 1 indent + 5 + the spacer column = the 7 above
-      fail.append(td);
-      body.append(fail);
+    // Same treatment for a real error: its own full-width row, because a long
+    // message in the status cell squeezes every other column.
+    const notes = (j.last_gate_summary || {}).failing || [];
+    for (const line of [j.error, j.state_error].filter(Boolean)) {
+      body.append(noteRow(tr.onclick, line));
     }
+    for (const g of notes) body.append(noteRow(tr.onclick, "failing: " + g));
   }
   $("jobs").replaceChildren(spacerColumn(body));
+}
+
+function noteRow(onclick, message) {
+  const row = el("tr", "job");
+  row.onclick = onclick;
+  row.append(el("td"));
+  const td = el("td", "fail wrap", message);
+  td.colSpan = 5;  // 1 indent + 5 + the spacer column = the 7 header cells
+  row.append(td);
+  return row;
 }
 
 function gatesCell(summary) {

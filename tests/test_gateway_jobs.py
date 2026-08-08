@@ -66,10 +66,22 @@ def test_unparsable_state_degrades_to_a_row_not_an_exception(tmp_path):
     job = make_job(tmp_path, "broken", '{"status": "runn', {"iter-0001": None})
     row = gateway.job_summary(job)
 
-    assert row["error"]
+    assert row["error"] == "state.json unparsable"
     assert row["status"] is None and row["terminal"] is False
     assert row["cost_usd"] is None  # unparsable adapter_result contributes nothing
     assert row["max_iterations"] == 7  # job.yaml is still readable
+
+
+def test_job_without_state_yet_is_not_started_rather_than_broken(tmp_path):
+    # The mediator writes job.yaml first; state.json only appears on the first
+    # run-once. That window is the normal start of the lifecycle, not a fault.
+    job = make_job(tmp_path, "fresh", "{}", {})
+    (job / "state.json").unlink()
+    row = gateway.job_summary(job)
+
+    assert row["not_started"] is True
+    assert "error" not in row
+    assert row["status"] is None and row["max_iterations"] == 7
 
 
 def test_detail_timeline_carries_gates_and_files(tmp_path):
@@ -168,3 +180,24 @@ def test_devstyle_report_extracted_from_notes(monkeypatch, tmp_path):
         "why": "the job was small and the gates were cheap",
         "hindsight": "yes",
     }
+
+
+def test_devstyle_answers_are_joined_across_wrapped_lines(monkeypatch, tmp_path):
+    # Real NOTES.md is hard-wrapped prose, so a one-line read cuts the answer
+    # off mid-sentence (observed on a live mission).
+    state = tmp_path / "agent"
+    state.mkdir()
+    monkeypatch.setattr(gateway, "STATE", state)
+    (state / "NOTES.md").write_text(
+        "STATUS: complete\n\n"
+        "Style chosen: instant-ramen\n"
+        "Why: mission explicitly bounded itself (max_iterations <= 3),\n"
+        "textbook small/reversible work per styles/README.md.\n"
+        "Was it right in hindsight: yes\n"
+    )
+    report = gateway.devstyle_report()
+    assert report["why"] == (
+        "mission explicitly bounded itself (max_iterations <= 3), "
+        "textbook small/reversible work per styles/README.md."
+    )
+    assert report["hindsight"] == "yes"
