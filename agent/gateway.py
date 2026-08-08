@@ -4,7 +4,9 @@
 Stdlib-only single-file server. Routes:
 
   POST /mission   {"mission": str, "max_sessions": int?}  -> start drive.sh
-  GET  /status    mission/driver/NOTES/session summary
+  GET  /status    mission/driver/NOTES/session summary, scoped to the
+                  current run (sessions started before it are excluded;
+                  "game" says whether the served build is from this run)
   GET  /log       ?tail=N  tail of the current (or last) drive log
   GET  /game/...  static files from .local/agent/serve/ (unauthenticated)
   GET  /healthz   liveness probe (unauthenticated)
@@ -19,7 +21,7 @@ State lives under .local/agent/ next to the rest of the agent layer:
   serve/                 static dir the finished game is installed into
   gateway/run-NNNN.log   drive.sh combined output per accepted mission
   gateway/run-NNNN.exit  drive.sh exit code, written when it finishes
-  gateway/current        run id + pid of the active (or last) drive
+  gateway/current        run id + pid + start time of the active (or last) drive
 """
 
 import json
@@ -28,6 +30,7 @@ import re
 import signal
 import subprocess
 import sys
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -93,10 +96,14 @@ def notes_status():
         return f.readline().strip() or "STATUS: (empty notes)"
 
 
-def session_summaries():
+def session_summaries(since=None):
+    # since: epoch seconds; only sessions written at/after it are returned,
+    # so /status can report the current run instead of every run ever.
     out = []
     sessions = STATE / "sessions"
     for p in sorted(sessions.glob("session-*.json")):
+        if since is not None and p.stat().st_mtime < since - 1:
+            continue
         row = {"file": p.name}
         try:
             d = json.loads(p.read_text())
@@ -110,6 +117,24 @@ def session_summaries():
             row["is_error"] = "unparsed"
         out.append(row)
     return out
+
+
+def sessions_on_disk():
+    return len(list((STATE / "sessions").glob("session-*.json")))
+
+
+def game_info(started=None):
+    """Describe the served build so a fresh install is distinguishable
+    from a stale one left by a previous mission."""
+    index = SERVE / "index.html"
+    if not index.is_file():
+        return {"installed": False, "installed_mtime": None, "installed_this_run": False}
+    mtime = index.stat().st_mtime
+    return {
+        "installed": True,
+        "installed_mtime": mtime,
+        "installed_this_run": started is not None and mtime >= started - 1,
+    }
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -187,7 +212,14 @@ class Handler(BaseHTTPRequestHandler):
         )
         log.close()
         (GATEWAY / "current").write_text(
-            json.dumps({"run": run, "pid": proc.pid, "max_sessions": max_sessions})
+            json.dumps(
+                {
+                    "run": run,
+                    "pid": proc.pid,
+                    "max_sessions": max_sessions,
+                    "started": time.time(),
+                }
+            )
         )
         self.send_json(202, {"accepted": True, "run": run, "pid": proc.pid})
 
@@ -199,7 +231,11 @@ class Handler(BaseHTTPRequestHandler):
                 exit_code = int((GATEWAY / f"run-{cur['run']:04d}.exit").read_text())
             except (OSError, ValueError):
                 pass
+        # "started" is absent in current-files written before run scoping
+        # existed; fall back to the old everything-on-disk view then.
+        started = cur.get("started") if cur else None
         mission = STATE / "MISSION.md"
+        game = game_info(started)
         self.send_json(
             200,
             {
@@ -212,8 +248,10 @@ class Handler(BaseHTTPRequestHandler):
                     "exit_code": exit_code,
                 },
                 "notes_status": notes_status(),
-                "sessions": session_summaries(),
-                "game_served": (SERVE / "index.html").is_file(),
+                "sessions": session_summaries(since=started),
+                "sessions_total_on_disk": sessions_on_disk(),
+                "game": game,
+                "game_served": game["installed"],
             },
         )
 
