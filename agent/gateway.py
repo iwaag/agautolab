@@ -115,17 +115,26 @@ def notes_status():
         return f.readline().strip() or "STATUS: (empty notes)"
 
 
-def mission_first_line(path):
-    """First line of substance. Missions are written as markdown and usually
-    open with a `# Mission` heading, which says nothing to a human watching."""
+def mission_headline(path):
+    """The mission's first paragraph of substance, on one line.
+
+    Missions are markdown: they open with a `# Mission` heading that tells a
+    human nothing, and their prose is hard-wrapped, so the literal first line
+    stops mid-sentence. Skip headings, then join until the blank line.
+    """
     try:
-        for line in path.read_text().splitlines():
-            line = line.strip()
-            if line and not line.startswith("#"):
-                return line
+        lines = path.read_text().splitlines()
     except OSError:
         return None
-    return None
+    para = []
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#"):
+            if para:
+                break
+            continue
+        para.append(line)
+    return " ".join(para) or None
 
 
 def devstyle_report():
@@ -372,6 +381,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(200, {"ok": True})
         if path == "/game" or path.startswith("/game/"):
             return self.serve_game(path)
+        if path == "/monitor" or path.startswith("/monitor/"):
+            return self.serve_static(MONITOR, path[len("/monitor"):])
         if path == "/status":
             return self.get_status()
         if path == "/log":
@@ -449,7 +460,7 @@ class Handler(BaseHTTPRequestHandler):
                 "kind": KIND,
                 "type": "status",
                 "cost": sessions_cost(),
-                "mission_first_line": mission_first_line(mission),
+                "mission_headline": mission_headline(mission),
                 "driver": {
                     "running": drive_running() is not None,
                     "current": cur,
@@ -527,14 +538,19 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def serve_game(self, path):
-        rel = path[len("/game"):].lstrip("/") or "index.html"
-        target = (SERVE / rel).resolve()
-        if not str(target).startswith(str(SERVE.resolve()) + os.sep) and target != SERVE.resolve():
-            return self.send_json(403, {"error": "path escapes serve dir"})
+        return self.serve_static(
+            SERVE, path[len("/game"):], missing="not found (game not installed yet?)"
+        )
+
+    def serve_static(self, base, rel, missing="not found"):
+        rel = rel.lstrip("/") or "index.html"
+        target = (base / rel).resolve()
+        if not str(target).startswith(str(base.resolve()) + os.sep) and target != base.resolve():
+            return self.send_json(403, {"error": "path escapes served dir"})
         if target.is_dir():
             target = target / "index.html"
         if not target.is_file():
-            return self.send_json(404, {"error": "not found (game not installed yet?)"})
+            return self.send_json(404, {"error": missing})
         body = target.read_bytes()
         self.send_response(200)
         self.send_header(

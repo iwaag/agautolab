@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>autolab monitor</title>
+<link rel="stylesheet" href="/monitor/monitor.css">
+</head>
+<body>
+
+<header id="head">
+  <div class="row">
+    <h1>autolab</h1>
+    <span id="driver" class="pill">…</span>
+    <span id="status-line" class="mono">…</span>
+    <span class="spacer"></span>
+    <span id="cost" class="cost mono">…</span>
+    <span id="tick" class="dim mono">…</span>
+  </div>
+  <p id="mission" class="mission">…</p>
+  <div id="devstyle" class="devstyle hidden"></div>
+  <p id="error" class="error hidden"></p>
+</header>
+
+<main>
+  <section>
+    <h2>jobs</h2>
+    <table id="jobs"><tbody><tr><td class="dim">loading…</td></tr></tbody></table>
+  </section>
+
+  <section>
+    <h2>evidence</h2>
+    <div id="evidence" class="dim">select a job above</div>
+  </section>
+
+  <section>
+    <h2>sessions <span id="sessions-note" class="dim"></span></h2>
+    <table id="sessions"><tbody><tr><td class="dim">loading…</td></tr></tbody></table>
+  </section>
+
+  <section>
+    <h2>drive log <span class="dim">tail 200</span></h2>
+    <pre id="log" class="log dim">loading…</pre>
+  </section>
+</main>
+
+<script src="/monitor/monitor.js"></script>
+</body>
+</html>

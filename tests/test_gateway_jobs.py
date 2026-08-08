@@ -107,11 +107,11 @@ def test_sessions_cost_sums_every_session(monkeypatch, tmp_path):
     assert cost["current_run_sessions_usd"] is None  # no run recorded
 
 
-def test_mission_first_line_skips_the_markdown_heading(tmp_path):
+def test_mission_headline_skips_the_markdown_heading(tmp_path):
     p = tmp_path / "MISSION.md"
     p.write_text("# Mission\n\nI want a Snake game in my browser.\n")
-    assert gateway.mission_first_line(p) == "I want a Snake game in my browser."
-    assert gateway.mission_first_line(tmp_path / "absent.md") is None
+    assert gateway.mission_headline(p) == "I want a Snake game in my browser."
+    assert gateway.mission_headline(tmp_path / "absent.md") is None
 
 
 def test_devstyle_report_extracted_from_notes(monkeypatch, tmp_path):
