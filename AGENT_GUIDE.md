@@ -137,6 +137,16 @@ when the gateway is running (`GET /jobs`, `/jobs/<job>`, and
 lock, so assume someone may be watching a job while you drive it — the cost
 and gate numbers they see are the ones in your evidence dirs.
 
+They may also be reading your iterations from **agdevworld**, which never
+receives the evidence files themselves: `POST /jobs/<job>/summarize/<iter>`
+runs a separate one-shot `claude -p` on this node that reads one evidence
+directory and writes prose to `.local/jobs/<job>/summaries/<iter>.md`. That
+summarizer is not you and does not share your session; it writes only inside
+`summaries/` and never takes the job's `.lock`, so it can run while you drive.
+Two consequences for you: an iteration's evidence is read by someone else
+later, so an `error.txt` or a failing gate you leave behind is what they will
+be told about; and a summary costs about $0.15, once per iteration.
+
 ## Reviewing a proposed plan (the mediator's craft)
 
 - **Traceability**: map each sentence of the request to at least one

@@ -91,6 +91,12 @@ cost, the per-iteration evidence timeline with links to every raw artefact,
 and the drive log tail. It never writes and never takes a job's `.lock`, so
 it is safe to watch a live run.
 
+The same routes feed **agdevworld**'s autolab view, which never receives raw
+evidence: `POST /jobs/<job>/summarize/<iter>` runs a one-shot `claude -p` on
+this node over one evidence directory and caches prose in
+`.local/jobs/<job>/summaries/<iter>.md`, and that prose is the only iteration
+content that leaves the node.
+
 With `push: true` in job.yaml, `run-once` pushes `target/` to its `origin`
 remote after each iteration commit and on reaching a terminal status;
 failures are non-fatal and recorded in `evidence/iter-NNNN/push.json`.
