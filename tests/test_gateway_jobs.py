@@ -7,6 +7,8 @@ cost rollups add up the fields a human is going to make decisions on.
 
 import importlib.util
 import json
+import os
+import time
 from pathlib import Path
 
 spec = importlib.util.spec_from_file_location(
@@ -112,6 +114,37 @@ def test_mission_headline_skips_the_markdown_heading(tmp_path):
     p.write_text("# Mission\n\nI want a Snake game in my browser.\n")
     assert gateway.mission_headline(p) == "I want a Snake game in my browser."
     assert gateway.mission_headline(tmp_path / "absent.md") is None
+
+
+def test_live_session_reads_as_in_progress_not_broken(monkeypatch, tmp_path):
+    state = tmp_path / "agent"
+    (state / "sessions").mkdir(parents=True)
+    monkeypatch.setattr(gateway, "STATE", state)
+    # claude creates the output file at start and only fills it at the end.
+    (state / "sessions" / "session-0001.json").write_text("")
+
+    monkeypatch.setattr(gateway, "drive_running", lambda: {"run": 1})
+    assert gateway.session_summaries()[0]["is_error"] == "in progress"
+
+    # With no driver alive the same file really is a broken session.
+    monkeypatch.setattr(gateway, "drive_running", lambda: None)
+    assert gateway.session_summaries()[0]["is_error"] == "unparsed"
+
+
+def test_stale_notes_suppress_the_devstyle_report(monkeypatch, tmp_path):
+    state = tmp_path / "agent"
+    state.mkdir()
+    monkeypatch.setattr(gateway, "STATE", state)
+    (state / "NOTES.md").write_text("STATUS: complete\n- Style chosen: slow-brew\n")
+    now = time.time()
+    os.utime(state / "NOTES.md", (now - 60, now - 60))
+    (state / "MISSION.md").write_text("# Mission\n\nA newer mission.\n")
+
+    # The report on disk belongs to the previous mission; showing it under this
+    # mission's headline would be a lie.
+    assert gateway.notes_are_stale() is True
+    assert gateway.devstyle_report() is None
+    assert gateway.notes_status() == "STATUS: (stale notes, predates mission)"
 
 
 def test_devstyle_report_extracted_from_notes(monkeypatch, tmp_path):

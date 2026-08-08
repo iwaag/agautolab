@@ -91,6 +91,7 @@ tr.job.selected td { background: #ffffff10; }
 .st-unknown { color: var(--dim); }
 
 .fail { color: var(--bad); }
+.live { color: var(--live); }
 .gate-ok { color: var(--ok); }
 
 a { color: var(--live); text-decoration: none; }

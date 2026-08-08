@@ -104,12 +104,22 @@ def drive_running():
     return cur if pid_alive(cur.get("pid")) else None
 
 
-def notes_status():
+def notes_are_stale():
+    """NOTES.md older than MISSION.md is the previous mission's, not this one's."""
     notes = STATE / "NOTES.md"
     mission = STATE / "MISSION.md"
+    return (
+        notes.is_file()
+        and mission.is_file()
+        and mission.stat().st_mtime > notes.stat().st_mtime
+    )
+
+
+def notes_status():
+    notes = STATE / "NOTES.md"
     if not notes.is_file():
         return "STATUS: (no notes)"
-    if mission.is_file() and mission.stat().st_mtime > notes.stat().st_mtime:
+    if notes_are_stale():
         return "STATUS: (stale notes, predates mission)"
     with notes.open() as f:
         return f.readline().strip() or "STATUS: (empty notes)"
@@ -140,7 +150,11 @@ def mission_headline(path):
 def devstyle_report():
     """The 3-line devstyle report every final mission report must answer
     (`Style chosen / Why / Was it right in hindsight`, see styles/*/STYLE.md).
-    It is an ENT asset, so the monitor surfaces it whenever NOTES.md has it."""
+    It is an ENT asset, so the monitor surfaces it whenever NOTES.md has it —
+    except when NOTES.md predates the mission, where the report on disk is the
+    previous mission's and showing it under this one's headline would lie."""
+    if notes_are_stale():
+        return None
     try:
         text = (STATE / "NOTES.md").read_text()
     except OSError:
@@ -176,7 +190,10 @@ def session_summaries(since=None):
                 duration_s=round(d.get("duration_ms", 0) / 1000),
             )
         except ValueError:
-            row["is_error"] = "unparsed"
+            # The live session's file exists from the moment claude starts and
+            # only becomes JSON when it finishes, so mid-run it is not a broken
+            # session — it is the one still being written.
+            row["is_error"] = "in progress" if drive_running() else "unparsed"
         out.append(row)
     return out
 

@@ -131,6 +131,12 @@ patterns to the commands the gates and build genuinely need.
 `NOTES.md` in the job dir is the latest iteration's handoff (status, gate
 results, diff stat, output tails). `status --json` is a cheaper first read.
 
+A human can watch all of this without SSH at `http://<host>:8791/monitor/`
+when the gateway is running (`GET /jobs`, `/jobs/<job>`, and
+`/jobs/<job>/evidence/<iter>/<file>` back it). It is read-only and takes no
+lock, so assume someone may be watching a job while you drive it — the cost
+and gate numbers they see are the ones in your evidence dirs.
+
 ## Reviewing a proposed plan (the mediator's craft)
 
 - **Traceability**: map each sentence of the request to at least one

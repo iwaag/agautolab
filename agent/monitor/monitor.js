@@ -121,7 +121,8 @@ function renderSessions(st) {
     res.append(
       s.is_error === false
         ? el("span", "gate-ok", "ok")
-        : el("span", "fail", String(s.is_error))
+        // "in progress" is the live session, not a failed one.
+        : el("span", s.is_error === "in progress" ? "live" : "fail", String(s.is_error))
     );
     tr.append(res);
     tr.append(el("td", "num", s.turns ?? "—"));

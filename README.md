@@ -82,6 +82,15 @@ uv run autolab loop path/to/job       # iterate until converged/stuck/error
 uv run autolab status path/to/job     # compact read-only status (--json)
 ```
 
+## Monitoring
+
+`agent/gateway.py` (see [agent/README.md](agent/README.md)) exposes the agent
+and job layers read-only over HTTP and serves a browser page at
+`/monitor/`: mission, driver state, cumulative cost, per-job status / gates /
+cost, the per-iteration evidence timeline with links to every raw artefact,
+and the drive log tail. It never writes and never takes a job's `.lock`, so
+it is safe to watch a live run.
+
 With `push: true` in job.yaml, `run-once` pushes `target/` to its `origin`
 remote after each iteration commit and on reaching a terminal status;
 failures are non-fatal and recorded in `evidence/iter-NNNN/push.json`.
