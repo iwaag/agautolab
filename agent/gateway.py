@@ -11,13 +11,17 @@ Stdlib-only single-file server. Routes:
   GET  /jobs      one summary row per .local/jobs/<job>/
   GET  /jobs/<job>              status document + cost rollup + evidence timeline
   GET  /jobs/<job>/evidence/<iter>/<file>   raw evidence file passthrough
+  POST /jobs/<job>/summarize/<iter>  ?force=1  start a one-shot summarizer
+  GET  /jobs/<job>/summarize/<iter>  {status: absent|pending|done|error, summary?}
   GET  /game/...  static files from .local/agent/serve/ (unauthenticated)
   GET  /healthz   liveness probe (unauthenticated)
 
 Only POST /mission requires `Authorization: Bearer <token>` matching
 .local/agent/gateway_token. Every GET is unauthenticated: this is an
 experimental node and the read side is deliberately thin-auth until auth is
-designed system-wide.
+designed system-wide. POST /jobs/.../summarize/... is unauthenticated too even
+though it spends money: accepted for this phase, bounded by a one-at-a-time
+guard and by the per-iteration cache (one paid call per iteration ever).
 
 Monitoring reads never write and never take a job's `.lock`, so they are safe
 against a live iteration; half-written JSON degrades to an `error` field on
@@ -85,6 +89,10 @@ def current_run():
 
 
 def pid_alive(pid):
+    # kill(0, sig) and kill(-1, sig) address process groups / every process, so
+    # they would answer "alive" for a pid that never existed. Only real pids.
+    if not isinstance(pid, int) or pid <= 0:
+        return False
     try:
         os.kill(pid, 0)
         return True
@@ -326,6 +334,205 @@ def iter_cost(job_dir, name):
     return None
 
 
+# --- iteration summaries -------------------------------------------------
+#
+# An iteration's evidence is summarized where it lives: a one-shot `claude -p`
+# reads .local/jobs/<job>/evidence/<iter>/ and writes prose next to it under
+# summaries/. Callers outside this node get the prose, never the raw files —
+# that boundary is the point of the feature, not an implementation detail.
+#
+# Everything this path writes stays inside summaries/: it never touches
+# state.json, evidence, MISSION.md, NOTES.md or the job's .lock, so it is safe
+# to run against an iteration that is still being written (such a summary is
+# allowed to be wrong; `?force=1` regenerates it).
+
+SUMMARY_ALLOWED_TOOLS = "Read,Glob,Grep"
+
+SUMMARY_PROMPT = """You are a one-shot summarizer for an autolab job iteration.
+
+Read only the files in the directory `{rel}` (relative to the current working
+directory). Do not read, write or modify anything else, and do not run
+commands. That directory holds the evidence of one coding-agent iteration:
+
+- `prompt.txt`      what the coding agent was asked to do
+- `diff.patch`      what it actually changed
+- `gates.json`      the verification commands and their exit codes
+- `adapter_result.json` turns, duration, exit code, cost in USD
+- `error.txt`       present only when the iteration failed
+- other files may be present; read what helps.
+
+Write 5 to 10 sentences of plain prose for a human who is watching this job
+and has not seen the files. Cover: what the iteration was asked to do, what
+changed, which gates ran and which failed, whether it errored, and what it
+cost in turns/time/dollars. Be concrete (name files, gate commands and
+numbers) but do not dump file contents, diffs or JSON. No headings, no bullet
+lists, no preamble such as "Here is the summary" — output the prose only.
+Do not narrate your reading process: your final message must begin with the
+first sentence of the summary itself.
+"""
+
+# The model still opens with a line of narration often enough to matter, and
+# the summary is shown to the user unabridged, so drop a leading one-line
+# paragraph that is clearly throat-clearing rather than content.
+NARRATION = re.compile(
+    r"^(now|ok|okay|alright|right|good|let me|i(?:'ve| have)? |here(?:'s| is)|"
+    r"based on|i'll|i will)",
+    re.IGNORECASE,
+)
+
+
+def tidy_summary(text):
+    text = text.strip()
+    head, sep, rest = text.partition("\n\n")
+    if sep and "\n" not in head and len(head) < 200 and NARRATION.match(head):
+        return rest.strip()
+    return text
+
+
+# Promotion runs in a separate interpreter so the wrapper stays a one-liner:
+# claude's JSON goes in, prose comes out only when the run really succeeded,
+# and the summarizer's own cost is recorded — an unauthenticated route that
+# spends money should at least say how much.
+EXTRACT_PY = r"""
+import json, pathlib, sys
+raw, md, cost, tidy = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+sys.path.insert(0, tidy)
+from gateway import tidy_summary
+try:
+    doc = json.loads(pathlib.Path(raw).read_text())
+except Exception as exc:
+    sys.exit(f"summarizer output was not JSON: {exc}")
+if doc.get("is_error"):
+    sys.exit(f"summarizer reported an error: {doc.get('subtype')}")
+text = tidy_summary(str(doc.get("result") or ""))
+if not text:
+    sys.exit("summarizer produced no text")
+pathlib.Path(md).write_text(text + "\n")
+pathlib.Path(cost).write_text(json.dumps({
+    "cost_usd": doc.get("total_cost_usd"),
+    "num_turns": doc.get("num_turns"),
+    "duration_ms": doc.get("duration_ms"),
+}))
+"""
+
+
+def summaries_dir(job_dir):
+    return job_dir / "summaries"
+
+
+def summary_paths(job_dir, iteration):
+    d = summaries_dir(job_dir)
+    return {
+        "md": d / f"{iteration}.md",
+        "raw": d / f"{iteration}.raw.json",
+        "cost": d / f"{iteration}.cost.json",
+        "run": d / f"{iteration}.run.json",
+        "exit": d / f"{iteration}.exit",
+        "log": d / f"{iteration}.log",
+        "prompt": d / f"{iteration}.prompt.txt",
+    }
+
+
+def claude_bin():
+    """Same resolution order as session.sh: env, then the .local pointer file,
+    then PATH. The gateway may run without the developer's interactive PATH."""
+    env = os.environ.get("AUTOLAB_CLAUDE_BIN")
+    if env:
+        return env
+    try:
+        line = (STATE / "claude_bin").read_text().strip()
+        if line:
+            return line
+    except OSError:
+        pass
+    return "claude"
+
+
+def summary_status(job_dir, iteration):
+    """State of one iteration's summary. The `.md` file is the cache and the
+    only success signal: a summarizer that exited 0 without producing prose is
+    an error, not a done."""
+    p = summary_paths(job_dir, iteration)
+    if p["md"].is_file():
+        doc = {"status": "done", "mtime": p["md"].stat().st_mtime}
+        cost = read_json(p["cost"])
+        if isinstance(cost, dict):
+            doc["summarizer"] = cost
+        return doc
+    run = read_json(p["run"])
+    if not isinstance(run, dict):
+        return {"status": "absent"}
+    try:
+        code = int(p["exit"].read_text().strip())
+    except (OSError, ValueError):
+        code = None
+    if code is None:
+        if pid_alive(run.get("pid")):
+            return {"status": "pending", "started": run.get("started")}
+        return {"status": "error", "error": "summarizer died without writing a summary"}
+    return {"status": "error", "error": f"summarizer exited {code} without a summary"}
+
+
+def summary_running(job_dir=None, iteration=None):
+    """The one-at-a-time guard. Scans every job's summaries/ for a live run —
+    cheap (a handful of small files) and it keeps an unauthenticated POST from
+    fanning out into arbitrarily many paid processes."""
+    if not JOBS.is_dir():
+        return None
+    for d in sorted(JOBS.iterdir()):
+        sdir = summaries_dir(d)
+        if not sdir.is_dir():
+            continue
+        for run_file in sorted(sdir.glob("*.run.json")):
+            it = run_file.name[: -len(".run.json")]
+            if (sdir / f"{it}.exit").exists():
+                continue
+            run = read_json(run_file)
+            if isinstance(run, dict) and pid_alive(run.get("pid")):
+                if job_dir is not None and d == job_dir and it == iteration:
+                    return {"job": d.name, "iter": it, "self": True, **run}
+                return {"job": d.name, "iter": it, "self": False, **run}
+    return None
+
+
+def start_summarizer(job_dir, iteration):
+    """Spawn the one-shot summarizer detached, in the same shape as
+    POST /mission's drive.sh wrapper: log file, exit file, pid recorded."""
+    p = summary_paths(job_dir, iteration)
+    summaries_dir(job_dir).mkdir(parents=True, exist_ok=True)
+    rel = f".local/jobs/{job_dir.name}/evidence/{iteration}"
+    p["prompt"].write_text(SUMMARY_PROMPT.format(rel=rel))
+    for stale in ("md", "raw", "cost", "exit"):
+        p[stale].unlink(missing_ok=True)
+    model = os.environ.get("AUTOLAB_SUMMARY_MODEL", "claude-sonnet-5")
+    # claude's JSON lands in .raw.json; the extractor promotes it to .md only
+    # on a clean, non-empty, non-error run, so a failed summarizer can never
+    # be served as a cached summary.
+    agent_dir = Path(__file__).resolve().parent
+    cmd = (
+        f'"$BIN" -p --output-format json --model "$MODEL" '
+        f'--allowedTools "$TOOLS" <"{p["prompt"]}" >"{p["raw"]}"; rc=$?; '
+        f'if [ $rc -eq 0 ]; then python3 -c "$EXTRACT" "{p["raw"]}" "{p["md"]}" '
+        f'"{p["cost"]}" "{agent_dir}" || rc=$?; fi; echo $rc > "{p["exit"]}"'
+    )
+    log = open(p["log"], "w")
+    proc = subprocess.Popen(
+        ["bash", "-c", cmd],
+        cwd=ROOT,
+        stdout=log,
+        stderr=subprocess.STDOUT,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+        env={**os.environ, "BIN": claude_bin(), "MODEL": model,
+             "TOOLS": SUMMARY_ALLOWED_TOOLS, "EXTRACT": EXTRACT_PY},
+    )
+    log.close()
+    p["run"].write_text(
+        json.dumps({"pid": proc.pid, "started": time.time(), "model": model})
+    )
+    return proc.pid
+
+
 def job_summary(job_dir):
     """One row per job. Never raises: an unreadable job becomes a row with an
     `error` note, because a half-written state.json must not 500 the list."""
@@ -380,6 +587,9 @@ def job_detail(job_dir):
                 duration_ms=result.get("duration_ms"),
                 is_error=result.get("is_error"),
             )
+        # Summary state, not the summary text: the list stays small, and a UI
+        # knows without a probe request which iterations are already paid for.
+        entry["summary"] = summary_status(job_dir, name)["status"]
         gates = read_json(d / "gates.json")
         if isinstance(gates, list):
             entry["gates"] = [
@@ -432,7 +642,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(404, {"error": "unknown route"})
 
     def do_POST(self):
-        if self.path.split("?")[0] != "/mission":
+        path = self.path.split("?")[0]
+        if path.startswith("/jobs/"):
+            return self.post_summarize(path)
+        if path != "/mission":
             return self.send_json(404, {"error": "unknown route"})
         if not self.authorized():
             return
@@ -552,7 +765,57 @@ class Handler(BaseHTTPRequestHandler):
             )
         if len(parts) == 4 and parts[1] == "evidence":
             return self.serve_evidence(job_dir, parts[2], parts[3])
+        if len(parts) == 3 and parts[1] == "summarize":
+            return self.get_summary(job_dir, parts[2])
         self.send_json(404, {"error": "unknown route"})
+
+    def get_summary(self, job_dir, iteration):
+        if not ITER_NAME.match(iteration):
+            return self.send_json(400, {"error": "bad iteration name"})
+        doc = summary_status(job_dir, iteration)
+        if doc["status"] == "done":
+            try:
+                doc["summary"] = summary_paths(job_dir, iteration)["md"].read_text()
+            except OSError:
+                doc = {"status": "error", "error": "summary file unreadable"}
+        self.send_json(
+            200,
+            {"kind": KIND, "type": "summary", "job": job_dir.name,
+             "iter": iteration, **doc},
+        )
+
+    def post_summarize(self, path):
+        parts = [p for p in path.split("/") if p][1:]  # drop "jobs"
+        if len(parts) != 3 or parts[1] != "summarize":
+            return self.send_json(404, {"error": "unknown route"})
+        name, iteration = parts[0], parts[2]
+        if not SAFE_NAME.match(name) or not ITER_NAME.match(iteration):
+            return self.send_json(400, {"error": "bad job or iteration name"})
+        job_dir = JOBS / name
+        if not (job_dir / "evidence" / iteration).is_dir():
+            return self.send_json(
+                404, {"error": f"no such iteration: {name}/{iteration}"}
+            )
+        force = re.search(r"[?&]force=1\b", self.path) is not None
+        state = summary_status(job_dir, iteration)
+        if state["status"] == "done" and not force:
+            return self.get_summary(job_dir, iteration)
+        if state["status"] == "pending":
+            return self.send_json(
+                202, {"kind": KIND, "type": "summary", "job": name,
+                      "iter": iteration, "status": "pending", "started": True},
+            )
+        busy = summary_running()
+        if busy:
+            return self.send_json(
+                409, {"error": "a summarizer is already running", "current": busy}
+            )
+        pid = start_summarizer(job_dir, iteration)
+        self.send_json(
+            202,
+            {"kind": KIND, "type": "summary", "job": name, "iter": iteration,
+             "status": "pending", "started": True, "pid": pid},
+        )
 
     def serve_evidence(self, job_dir, iteration, filename):
         if not ITER_NAME.match(iteration) or not SAFE_NAME.match(filename):

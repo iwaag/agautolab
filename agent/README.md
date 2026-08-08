@@ -20,6 +20,11 @@ Runtime state (local-only, under `../.local/agent/`):
   sessions/session-NNNN.json   # full claude output per session (cost/turns evidence)
 ```
 
+Per-job runtime state lives under `../.local/jobs/<job>/`; the gateway's
+summarizer adds `summaries/iter-NNNN.{md,raw.json,cost.json,prompt.txt,log,
+run.json,exit}` there and writes nowhere else — never `state.json`, evidence,
+`MISSION.md`, `NOTES.md` or the job's `.lock`.
+
 ## Run
 
 ```bash
@@ -51,6 +56,15 @@ in `.local/agent/gateway_token`. Routes (default `:8791`):
 - `GET /jobs/<job>` — the same row plus the `evidence/iter-NNNN/` timeline
   (per-iteration cost, turns, duration, exit code, gate results, file list)
 - `GET /jobs/<job>/evidence/<iter>/<file>` — the raw evidence file
+- `POST /jobs/<job>/summarize/<iter>` `?force=1` — summarize that iteration's
+  evidence **on this node** with a one-shot `claude -p`; returns the cached
+  summary when one exists, otherwise `202 {"status": "pending"}`. Unauthenticated
+  like the reads, though it spends money: one summarizer runs at a time
+  (`409` otherwise) and each iteration is paid for once (the cache is the file).
+- `GET /jobs/<job>/summarize/<iter>` — `{"status": absent|pending|done|error,
+  "summary"?, "summarizer"?}`; `summarizer` carries the summarizer's own cost,
+  turns and duration. `GET /jobs/<job>` reports each iteration's summary status
+  in its timeline.
 - `GET /monitor/` — the human monitoring page (see below)
 - `GET /game/` — static serving of `.local/agent/serve/` (a mission that ships
   a browser game should install its verified build there)
