@@ -8,11 +8,20 @@ Stdlib-only single-file server. Routes:
                   current run (sessions started before it are excluded;
                   "game" says whether the served build is from this run)
   GET  /log       ?tail=N  tail of the current (or last) drive log
+  GET  /jobs      one summary row per .local/jobs/<job>/
+  GET  /jobs/<job>              status document + cost rollup + evidence timeline
+  GET  /jobs/<job>/evidence/<iter>/<file>   raw evidence file passthrough
   GET  /game/...  static files from .local/agent/serve/ (unauthenticated)
   GET  /healthz   liveness probe (unauthenticated)
 
-Every route except /game/ and /healthz requires
-`Authorization: Bearer <token>` matching .local/agent/gateway_token.
+Only POST /mission requires `Authorization: Bearer <token>` matching
+.local/agent/gateway_token. Every GET is unauthenticated: this is an
+experimental node and the read side is deliberately thin-auth until auth is
+designed system-wide.
+
+Monitoring reads never write and never take a job's `.lock`, so they are safe
+against a live iteration; half-written JSON degrades to an `error` field on
+the affected row instead of a 500.
 
 One mission at a time: POST /mission returns 409 while drive.sh is alive.
 State lives under .local/agent/ next to the rest of the agent layer:
@@ -39,6 +48,16 @@ STATE = ROOT / ".local" / "agent"
 GATEWAY = STATE / "gateway"
 SERVE = STATE / "serve"
 TOKEN_FILE = STATE / "gateway_token"
+JOBS = ROOT / ".local" / "jobs"
+MONITOR = Path(__file__).resolve().parent / "monitor"
+
+# Versioned envelope, in the spirit of nctl's `nctl.drift.v1`: scope 3 points
+# agdevworld at this same feed, and the kind is what keeps that cheap.
+KIND = "autolab.monitor.v1"
+
+TERMINAL_STATUSES = {"converged", "stuck", "error"}
+SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+ITER_NAME = re.compile(r"^iter-\d+$")
 
 CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
@@ -96,6 +115,40 @@ def notes_status():
         return f.readline().strip() or "STATUS: (empty notes)"
 
 
+def mission_first_line(path):
+    """First line of substance. Missions are written as markdown and usually
+    open with a `# Mission` heading, which says nothing to a human watching."""
+    try:
+        for line in path.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                return line
+    except OSError:
+        return None
+    return None
+
+
+def devstyle_report():
+    """The 3-line devstyle report every final mission report must answer
+    (`Style chosen / Why / Was it right in hindsight`, see styles/*/STYLE.md).
+    It is an ENT asset, so the monitor surfaces it whenever NOTES.md has it."""
+    try:
+        text = (STATE / "NOTES.md").read_text()
+    except OSError:
+        return None
+    keys = {
+        "style chosen": "style_chosen",
+        "why": "why",
+        "was it right in hindsight": "hindsight",
+    }
+    out = {}
+    for line in text.splitlines():
+        m = re.match(r"^\s*[-*]?\s*([^:]{1,40}):\s*(.*)$", line)
+        if m and m.group(1).strip().lower() in keys:
+            out[keys[m.group(1).strip().lower()]] = m.group(2).strip()
+    return out if "style_chosen" in out else None
+
+
 def session_summaries(since=None):
     # since: epoch seconds; only sessions written at/after it are returned,
     # so /status can report the current run instead of every run ever.
@@ -137,6 +190,160 @@ def game_info(started=None):
     }
 
 
+def sessions_cost():
+    """Cumulative mediator cost over every session on disk, plus the subset
+    belonging to the current run. Cost is the single most decision-relevant
+    number for a human watching this thing, so it is computed unconditionally."""
+    total = 0.0
+    started = (current_run() or {}).get("started")
+    run_total = 0.0
+    for p in (STATE / "sessions").glob("session-*.json"):
+        try:
+            c = json.loads(p.read_text()).get("total_cost_usd")
+        except (OSError, ValueError):
+            continue
+        if not isinstance(c, (int, float)):
+            continue
+        total += c
+        if started is None or p.stat().st_mtime >= started - 1:
+            run_total += c
+    return {
+        "sessions_usd": round(total, 6),
+        "current_run_sessions_usd": round(run_total, 6) if started else None,
+    }
+
+
+def read_json(path):
+    """Parse a JSON file, or return None. Tolerates the half-written file a
+    live iteration leaves behind mid-write."""
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def job_yaml_fields(job_dir):
+    """The few job.yaml fields the monitor shows. Uses PyYAML when the gateway
+    process happens to have it (it runs bare python3, not under uv), and falls
+    back to a tolerant scan of top-level scalars otherwise — a monitor must not
+    hard-depend on a package the server may not have."""
+    path = job_dir / "job.yaml"
+    try:
+        text = path.read_text()
+    except OSError:
+        return {}
+    try:
+        import yaml  # noqa: PLC0415 - optional, resolved per call on purpose
+
+        doc = yaml.safe_load(text) or {}
+        if isinstance(doc, dict):
+            return _job_fields(doc)
+    except Exception:
+        pass
+    out = {}
+    for line in text.splitlines():
+        m = re.match(r"^(adapter|max_iterations|push):\s*(\S+)\s*$", line)
+        if m:
+            out[m.group(1)] = m.group(2).strip("\"'")
+    return _job_fields(out)
+
+
+def _job_fields(doc):
+    """Keep the shown job.yaml fields in their expected types, whichever
+    parser produced them — the page renders `iteration / max` arithmetically."""
+    out = {}
+    if isinstance(doc.get("adapter"), str):
+        out["adapter"] = doc["adapter"]
+    try:
+        out["max_iterations"] = int(doc["max_iterations"])
+    except (KeyError, TypeError, ValueError):
+        pass
+    push = doc.get("push")
+    if push is not None:
+        out["push"] = push if isinstance(push, bool) else str(push).lower() == "true"
+    return out
+
+
+def evidence_iters(job_dir):
+    d = job_dir / "evidence"
+    if not d.is_dir():
+        return []
+    return sorted(p.name for p in d.iterdir() if p.is_dir() and ITER_NAME.match(p.name))
+
+
+def iter_cost(job_dir, name):
+    """Per-iteration cost. adapter_result.json is the adapter's own record;
+    claude_output.json is the raw agent JSON and carries the same number."""
+    for fname in ("adapter_result.json", "claude_output.json"):
+        doc = read_json(job_dir / "evidence" / name / fname)
+        if isinstance(doc, dict) and isinstance(
+            doc.get("total_cost_usd"), (int, float)
+        ):
+            return doc["total_cost_usd"]
+    return None
+
+
+def job_summary(job_dir):
+    """One row per job. Never raises: an unreadable job becomes a row with an
+    `error` note, because a half-written state.json must not 500 the list."""
+    row = {"name": job_dir.name}
+    state = read_json(job_dir / "state.json")
+    if state is None:
+        row["error"] = "state.json missing or unparsable"
+        state = {}
+    row.update(
+        status=state.get("status"),
+        terminal=state.get("status") in TERMINAL_STATUSES,
+        phase=state.get("phase"),
+        awaiting_approval=state.get("status") == "awaiting_approval",
+        iteration=state.get("iteration"),
+        consecutive_no_progress=state.get("consecutive_no_progress"),
+        last_gate_summary=state.get("last_gate_summary"),
+        state_error=state.get("error"),
+    )
+    row.update(job_yaml_fields(job_dir))
+    iters = evidence_iters(job_dir)
+    costs = [c for c in (iter_cost(job_dir, i) for i in iters) if c is not None]
+    row["iterations_on_disk"] = len(iters)
+    row["last_evidence"] = f"evidence/{iters[-1]}" if iters else None
+    row["cost_usd"] = round(sum(costs), 6) if costs else None
+    row["has_notes"] = (job_dir / "NOTES.md").is_file()
+    return row
+
+
+def job_detail(job_dir):
+    doc = job_summary(job_dir)
+    timeline = []
+    for name in evidence_iters(job_dir):
+        d = job_dir / "evidence" / name
+        entry = {
+            "iter": name,
+            "files": sorted(p.name for p in d.iterdir() if p.is_file()),
+            "cost_usd": iter_cost(job_dir, name),
+            "mtime": d.stat().st_mtime,
+        }
+        result = read_json(d / "adapter_result.json")
+        if isinstance(result, dict):
+            entry.update(
+                exit_code=result.get("exit_code"),
+                timed_out=result.get("timed_out"),
+                num_turns=result.get("num_turns"),
+                duration_ms=result.get("duration_ms"),
+                is_error=result.get("is_error"),
+            )
+        gates = read_json(d / "gates.json")
+        if isinstance(gates, list):
+            entry["gates"] = [
+                {"command": g.get("command"), "exit_code": g.get("exit_code"),
+                 "timed_out": g.get("timed_out")}
+                for g in gates
+                if isinstance(g, dict)
+            ]
+        timeline.append(entry)
+    doc["evidence"] = timeline
+    return doc
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "autolab-gateway/1"
 
@@ -165,12 +372,12 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(200, {"ok": True})
         if path == "/game" or path.startswith("/game/"):
             return self.serve_game(path)
-        if not self.authorized():
-            return
         if path == "/status":
             return self.get_status()
         if path == "/log":
             return self.get_log()
+        if path == "/jobs" or path.startswith("/jobs/"):
+            return self.get_jobs(path)
         self.send_json(404, {"error": "unknown route"})
 
     def do_POST(self):
@@ -239,15 +446,17 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(
             200,
             {
-                "mission_first_line": (
-                    mission.read_text().splitlines()[0] if mission.is_file() else None
-                ),
+                "kind": KIND,
+                "type": "status",
+                "cost": sessions_cost(),
+                "mission_first_line": mission_first_line(mission),
                 "driver": {
                     "running": drive_running() is not None,
                     "current": cur,
                     "exit_code": exit_code,
                 },
                 "notes_status": notes_status(),
+                "devstyle": devstyle_report(),
                 "sessions": session_summaries(since=started),
                 "sessions_total_on_disk": sessions_on_disk(),
                 "game": game,
@@ -268,6 +477,51 @@ class Handler(BaseHTTPRequestHandler):
         body = ("\n".join(lines[-tail:]) + "\n").encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def get_jobs(self, path):
+        parts = [p for p in path.split("/") if p][1:]  # drop "jobs"
+        if not parts:
+            jobs = sorted(d for d in JOBS.iterdir() if d.is_dir()) if JOBS.is_dir() else []
+            return self.send_json(
+                200,
+                {"kind": KIND, "type": "jobs", "jobs": [job_summary(d) for d in jobs]},
+            )
+        name = parts[0]
+        if not SAFE_NAME.match(name):
+            return self.send_json(400, {"error": "bad job name"})
+        job_dir = JOBS / name
+        if not job_dir.is_dir():
+            return self.send_json(404, {"error": f"no such job: {name}"})
+        if len(parts) == 1:
+            return self.send_json(
+                200, {"kind": KIND, "type": "job", "job": job_detail(job_dir)}
+            )
+        if len(parts) == 4 and parts[1] == "evidence":
+            return self.serve_evidence(job_dir, parts[2], parts[3])
+        self.send_json(404, {"error": "unknown route"})
+
+    def serve_evidence(self, job_dir, iteration, filename):
+        if not ITER_NAME.match(iteration) or not SAFE_NAME.match(filename):
+            return self.send_json(400, {"error": "bad evidence path"})
+        base = (job_dir / "evidence").resolve()
+        target = (base / iteration / filename).resolve()
+        # Same containment guard serve_game uses: names are already
+        # pattern-checked, this catches anything a symlink could still do.
+        if not str(target).startswith(str(base) + os.sep):
+            return self.send_json(403, {"error": "path escapes evidence dir"})
+        if not target.is_file():
+            return self.send_json(404, {"error": "no such evidence file"})
+        ctype = (
+            "application/json"
+            if target.suffix == ".json"
+            else "text/plain; charset=utf-8"
+        )
+        body = target.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
