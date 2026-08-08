@@ -33,7 +33,8 @@ Exit codes of `run-once` (and of `loop`, for its final iteration):
 | 40 | awaiting approval — a plan + proposed gates are ready for your review |
 
 `status` never takes the job lock and never writes; safe while a loop is live.
-A long-running `loop` is best launched in the background; poll with `status`.
+Run `run-once` and `loop` only in the foreground of the live mediator session;
+either process dies with a headless session when launched in the background.
 
 ## Job directory contract
 
