@@ -51,7 +51,9 @@ goal: |
   The client's request.
 adapter: claude_code          # or "fake" (no-token test adapter)
 adapter_config:
-  command: "claude"           # binary path if not on PATH
+  command: "claude"           # binary path if not on PATH; a glob (e.g. the
+                              # one in .local/agent/claude_bin) resolves to its
+                              # newest match at each launch
   args: ["--model", "claude-sonnet-5", "--allowedTools", "Write,Edit,Read,Bash(node:*)"]
   add_job_dir: true           # grant the job dir via --add-dir (default true)
 gates:                        # omit → the job starts in the plan phase

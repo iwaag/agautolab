@@ -7,7 +7,9 @@ stdout is the output as written. The process's own exit code is the exit code.
 
 adapter_config:
 
-    command: claude binary name or path (default "claude")
+    command: claude binary name, path, or glob (default "claude"). A glob
+        resolves to its newest match at launch, the same way
+        agent/gateway.py and agent/session.sh resolve .local/agent/claude_bin.
     args: extra CLI args, e.g. ["--model", "...", "--allowedTools", "..."]
     add_job_dir: also grant the job directory (NOTES.md, evidence/) via
         --add-dir, default true
@@ -22,6 +24,7 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..binpath import resolve_command
 from . import AdapterError, AdapterResult
 
 OUTPUT_JSON_FILENAME = "claude_output.json"
@@ -50,7 +53,10 @@ class ClaudeCodeAdapter:
         )
 
     def run(self, prompt: str, workdir: Path, timeout: int) -> AdapterResult:
-        argv = [self.command, "-p", "--output-format", "json"]
+        # Resolved per launch, not at config time: the newest match can change
+        # between iterations of a long job.
+        command = resolve_command(self.command)
+        argv = [command, "-p", "--output-format", "json"]
         for directory in self.add_dirs:
             argv += ["--add-dir", directory]
         argv += self.args
@@ -78,9 +84,9 @@ class ClaudeCodeAdapter:
             )
         except OSError as exc:
             return AdapterResult(
-                output=f"failed to launch {self.command!r}: {exc}",
+                output=f"failed to launch {command!r}: {exc}",
                 exit_code=-1,
-                meta={"launch_error": str(exc)},
+                meta={"launch_error": str(exc), "command": command},
             )
 
         stdout = proc.stdout or ""

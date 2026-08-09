@@ -116,6 +116,35 @@ def test_skip_permissions_flag_passthrough(tmp_path):
     assert "--dangerously-skip-permissions" not in result.output
 
 
+def test_glob_command_resolves_to_newest_match(tmp_path):
+    """`.local/agent/claude_bin` holds a glob; a job configured from it must
+    launch. Newest match wins, as in gateway.py and session.sh."""
+    for version, marker in (("2.1.100", "old"), ("2.1.226", "new")):
+        d = tmp_path / f"ext-{version}-darwin-arm64" / "native-binary"
+        d.mkdir(parents=True)
+        write_stub(d / "claude", f"""
+            import json, sys
+            sys.stdin.read()
+            payload = dict({RESULT_JSON!r})
+            payload["result"] = {marker!r}
+            print(json.dumps(payload))
+        """)
+        os.utime(d / "claude", (1, 1_000_000 if marker == "new" else 1))
+
+    pattern = str(tmp_path / "ext-*-darwin-arm64" / "native-binary" / "claude")
+    result = ClaudeCodeAdapter(command=pattern).run("p", tmp_path, timeout=10)
+    assert result.output == "new"
+
+
+def test_plain_and_unmatched_commands_are_used_as_written(tmp_path):
+    """A wrong path still fails loudly with the path in the message."""
+    result = ClaudeCodeAdapter(command=str(tmp_path / "nope-*" / "claude")).run(
+        "p", tmp_path, timeout=5
+    )
+    assert result.exit_code == -1
+    assert "nope-*" in result.output
+
+
 def test_bad_args_config_raises_adapter_error():
     with pytest.raises(AdapterError):
         create("claude_code", {"args": "not-a-list"})
