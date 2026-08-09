@@ -28,8 +28,14 @@ def sandbox(tmp_path, monkeypatch):
     monkeypatch.setattr(gateway, "ROOT", tmp_path)
     monkeypatch.setattr(gateway, "STATE", tmp_path / ".local" / "agent")
     monkeypatch.setattr(gateway, "WINDOW", tmp_path / ".local" / "agent" / "window")
+    monkeypatch.setattr(gateway, "DIRECTOR", tmp_path / ".local" / "agent" / "director")
     monkeypatch.setattr(gateway, "JOBS", tmp_path / ".local" / "jobs")
-    for name in ("AUTOLAB_WINDOW_BACKEND", "AUTOLAB_WINDOW_MODEL"):
+    for name in (
+        "AUTOLAB_WINDOW_BACKEND",
+        "AUTOLAB_WINDOW_MODEL",
+        "AUTOLAB_DIRECTOR_WORKSPACE",
+        "AUTOLAB_DIRECTOR_MODEL",
+    ):
         monkeypatch.delenv(name, raising=False)
     return tmp_path
 
@@ -154,3 +160,74 @@ def test_a_plain_path_is_returned_as_written(sandbox, monkeypatch):
     # diagnosable in one read.
     monkeypatch.setenv("AUTOLAB_CLAUDE_BIN", "/nowhere/claude")
     assert gateway.claude_bin() == "/nowhere/claude"
+
+
+# --- director window ---------------------------------------------------------
+
+def test_director_uses_only_the_required_prompt_prefix(sandbox, monkeypatch):
+    seen = {}
+
+    def capture(prompt):
+        seen["prompt"] = prompt
+        return "raw reply", {"model": "claude-sonnet-5", "cost_usd": 0.1}
+
+    monkeypatch.setattr(gateway, "run_director_claude", capture)
+    record = gateway.answer_director("What is this project?")
+
+    assert seen["prompt"] == (
+        "First, read GUIDE.md. Then, follow this request.:\n"
+        "What is this project?"
+    )
+    assert record["id"] == "director/run-0001"
+    assert record["outcome"] == "done"
+    assert record["reply"] == "raw reply"
+    assert json.loads((gateway.DIRECTOR / "run-0001.json").read_text()) == record
+
+
+def test_director_claude_runs_in_workspace_with_read_only_tools(
+    sandbox, monkeypatch
+):
+    workspace = sandbox / ".local" / "direction" / "scifi-direction"
+    workspace.mkdir(parents=True)
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen["argv"] = argv
+        seen.update(kwargs)
+        return type(
+            "Result",
+            (),
+            {
+                "stdout": json.dumps(
+                    {
+                        "result": " reply with whitespace preserved\n",
+                        "total_cost_usd": 0.12,
+                        "num_turns": 2,
+                        "duration_ms": 900,
+                    }
+                ),
+                "stderr": "",
+                "returncode": 0,
+            },
+        )()
+
+    monkeypatch.setattr(gateway, "claude_bin", lambda: "claude")
+    monkeypatch.setattr(gateway.subprocess, "run", fake_run)
+    reply, meta = gateway.run_director_claude("prompt")
+
+    assert seen["cwd"] == workspace
+    assert seen["input"] == "prompt"
+    assert seen["argv"][-2:] == ["--allowedTools", "Read,Glob,Grep"]
+    assert reply == " reply with whitespace preserved\n"
+    assert meta["cost_usd"] == 0.12
+
+
+def test_director_failure_is_recorded(sandbox, monkeypatch):
+    def fail(prompt):
+        raise gateway.WindowError("director workspace is missing")
+
+    monkeypatch.setattr(gateway, "run_director_claude", fail)
+    record = gateway.answer_director("hello")
+    assert record["outcome"] == "failed"
+    assert record["failure"] == "director workspace is missing"
+    assert "reply" not in record
