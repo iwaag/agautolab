@@ -44,6 +44,9 @@ philosophy as `run-once` one level down.
 submitted and watched without SSH. It refuses to start without a bearer token
 in `.local/agent/gateway_token`. Routes (default `:8791`):
 
+- `POST /window` `{"text": "..."}` — **the conversational window** (see
+  below). Free text in, prose out; it accepts no work.
+- `GET /guide` — `agent/GUIDE.md`, the capability card, as plain text
 - `POST /mission` `{"mission": "...", "max_sessions": 12}` — writes
   `MISSION.md` and launches `drive.sh` detached; `409` while one is running.
   **The only authenticated route.**
@@ -77,6 +80,48 @@ Read routes never write and never take a job's `.lock`, so they are safe to
 poll against a live iteration. Unreadable or half-written files degrade to a
 row carrying an `error` note instead of failing the request. JSON responses
 carry a `"kind": "autolab.monitor.v1"` envelope.
+
+## The conversational window
+
+`POST /window {"text": "..."}` is this node's single desire-accepting
+entrance (devpolicy/policy.md, *Single Entrance*). Everything else above it
+is a deterministic read, not a second place to express a wish.
+
+It answers three kinds of message and nothing else:
+
+- **job/progress/spend questions** — from the same job state `/status` and
+  `/jobs` serve, assembled from the same helpers rather than a second walk
+  of the job dirs;
+- **capability/cost questions** — from `agent/GUIDE.md`, re-read from disk
+  per request (cagent's `llms.txt` pattern), so editing the card needs no
+  restart;
+- **development requests** — refused, with the `POST /mission` + bearer
+  token redirect. The window starts nothing and writes no job state.
+
+Unauthenticated like the reads, and guarded one-answer-at-a-time (`409`
+otherwise). The response *is* the run record: `backend`, `backend_model`,
+`outcome`, `duration_ms`, `cost_usd`/tokens when the backend reports them,
+and on failure the backend's verbatim words with HTTP 502. The same record
+is written to `.local/agent/window/run-NNNN.json`
+(devpolicy/agent_records.md).
+
+### Backend (Agent ≠ Model)
+
+Resolved process env first, then `../.local/.env` — the same order and shape
+as agforge's `AGFORGE_AGENT_BACKEND`:
+
+| variable | default | meaning |
+|---|---|---|
+| `AUTOLAB_WINDOW_BACKEND` | `ollama` | `ollama` \| `claude` |
+| `AUTOLAB_WINDOW_MODEL` | `gemma3:latest` / `claude-sonnet-5` | model for the chosen backend |
+| `AUTOLAB_OLLAMA_URL` | `http://127.0.0.1:11434` | ollama endpoint (a node without a local ollama points this at one) |
+
+The `claude` backend reuses `claude_bin()` (`AUTOLAB_CLAUDE_BIN`, then
+`.local/agent/claude_bin`, then PATH). Measured on agstudio 2026-08-09:
+ollama/gemma3 answers in 1–5 s at no reported price; claude/claude-sonnet-5
+answered the same question in ~10 s for 0.09 USD, and got a multi-job
+question right that gemma3 got wrong — the switch is the point, the local
+default keeps idle chatter free.
 
 ## Monitoring page
 

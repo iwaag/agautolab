@@ -3,6 +3,8 @@
 
 Stdlib-only single-file server. Routes:
 
+  POST /window    {"text": str}  -> the conversational window (see below)
+  GET  /guide     agent/GUIDE.md, the capability card, as plain text
   POST /mission   {"mission": str, "max_sessions": int?}  -> start drive.sh
   GET  /status    mission/driver/NOTES/session summary, scoped to the
                   current run (sessions started before it are excluded;
@@ -16,12 +18,22 @@ Stdlib-only single-file server. Routes:
   GET  /game/...  static files from .local/agent/serve/ (unauthenticated)
   GET  /healthz   liveness probe (unauthenticated)
 
+POST /window is this node's single desire-accepting conversational entrance
+(devpolicy/policy.md, Single Entrance). It answers job/progress questions
+from the same job state the typed GETs expose, answers capability/cost
+questions from agent/GUIDE.md, and — deliberately — accepts no work: a
+development request is answered with the POST /mission redirect and nothing
+else. It never writes job state; its only side effect is its own run record.
+
 Only POST /mission requires `Authorization: Bearer <token>` matching
 .local/agent/gateway_token. Every GET is unauthenticated: this is an
 experimental node and the read side is deliberately thin-auth until auth is
 designed system-wide. POST /jobs/.../summarize/... is unauthenticated too even
 though it spends money: accepted for this phase, bounded by a one-at-a-time
 guard and by the per-iteration cache (one paid call per iteration ever).
+POST /window is unauthenticated on the same reasoning and carries the same
+one-at-a-time guard; its default backend is a local ollama model that costs
+nothing but electricity.
 
 Monitoring reads never write and never take a job's `.lock`, so they are safe
 against a live iteration; half-written JSON degrades to an `error` field on
@@ -35,6 +47,7 @@ State lives under .local/agent/ next to the rest of the agent layer:
   gateway/run-NNNN.log   drive.sh combined output per accepted mission
   gateway/run-NNNN.exit  drive.sh exit code, written when it finishes
   gateway/current        run id + pid + start time of the active (or last) drive
+  window/run-NNNN.json   one record per window answer (devpolicy/agent_records.md)
 """
 
 import json
@@ -43,7 +56,10 @@ import re
 import signal
 import subprocess
 import sys
+import threading
 import time
+import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -54,6 +70,8 @@ SERVE = STATE / "serve"
 TOKEN_FILE = STATE / "gateway_token"
 JOBS = ROOT / ".local" / "jobs"
 MONITOR = Path(__file__).resolve().parent / "monitor"
+GUIDE = Path(__file__).resolve().parent / "GUIDE.md"
+WINDOW = STATE / "window"
 
 # Versioned envelope, in the spirit of nctl's `nctl.drift.v1`: scope 3 points
 # agdevworld at this same feed, and the kind is what keeps that cheap.
@@ -603,6 +621,266 @@ def job_detail(job_dir):
     return doc
 
 
+# --- the conversational window -------------------------------------------
+#
+# One free-text entrance (devpolicy/policy.md, Single Entrance). It is a
+# reader, not a doer: the context it hands the model is the same job state
+# the typed GETs serve, built from the helpers above rather than by
+# re-walking the job dirs, and the only thing it writes is its own run
+# record under .local/agent/window/.
+#
+# Backend selection copies agforge's pattern verbatim in shape
+# (service/agent_run.py: local_env / agent_backend) — process env first,
+# then `.local/.env`, default `ollama` — deliberately duplicated rather
+# than shared, because a shared library between these two workspaces would
+# buy nothing and couple them.
+
+WINDOW_DEFAULT_MODELS = {"ollama": "gemma3:latest", "claude": "claude-sonnet-5"}
+WINDOW_TIMEOUT_SECONDS = 120
+WINDOW_MAX_TEXT = 4000
+
+WINDOW_PROMPT = """You are the conversational window of an autolab node: a
+headless auto-development loop that runs coding-agent iterations against
+jobs. You are the node's only free-text entrance, and you are a reader — you
+cannot start, stop or change anything.
+
+Answer the user's message using only the material below, following these
+rules:
+
+- If they ask about jobs, progress, results or spending, answer from JOB
+  STATE. Be concrete: name jobs, statuses, iteration counts and dollar
+  amounts as they appear there. A `cost_usd` of null means that job's
+  adapter reported no cost, not that it was free to run.
+- If they ask you to build, fix, change or make something, do not accept the
+  work and do not plan it. Reply that this window takes no work, and that
+  the door is `POST /mission` with an `Authorization: Bearer <token>` header.
+- If they ask what you can do, what this is, or what something costs, answer
+  from GUIDE. Tentative figures are fine; say "unknown" where the guide
+  says unknown.
+- If the material does not contain the answer, say you do not know. Never
+  invent a job name, a status or a number. In particular, a job whose
+  status is `converged`, `stuck` or `error` has finished — do not describe
+  it as running.
+- Mention `POST /mission` only when the user actually asked for work to be
+  done. Do not append it to an answer that was a question.
+
+Reply in plain prose, at most six sentences. No markdown headings, no bullet
+lists, no preamble such as "Here is the answer" — the first sentence of your
+reply is the answer itself.
+
+=== GUIDE ===
+{guide}
+
+=== JOB STATE (JSON) ===
+{state}
+
+=== USER MESSAGE ===
+{text}
+"""
+
+
+class WindowError(Exception):
+    """The window's backend could not produce an answer; str() is the record."""
+
+
+def local_env(name):
+    """Resolve a config value: process env first, then `.local/.env`.
+    Same resolution order as agforge's service/agent_run.py."""
+    if os.environ.get(name):
+        return os.environ[name]
+    env_file = ROOT / ".local" / ".env"
+    try:
+        lines = env_file.read_text().splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        line = line.strip()
+        if line.startswith(f"{name}="):
+            value = line.partition("=")[2].strip()
+            if value:
+                return value
+    return None
+
+
+def window_backend():
+    """Which backend answers the window: `ollama` (default) or `claude`."""
+    backend = local_env("AUTOLAB_WINDOW_BACKEND") or "ollama"
+    if backend not in WINDOW_DEFAULT_MODELS:
+        raise WindowError(f"unknown AUTOLAB_WINDOW_BACKEND: {backend!r}")
+    return backend
+
+
+def window_model(backend):
+    return local_env("AUTOLAB_WINDOW_MODEL") or WINDOW_DEFAULT_MODELS[backend]
+
+
+def read_guide():
+    """Re-read per request (cagent's llms.txt pattern): editing the card is a
+    no-restart change, and a missing card must not break the window."""
+    try:
+        return GUIDE.read_text()
+    except OSError:
+        return "(no capability card is installed on this node)"
+
+
+def window_state():
+    """The context blob: the same job/status material the typed GETs expose,
+    assembled from the same helpers — never a second read of the job dirs."""
+    cur = current_run()
+    jobs = sorted(d for d in JOBS.iterdir() if d.is_dir()) if JOBS.is_dir() else []
+    return {
+        "node_time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "mission": {
+            "headline": mission_headline(STATE / "MISSION.md"),
+            "driver_running": drive_running() is not None,
+            "notes_status": notes_status(),
+            "current": cur,
+        },
+        "cost": sessions_cost(),
+        "summarizer_running": summary_running(),
+        "jobs": [job_summary(d) for d in jobs],
+    }
+
+
+def run_ollama(prompt):
+    """A small local model over ollama's /api/chat. Reports tokens, never a
+    price — so the record carries token counts and a null cost."""
+    url = (local_env("AUTOLAB_OLLAMA_URL") or "http://127.0.0.1:11434").rstrip("/")
+    model = window_model("ollama")
+    body = json.dumps(
+        {
+            "model": model,
+            "stream": False,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+    ).encode()
+    req = urllib.request.Request(
+        f"{url}/api/chat", data=body, headers={"Content-Type": "application/json"}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=WINDOW_TIMEOUT_SECONDS) as resp:
+            doc = json.loads(resp.read())
+    except urllib.error.HTTPError as error:
+        raise WindowError(f"ollama at {url} returned HTTP {error.code}")
+    except (urllib.error.URLError, TimeoutError, OSError) as error:
+        raise WindowError(f"ollama at {url} is unreachable: {error}")
+    except ValueError as error:
+        raise WindowError(f"ollama at {url} returned non-JSON: {error}")
+    text = ((doc.get("message") or {}).get("content") or "").strip()
+    if not text:
+        raise WindowError(f"ollama model {model} returned an empty message")
+    meta = {
+        "model": model,
+        "cost_usd": None,  # ollama reports no price; never invent one
+        "prompt_tokens": doc.get("prompt_eval_count"),
+        "output_tokens": doc.get("eval_count"),
+    }
+    return text, meta
+
+
+def run_claude(prompt):
+    """`claude -p` one-shot, same binary resolution as the summarizer. No
+    tool allowlist is passed: the window answers from the prompt alone, and
+    a headless run with no granted tools simply has none to reach for."""
+    model = window_model("claude")
+    argv = [claude_bin(), "-p", "--output-format", "json", "--model", model]
+    try:
+        proc = subprocess.run(
+            argv,
+            input=prompt,
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=WINDOW_TIMEOUT_SECONDS,
+            env={**os.environ, "NO_COLOR": "1"},
+        )
+    except subprocess.TimeoutExpired:
+        raise WindowError(f"claude backend timed out after {WINDOW_TIMEOUT_SECONDS}s")
+    except OSError as error:
+        raise WindowError(f"could not launch claude ({argv[0]}): {error}")
+    try:
+        doc = json.loads(proc.stdout)
+    except ValueError:
+        tail = (proc.stderr or proc.stdout or "").strip()[-400:] or "no output"
+        raise WindowError(f"claude backend exited {proc.returncode}: {tail}")
+    if doc.get("is_error"):
+        raise WindowError(f"claude backend reported an error: {doc.get('subtype')}")
+    text = str(doc.get("result") or "").strip()
+    if not text:
+        raise WindowError("claude backend produced no text")
+    meta = {
+        "model": model,
+        "cost_usd": doc.get("total_cost_usd"),
+        "num_turns": doc.get("num_turns"),
+        "backend_duration_ms": doc.get("duration_ms"),
+    }
+    return tidy_summary(text), meta
+
+
+WINDOW_BACKENDS = {"ollama": run_ollama, "claude": run_claude}
+
+# One answer at a time. The window is unauthenticated and the `claude`
+# backend spends money, so it gets the same shape of guard the summarizer
+# has — here an in-process lock, because a window answer is served inside
+# the request thread rather than by a detached process.
+window_lock = threading.Lock()
+
+
+def next_window_id():
+    WINDOW.mkdir(parents=True, exist_ok=True)
+    n = 1
+    while (WINDOW / f"run-{n:04d}.json").exists():
+        n += 1
+    return n
+
+
+def record_window_run(run_id, record):
+    """devpolicy/agent_records.md: id, backend, outcome, cost/time when the
+    backend reports them, and on failure the failing party's own words."""
+    WINDOW.mkdir(parents=True, exist_ok=True)
+    path = WINDOW / f"run-{run_id:04d}.json"
+    path.write_text(json.dumps(record, indent=2, ensure_ascii=False) + "\n")
+    return path
+
+
+def answer_window(text):
+    """One window run: build context, ask the backend, record, return the
+    record. Backend failures come back as a `failed` record, not an
+    exception — a window that cannot reach its model still has to say so."""
+    run_id = next_window_id()
+    started = time.monotonic()
+    record = {
+        "id": f"window/run-{run_id:04d}",
+        "started": time.time(),
+        "question": text,
+        "backend": None,
+        "outcome": "failed",
+    }
+    try:
+        backend = window_backend()
+        record["backend"] = backend
+        prompt = WINDOW_PROMPT.format(
+            guide=read_guide(),
+            state=json.dumps(window_state(), indent=2, default=str),
+            text=text,
+        )
+        reply, meta = WINDOW_BACKENDS[backend](prompt)
+    except WindowError as error:
+        # The agent never spoke, so the free-text report the record policy
+        # asks for is the backend's own failure text, verbatim.
+        record["failure"] = str(error)
+        record["duration_ms"] = int((time.monotonic() - started) * 1000)
+        record_window_run(run_id, record)
+        return record
+    record.update(meta)
+    record["backend_model"] = f"{record['backend']}/{meta.get('model')}"
+    record["outcome"] = "done"
+    record["duration_ms"] = int((time.monotonic() - started) * 1000)
+    record["reply"] = reply
+    record_window_run(run_id, record)
+    return record
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "autolab-gateway/1"
 
@@ -610,6 +888,14 @@ class Handler(BaseHTTPRequestHandler):
         body = (json.dumps(obj, indent=2) + "\n").encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def send_text(self, code, text):
+        body = text.encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -629,6 +915,8 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?")[0]
         if path == "/healthz":
             return self.send_json(200, {"ok": True})
+        if path == "/guide":
+            return self.send_text(200, read_guide())
         if path == "/game" or path.startswith("/game/"):
             return self.serve_game(path)
         if path == "/monitor" or path.startswith("/monitor/"):
@@ -643,6 +931,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = self.path.split("?")[0]
+        if path == "/window":
+            return self.post_window()
         if path.startswith("/jobs/"):
             return self.post_summarize(path)
         if path != "/mission":
@@ -693,6 +983,32 @@ class Handler(BaseHTTPRequestHandler):
             )
         )
         self.send_json(202, {"accepted": True, "run": run, "pid": proc.pid})
+
+    def post_window(self):
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            req = json.loads(self.rfile.read(length))
+            text = req["text"]
+            assert isinstance(text, str) and text.strip()
+        except Exception:
+            return self.send_json(400, {"error": 'body must be {"text": "..."}'})
+        if len(text) > WINDOW_MAX_TEXT:
+            return self.send_json(
+                400, {"error": f"text longer than {WINDOW_MAX_TEXT} characters"}
+            )
+        if not window_lock.acquire(blocking=False):
+            return self.send_json(
+                409, {"error": "the window is already answering someone"}
+            )
+        try:
+            record = answer_window(text.strip())
+        finally:
+            window_lock.release()
+        # The record is the response: a caller sees which backend answered and
+        # what it cost without a second request, and a failed backend is a
+        # 502 with the backend's own words rather than a silent empty reply.
+        body = {"kind": KIND, "type": "window", **record}
+        self.send_json(200 if record["outcome"] == "done" else 502, body)
 
     def get_status(self):
         cur = current_run()
