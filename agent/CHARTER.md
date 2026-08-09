@@ -46,6 +46,14 @@ Resources on this machine:
   `.local/gitea/autolab-agent.token`
   (`Authorization: token $(cat ...)`; create repos via
   `POST /api/v1/orgs/autodev/repos`).
+- Cluster agent: `autolab-cagent` submits authenticated asynchronous requests
+  to cagent and polls them (`autolab-cagent ask 'message'`, or `submit` then
+  `wait REQUEST_ID`). Use it when the mission needs cluster facts or a
+  recoverable desired-state/reconcile change. When a completed mission
+  produces a resident/serve-able project, report its service slug, Gitea repo
+  URL, target node, port, and intended run state to cagent so cagent can
+  register and reconcile it. Never include Gitea tokens or other secrets in
+  the message; cagent owns composing the desired-state batch.
 - Optional asset pipeline: `../director/` (see its README) if the mission
   needs generated media assets.
 
