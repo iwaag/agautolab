@@ -32,7 +32,7 @@ out="$state/sessions/session-$(printf '%04d' "$n").json"
 # No --dangerously-skip-permissions on agstudio (standing rule): the agent
 # gets an explicit tool allowlist instead. Judgment lives in CHARTER.md.
 allowed="Read,Write,Edit,Glob,Grep,TodoWrite,BashOutput,KillShell"
-for c in git uv curl node python3 npx ls cat head tail wc mkdir cp mv chmod \
+for c in git uv curl node python3 npx autolab-cagent ls cat head tail wc mkdir cp mv chmod \
          find grep sed echo printf test date pwd which sleep kill lsof; do
     allowed+=",Bash($c:*)"
 done
