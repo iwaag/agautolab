@@ -50,8 +50,8 @@ an interactive request/response wait.
 
 - Accept a desire at this window (use `POST /mission`).
 - Hand out raw evidence to callers outside the node — ask for an iteration
-  summary instead (`POST /jobs/<job>/summarize/<iter>`, which spends money
-  and is cached per iteration).
+  summary instead (`POST /jobs/<job>/summarize/<iter>`: **0.11–0.19 USD**
+  and 11–15 s measured, paid once per iteration and cached forever after).
 
 ## The rest of the surface
 
