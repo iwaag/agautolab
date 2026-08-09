@@ -50,6 +50,7 @@ State lives under .local/agent/ next to the rest of the agent layer:
   window/run-NNNN.json   one record per window answer (devpolicy/agent_records.md)
 """
 
+import glob
 import json
 import os
 import re
@@ -451,19 +452,43 @@ def summary_paths(job_dir, iteration):
     }
 
 
+def newest_match(pattern):
+    """Newest existing file matching a glob, or None.
+
+    The pointer file may hold a glob rather than a fixed path. That exists
+    because the usual value is an absolute path into a *version-numbered*
+    editor-extension directory, which goes stale on every update and fails as
+    `No such file or directory` — an infra-looking error with a config cause.
+    It cost a summarizer run once and a window run again before this was
+    written; a glob survives the next update on its own.
+    """
+    matches = [p for p in glob.glob(pattern) if os.path.isfile(p)]
+    if not matches:
+        return None
+    return max(matches, key=lambda p: os.stat(p).st_mtime)
+
+
 def claude_bin():
     """Same resolution order as session.sh: env, then the .local pointer file,
-    then PATH. The gateway may run without the developer's interactive PATH."""
-    env = os.environ.get("AUTOLAB_CLAUDE_BIN")
-    if env:
-        return env
-    try:
-        line = (STATE / "claude_bin").read_text().strip()
-        if line:
-            return line
-    except OSError:
-        pass
+    then PATH. The gateway may run without the developer's interactive PATH.
+    Either of the first two may be a glob (see newest_match)."""
+    for candidate in (os.environ.get("AUTOLAB_CLAUDE_BIN"), read_claude_pointer()):
+        if not candidate:
+            continue
+        if any(ch in candidate for ch in "*?["):
+            resolved = newest_match(candidate)
+            if resolved:
+                return resolved
+            continue
+        return candidate
     return "claude"
+
+
+def read_claude_pointer():
+    try:
+        return (STATE / "claude_bin").read_text().strip()
+    except OSError:
+        return None
 
 
 def summary_status(job_dir, iteration):

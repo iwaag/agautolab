@@ -117,7 +117,19 @@ as agforge's `AGFORGE_AGENT_BACKEND`:
 | `AUTOLAB_OLLAMA_URL` | `http://127.0.0.1:11434` | ollama endpoint (a node without a local ollama points this at one) |
 
 The `claude` backend reuses `claude_bin()` (`AUTOLAB_CLAUDE_BIN`, then
-`.local/agent/claude_bin`, then PATH). Measured on agstudio 2026-08-09:
+`.local/agent/claude_bin`, then PATH). **Either of the first two may be a
+glob**, and should be: the usual value is an absolute path into a
+version-numbered editor-extension directory, which goes stale on every update
+and then fails as `No such file or directory` — an infra-looking error with a
+config cause. Write
+
+```text
+/path/to/extensions/anthropic.claude-code-*-<arch>/resources/native-binary/claude
+```
+
+and the newest match is resolved per call. A plain path is still returned
+as written, so a genuinely wrong one fails loudly with the path in the
+message. Measured on agstudio 2026-08-09:
 ollama/gemma3 answers in 1–5 s at no reported price; claude/claude-sonnet-5
 answered the same question in ~10 s for 0.09 USD, and got a multi-job
 question right that gemma3 got wrong — the switch is the point, the local

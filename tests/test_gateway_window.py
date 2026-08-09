@@ -9,6 +9,7 @@ asks for.
 
 import importlib.util
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -120,3 +121,36 @@ def test_the_prompt_carries_the_guide_and_the_live_job_state(sandbox, monkeypatc
 def test_a_missing_guide_does_not_break_the_window(sandbox, monkeypatch):
     monkeypatch.setattr(gateway, "GUIDE", sandbox / "absent.md")
     assert "no capability card" in gateway.read_guide()
+
+
+# --- claude binary resolution ------------------------------------------------
+#
+# The pointer file usually holds an absolute path into a version-numbered
+# editor-extension directory, which goes stale on every update. A glob keeps
+# working; these pin that behavior and the precedence around it.
+
+def test_a_glob_pointer_resolves_to_the_newest_match(sandbox, monkeypatch):
+    monkeypatch.delenv("AUTOLAB_CLAUDE_BIN", raising=False)
+    gateway.STATE.mkdir(parents=True, exist_ok=True)
+    for version, mtime in (("1.0", 1_000_000), ("2.0", 2_000_000)):
+        d = sandbox / f"ext-{version}" / "bin"
+        d.mkdir(parents=True)
+        (d / "claude").write_text("#!/bin/sh\n")
+        os.utime(d / "claude", (mtime, mtime))
+    (gateway.STATE / "claude_bin").write_text(str(sandbox / "ext-*" / "bin" / "claude"))
+    assert gateway.claude_bin() == str(sandbox / "ext-2.0" / "bin" / "claude")
+
+
+def test_a_glob_that_matches_nothing_falls_through_to_path(sandbox, monkeypatch):
+    monkeypatch.delenv("AUTOLAB_CLAUDE_BIN", raising=False)
+    gateway.STATE.mkdir(parents=True, exist_ok=True)
+    (gateway.STATE / "claude_bin").write_text(str(sandbox / "absent-*" / "claude"))
+    assert gateway.claude_bin() == "claude"
+
+
+def test_a_plain_path_is_returned_as_written(sandbox, monkeypatch):
+    # Not probed for existence: a wrong plain path must fail loudly at launch
+    # with the path in the message, which is what made the stale pointer
+    # diagnosable in one read.
+    monkeypatch.setenv("AUTOLAB_CLAUDE_BIN", "/nowhere/claude")
+    assert gateway.claude_bin() == "/nowhere/claude"
