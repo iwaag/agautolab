@@ -8,7 +8,6 @@ from pathlib import Path
 import yaml
 
 DEFAULT_MAX_ITERATIONS = 30
-DEFAULT_NO_PROGRESS_LIMIT = 3
 DEFAULT_ITERATION_TIMEOUT_SECONDS = 900
 DEFAULT_GATE_TIMEOUT_SECONDS = 300
 
@@ -26,7 +25,6 @@ class Job:
     # approve` into state.json. Non-empty gates skip planning entirely.
     gates: list[str] = field(default_factory=list)
     max_iterations: int = DEFAULT_MAX_ITERATIONS
-    no_progress_limit: int = DEFAULT_NO_PROGRESS_LIMIT
     iteration_timeout_seconds: int = DEFAULT_ITERATION_TIMEOUT_SECONDS
     gate_timeout_seconds: int = DEFAULT_GATE_TIMEOUT_SECONDS
     adapter_config: dict = field(default_factory=dict)
@@ -77,7 +75,6 @@ class Job:
             adapter=adapter.strip(),
             gates=[g.strip() for g in gates],
             max_iterations=_pos_int("max_iterations", DEFAULT_MAX_ITERATIONS),
-            no_progress_limit=_pos_int("no_progress_limit", DEFAULT_NO_PROGRESS_LIMIT),
             iteration_timeout_seconds=_pos_int(
                 "iteration_timeout_seconds", DEFAULT_ITERATION_TIMEOUT_SECONDS
             ),

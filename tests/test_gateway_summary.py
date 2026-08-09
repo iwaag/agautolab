@@ -95,22 +95,9 @@ def fake_claude(tmp_path: Path, body: str) -> Path:
     return fake
 
 
-def test_narration_preamble_is_dropped(tmp_path):
-    # Observed live: the model opens with a line about its own reading before
-    # the summary. The text is shown to the user unabridged, so it is trimmed
-    # here rather than left for a downstream renderer to hide.
-    assert gateway.tidy_summary(
-        "Now I have enough to write the summary.\n\nThe iteration added a test."
-    ) == "The iteration added a test."
-    # A real opening sentence that merely starts with one of those words, and
-    # anything that is not a standalone first line, must survive untouched.
-    keep = "Here the agent rewrote game.js.\nIt then ran the gates."
-    assert gateway.tidy_summary(keep) == keep
-
-
-def test_summarizer_promotes_output_only_on_a_clean_run(tmp_path, monkeypatch):
-    # Drive the real spawn path with a fake `claude` so promotion, tidying and
-    # cost recording are exercised without spending money.
+def test_summarizer_writes_the_summary_as_written(tmp_path, monkeypatch):
+    # Drive the real spawn path with a fake `claude` so the summary and cost
+    # recording are exercised without spending money.
     # A quoted heredoc: the JSON must reach the extractor with its `\n`
     # escapes intact, which `echo` in /bin/sh would expand.
     fake = fake_claude(
@@ -134,7 +121,10 @@ def test_summarizer_promotes_output_only_on_a_clean_run(tmp_path, monkeypatch):
     done = gateway.summary_status(job, "iter-0001")
     assert done["status"] == "done"
     assert done["summarizer"]["cost_usd"] == 0.03
-    assert (job / "summaries" / "iter-0001.md").read_text() == "a fake summary\n"
+    # Including the model's opening line: nothing here edits its words.
+    assert (job / "summaries" / "iter-0001.md").read_text() == (
+        "Now reading.\n\na fake summary\n"
+    )
     # The prompt names exactly one evidence directory — the containment the
     # summarizer is given instead of a sandbox.
     prompt = (job / "summaries" / "iter-0001.prompt.txt").read_text()
@@ -159,9 +149,9 @@ def test_failed_summarizer_leaves_no_cached_summary(tmp_path, monkeypatch):
     assert not (job / "summaries" / "iter-0001.md").exists()
 
 
-def test_exit_zero_with_is_error_does_not_become_a_summary(tmp_path, monkeypatch):
-    # claude exits 0 on a refusal or a max-turns stop; the JSON is where that
-    # shows up, so the shell's exit code alone is not a success signal.
+def test_a_partial_summary_is_still_served(tmp_path, monkeypatch):
+    """claude exits 0 on a refusal or a max-turns stop. Its partial words are
+    what it has to say about the iteration; `?force=1` regenerates."""
     fake = fake_claude(
         tmp_path,
         "echo '{\"is_error\": true, \"subtype\": \"error_max_turns\", "
@@ -178,5 +168,6 @@ def test_exit_zero_with_is_error_does_not_become_a_summary(tmp_path, monkeypatch
         if gateway.summary_status(job, "iter-0001")["status"] != "pending":
             break
         time.sleep(0.1)
-    assert gateway.summary_status(job, "iter-0001")["status"] == "error"
-    assert not (job / "summaries" / "iter-0001.md").exists()
+    done = gateway.summary_status(job, "iter-0001")
+    assert done["status"] == "done"
+    assert (job / "summaries" / "iter-0001.md").read_text() == "partial\n"

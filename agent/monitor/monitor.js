@@ -71,8 +71,8 @@ function renderHeader(st) {
     text(pill, "driver idle");
   }
 
-  text($("status-line"), st.notes_status || "");
-  text($("mission"), st.mission_headline || "(no mission on disk)");
+  text($("status-line"), st.done ? "agent finished" : "");
+  text($("mission"), st.mission || "(no mission on disk)");
 
   const c = st.cost || {};
   // Cumulative mediator cost gets top billing: agentify measured it at 3.7x
@@ -83,19 +83,12 @@ function renderHeader(st) {
   }
   text($("cost"), cost);
 
+  // The agent's own end-of-mission words, and its notes, shown as written.
   const ds = $("devstyle");
-  if (st.devstyle) {
+  const agentText = [st.done, st.notes].filter(Boolean).join("\n\n");
+  if (agentText) {
     ds.classList.remove("hidden");
-    ds.replaceChildren();
-    for (const [label, key] of [
-      ["Style chosen", "style_chosen"],
-      ["Why", "why"],
-      ["Was it right in hindsight", "hindsight"],
-    ]) {
-      const line = el("div");
-      line.append(el("b", null, label + ": "), document.createTextNode(st.devstyle[key] || "—"));
-      ds.append(line);
-    }
+    ds.replaceChildren(el("pre", null, agentText));
   } else {
     ds.classList.add("hidden");
   }

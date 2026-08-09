@@ -45,7 +45,6 @@ STATUS_EXIT_CODES = {
 class State:
     status: str = PENDING
     iteration: int = 0
-    consecutive_no_progress: int = 0
     last_gate_summary: dict | None = None
     error: str | None = None
     # Which phase the next iteration runs in. None = not decided yet (derived
@@ -70,7 +69,6 @@ class State:
         return cls(
             status=status,
             iteration=int(raw.get("iteration", 0)),
-            consecutive_no_progress=int(raw.get("consecutive_no_progress", 0)),
             last_gate_summary=raw.get("last_gate_summary"),
             error=raw.get("error"),
             phase=phase,
@@ -82,7 +80,6 @@ class State:
         data = {
             "status": self.status,
             "iteration": self.iteration,
-            "consecutive_no_progress": self.consecutive_no_progress,
             "last_gate_summary": self.last_gate_summary,
             "error": self.error,
             "phase": self.phase,

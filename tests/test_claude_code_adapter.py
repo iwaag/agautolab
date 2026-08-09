@@ -50,7 +50,9 @@ def test_parses_json_result_and_meta(tmp_path):
     assert json.loads(result.artifacts["claude_output.json"])["session_id"] == "s-123"
 
 
-def test_is_error_json_maps_to_nonzero_exit(tmp_path):
+def test_is_error_is_recorded_not_promoted(tmp_path):
+    """`is_error` in the payload is the agent's own account and is kept as
+    metadata; the process's exit code stays the exit code."""
     payload = dict(RESULT_JSON, is_error=True, result="something failed")
     stub = write_stub(tmp_path / "claude", f"""
         import json, sys
@@ -58,20 +60,29 @@ def test_is_error_json_maps_to_nonzero_exit(tmp_path):
         print(json.dumps({payload!r}))
     """)
     result = ClaudeCodeAdapter(command=str(stub)).run("p", tmp_path, timeout=10)
-    assert result.exit_code == 1
+    assert result.exit_code == 0
     assert result.output == "something failed"
+    assert result.meta["is_error"] is True
 
 
-def test_non_json_output_is_error_with_raw_output(tmp_path):
+def test_prose_output_is_not_a_failed_iteration(tmp_path):
     stub = write_stub(tmp_path / "claude", """
         import sys
         sys.stdin.read()
         print("plain text, not json")
     """)
     result = ClaudeCodeAdapter(command=str(stub)).run("p", tmp_path, timeout=10)
-    assert result.exit_code != 0
+    assert result.exit_code == 0
     assert "plain text" in result.output
-    assert result.meta.get("json_parse_error") is True
+    assert "plain text" in result.artifacts["claude_output.json"]
+
+
+def test_job_dir_is_granted_via_add_dir(tmp_path):
+    adapter = ClaudeCodeAdapter.from_config({}, job_dir=tmp_path / "job")
+    assert adapter.add_dirs == [str(tmp_path / "job")]
+    assert ClaudeCodeAdapter.from_config(
+        {"add_job_dir": False}, job_dir=tmp_path / "job"
+    ).add_dirs == []
 
 
 def test_timeout_returns_exit_minus_one(tmp_path):

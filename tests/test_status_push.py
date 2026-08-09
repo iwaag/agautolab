@@ -9,15 +9,14 @@ from agautolab.run_once import run_once
 from agautolab.state import EXIT_CONTINUE, EXIT_CONVERGED, State
 
 
-def make_job(job_dir: Path, *, gates: list[str], push: bool = False,
-             no_progress_limit: int = 3) -> None:
+def make_job(job_dir: Path, *, gates: list[str], push: bool = False
+) -> None:
     job_dir.mkdir(parents=True, exist_ok=True)
     gate_lines = "\n".join(f'  - "{g}"' for g in gates)
     (job_dir / "job.yaml").write_text(
         "goal: |\n  Toy goal for tests.\n"
         "adapter: fake\n"
         f"gates:\n{gate_lines}\n"
-        f"no_progress_limit: {no_progress_limit}\n"
         + ("push: true\n" if push else ""),
         encoding="utf-8",
     )
@@ -42,7 +41,7 @@ def test_status_text_and_json_after_runs(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "status: running" in out
     assert "iteration: 1" in out
-    assert "gates: 0/1 passing" in out
+    assert "gates: 0/1 exited 0" in out
     assert "failing: test $(wc -l < progress.log) -ge 2" in out
     assert "last_evidence: evidence/iter-0001" in out
 

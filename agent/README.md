@@ -1,157 +1,92 @@
 # autolab agent
 
-The agent layer on top of the `autolab` toolbelt: a mission goes in, the
-agent plans it, seeds jobs, drives coding agents through `autolab`, verifies,
-and declares done. Policy is Tool Arming — the only fixed rules live in
-[CHARTER.md](CHARTER.md); everything else is the agent's judgment.
+The agent layer on top of the `autolab` toolbelt: a mission goes in, the agent
+plans it, seeds jobs, drives coding agents through `autolab`, verifies, and
+declares done. [CHARTER.md](CHARTER.md) is what it is given.
 
-## Layout
+## Files
 
-Tracked (this directory): `CHARTER.md` (the system prompt/contract),
-`session.sh` (one headless session), `drive.sh` (re-invoke until done).
+Tracked here: `CHARTER.md` (the session prompt), `session.sh` (one headless
+session), `drive.sh` (re-invoke until done), `gateway.py` (the HTTP front
+door), `GUIDE.md` (the entrance capability card), `monitor/` (the watch page).
 
-Runtime state (local-only, under `../.local/agent/`):
+Runtime state under `../.local/agent/`:
 
-```
-.local/agent/
-  MISSION.md            # the only external input — write the mission here
-  NOTES.md              # agent-owned continuity; first line STATUS: working|complete|blocked
-  claude_bin            # absolute path to the claude binary (one line)
-  sessions/session-NNNN.json   # full claude output per session (cost/turns evidence)
-```
+- `MISSION.md` — the mission; the only external input.
+- `NOTES.md` — the agent's own continuity, agent-written.
+- `done` — the agent's end-of-mission note. `drive.sh` stops on its existence
+  and never reads it; `POST /mission` clears it.
+- `claude_bin` — absolute path (or glob) to the claude binary.
+- `sessions/session-NNNN.json` — full claude output per session.
+- `gateway/`, `window/`, `director/` — run logs and per-answer records.
 
-Per-job runtime state lives under `../.local/jobs/<job>/`; the gateway's
-summarizer adds `summaries/iter-NNNN.{md,raw.json,cost.json,prompt.txt,log,
-run.json,exit}` there and writes nowhere else — never `state.json`, evidence,
-`MISSION.md`, `NOTES.md` or the job's `.lock`.
+Per-job state lives under `../.local/jobs/<job>/`; the summarizer adds
+`summaries/iter-NNNN.*` there and writes nowhere else.
 
 ## Run
 
 ```bash
 echo "/path/to/claude" > .local/agent/claude_bin   # once
 $EDITOR .local/agent/MISSION.md                    # the mission
-agent/drive.sh [max_sessions]                      # default 12; exits 0 complete, 20 blocked, 10 budget
+agent/drive.sh [max_sessions]                      # default 12; 0 = done file exists, 10 = budget spent
 ```
 
-`AUTOLAB_AGENT_MODEL` overrides the agent model (default `claude-sonnet-5`);
-`AUTOLAB_CLAUDE_BIN` overrides the binary. Sessions are never resumed — each
-one reconstructs context from MISSION + NOTES + `autolab status`, the same
-philosophy as `run-once` one level down.
+`AUTOLAB_AGENT_MODEL` sets the agent model (default `claude-sonnet-5`);
+`AUTOLAB_CLAUDE_BIN` the binary. Sessions are never resumed.
 
-## Remote missions (gateway)
+## Gateway routes (default `:8791`)
 
-`agent/gateway.py` is a stdlib-only HTTP front door so a mission can be
-submitted and watched without SSH. It refuses to start without a bearer token
-in `.local/agent/gateway_token`. Routes (default `:8791`):
+Stdlib-only. Refuses to start without a token in `.local/agent/gateway_token`.
 
-- `POST /window` `{"text": "..."}` — **the conversational window** (see
-  below). Free text in, prose out; it accepts no work.
-- `GET /guide` — `agent/GUIDE.md`, the capability card, as plain text
-- `POST /mission` `{"mission": "...", "max_sessions": 12}` — writes
-  `MISSION.md` and launches `drive.sh` detached; `409` while one is running.
-  **The only authenticated route.**
-- `GET /status` — driver liveness/exit, mission headline, `NOTES.md` STATUS
-  line, the devstyle 3-line report when NOTES carries it, per-session cost
-  summaries, cumulative cost, whether a game build is installed
-- `GET /log?tail=N` — tail of the current drive log
-- `GET /jobs` — one summary row per `.local/jobs/<job>/`: status, iteration,
-  gates, cost rollup, latest evidence dir
-- `GET /jobs/<job>` — the same row plus the `evidence/iter-NNNN/` timeline
-  (per-iteration cost, turns, duration, exit code, gate results, file list)
-- `GET /jobs/<job>/evidence/<iter>/<file>` — the raw evidence file
-- `POST /jobs/<job>/summarize/<iter>` `?force=1` — summarize that iteration's
-  evidence **on this node** with a one-shot `claude -p`; returns the cached
-  summary when one exists, otherwise `202 {"status": "pending"}`. Unauthenticated
-  like the reads, though it spends money: one summarizer runs at a time
-  (`409` otherwise) and each iteration is paid for once (the cache is the file).
-- `GET /jobs/<job>/summarize/<iter>` — `{"status": absent|pending|done|error,
-  "summary"?, "summarizer"?}`; `summarizer` carries the summarizer's own cost,
-  turns and duration. `GET /jobs/<job>` reports each iteration's summary status
-  in its timeline.
-- `GET /monitor/` — the human monitoring page (see below)
-- `GET /game/` — static serving of `.local/agent/serve/` (a mission that ships
-  a browser game should install its verified build there)
-- `GET /healthz` — liveness probe
+- `POST /mission` `{"mission": str, "max_sessions": int?}` — writes MISSION.md
+  and launches `drive.sh` detached; 409 while one runs. **The only
+  authenticated route** (`Authorization: Bearer <token>`).
+- `POST /window` `{"text": str}` — the conversational entrance. One answer at
+  a time (409).
+- `POST /director` `{"text": str}` — a workspace-backed director window,
+  half-implemented. Read-only tools, cwd = the configured direction clone.
+- `GET /guide` — `GUIDE.md` as plain text.
+- `GET /status` — driver liveness/exit, mission text, the agent's `done` note
+  and NOTES.md, per-session and cumulative cost, game-build presence.
+- `GET /log?tail=N` — tail of the current drive log.
+- `GET /jobs` — one row per `.local/jobs/<job>/`.
+- `GET /jobs/<job>` — that row plus the evidence timeline.
+- `GET /jobs/<job>/evidence/<iter>/<file>` — the raw evidence file.
+- `POST /jobs/<job>/summarize/<iter>` `?force=1` — summarize one evidence
+  directory on this node with a one-shot `claude -p`. Unauthenticated but
+  paid: one summarizer at a time, one paid call per iteration ever.
+- `GET /jobs/<job>/summarize/<iter>` — `{status, summary?, summarizer?}`.
+- `GET /monitor/` — the watch page. `GET /game/` — `.local/agent/serve/`.
+  `GET /healthz` — liveness.
 
-Every `GET` is unauthenticated. That is deliberate for this experimental
-node — auth will be designed system-wide in a later phase.
+Every `GET` is unauthenticated on this experimental node; auth is designed
+system-wide later. Reads never write and never take a job's `.lock`. JSON
+carries a `"kind": "autolab.monitor.v1"` envelope.
 
-Read routes never write and never take a job's `.lock`, so they are safe to
-poll against a live iteration. Unreadable or half-written files degrade to a
-row carrying an `error` note instead of failing the request. JSON responses
-carry a `"kind": "autolab.monitor.v1"` envelope.
+## Window and director backends (Agent ≠ Model)
 
-## The conversational window
-
-`POST /window {"text": "..."}` is this node's single desire-accepting
-entrance (devpolicy/policy.md, *Single Entrance*). Everything else above it
-is a deterministic read, not a second place to express a wish.
-
-It answers three kinds of message and nothing else:
-
-- **job/progress/spend questions** — from the same job state `/status` and
-  `/jobs` serve, assembled from the same helpers rather than a second walk
-  of the job dirs;
-- **capability/cost questions** — from `agent/GUIDE.md`, re-read from disk
-  per request (cagent's `llms.txt` pattern), so editing the card needs no
-  restart;
-- **development requests** — refused, with the `POST /mission` + bearer
-  token redirect. The window starts nothing and writes no job state.
-
-Unauthenticated like the reads, and guarded one-answer-at-a-time (`409`
-otherwise). The response *is* the run record: `backend`, `backend_model`,
-`outcome`, `duration_ms`, `cost_usd`/tokens when the backend reports them,
-and on failure the backend's verbatim words with HTTP 502. The same record
-is written to `.local/agent/window/run-NNNN.json`
-(devpolicy/agent_records.md).
-
-### Backend (Agent ≠ Model)
-
-Resolved process env first, then `../.local/.env` — the same order and shape
-as agforge's `AGFORGE_AGENT_BACKEND`:
+Process env first, then `../.local/.env`:
 
 | variable | default | meaning |
 |---|---|---|
 | `AUTOLAB_WINDOW_BACKEND` | `ollama` | `ollama` \| `claude` |
-| `AUTOLAB_WINDOW_MODEL` | `gemma3:latest` / `claude-sonnet-5` | model for the chosen backend |
-| `AUTOLAB_OLLAMA_URL` | `http://127.0.0.1:11434` | ollama endpoint (a node without a local ollama points this at one) |
+| `AUTOLAB_WINDOW_MODEL` | `qwen3.6:35b-a3b-coding-nvfp4` / `claude-sonnet-5` | model |
+| `AUTOLAB_OLLAMA_URL` | `http://127.0.0.1:11434` | ollama endpoint |
+| `AUTOLAB_DIRECTOR_WORKSPACE` | `.local/direction/scifi-direction` | director cwd |
+| `AUTOLAB_DIRECTOR_MODEL` | `claude-sonnet-5` | director model |
 
-The `claude` backend reuses `claude_bin()` (`AUTOLAB_CLAUDE_BIN`, then
-`.local/agent/claude_bin`, then PATH). **Either of the first two may be a
-glob**, and should be: the usual value is an absolute path into a
-version-numbered editor-extension directory, which goes stale on every update
-and then fails as `No such file or directory` — an infra-looking error with a
-config cause. Write
-
-```text
-/path/to/extensions/anthropic.claude-code-*-<arch>/resources/native-binary/claude
-```
-
-and the newest match is resolved per call. A plain path is still returned
-as written, so a genuinely wrong one fails loudly with the path in the
-message. Measured on agstudio 2026-08-09:
-ollama/gemma3 answers in 1–5 s at no reported price; claude/claude-sonnet-5
-answered the same question in ~10 s for 0.09 USD, and got a multi-job
-question right that gemma3 got wrong — the switch is the point, the local
-default keeps idle chatter free.
+`AUTOLAB_CLAUDE_BIN` and `.local/agent/claude_bin` may be globs, and should
+be: the usual value points into a version-numbered editor-extension directory
+that goes stale on every update. Write
+`/path/to/anthropic.claude-code-*-<arch>/resources/native-binary/claude` and
+the newest match resolves per call.
 
 ## Monitoring page
 
-`http://<host>:8791/monitor/` — one page showing what the autolab is doing,
-no SSH. Vanilla JS in `agent/monitor/`, no build step and no dependency; it
-polls the routes above every 3 s.
+`http://<host>:8791/monitor/` — vanilla JS in `monitor/`, no build step,
+polls every 3 s. Mission, driver state, cumulative cost, the agent's own
+notes, the jobs table, an evidence browser linking every raw artefact, the
+session table, and the drive log tail. `#job=<name>` survives a reload.
 
-Mission headline, driver state, `STATUS:` line and cumulative cost in the
-header; then the jobs table (status, `iteration / max`, gates `n/m` with the
-failing gate commands spelled out, cost, latest evidence), an evidence
-browser that links every raw artefact (`prompt.txt`, `diff.patch`,
-`gates.json`, `claude_output.json`, …), the per-session table, and the drive
-log tail. Clicking a job expands it and puts it in the URL
-(`/monitor/#job=<name>`), so the link survives a reload.
-
-Polling is sufficient by design: session JSON is written once at session end
-and `state.json` / `evidence/iter-NNNN/` once per iteration. The drive log is
-the only append-only stream, and the page tails it.
-
-Deployment to a job-runner node (checkout update, token, systemd user unit)
-is owned by the `autolab_node` role in clusterintent's `ansible_agdev`.
+Deployment to a job-runner node is owned by the `autolab_node` role in
+clusterintent's `ansible_agdev`.

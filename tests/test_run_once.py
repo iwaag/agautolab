@@ -25,7 +25,7 @@ from agautolab.state import (
 
 def make_job(job_dir: Path, *, gates: list[str] | None = None,
              adapter_config: dict | None = None,
-             max_iterations: int = 30, no_progress_limit: int = 3) -> None:
+             max_iterations: int = 30) -> None:
     """gates=None writes a job.yaml without gates: the job starts in the
     plan phase."""
     job_dir.mkdir(parents=True, exist_ok=True)
@@ -33,7 +33,6 @@ def make_job(job_dir: Path, *, gates: list[str] | None = None,
         "goal": "Toy goal for tests.",
         "adapter": "fake",
         "max_iterations": max_iterations,
-        "no_progress_limit": no_progress_limit,
     }
     if gates is not None:
         doc["gates"] = gates
@@ -69,11 +68,9 @@ def test_converges_after_three_iterations(tmp_path):
             assert (ev / name).is_file(), f"missing {name} in iter-{i:04d}"
         assert (ev / "diff.patch").read_text()  # fake adapter always changes target
 
-    # NOTES.md handoff regenerated, and fed into iteration >= 2 prompts.
-    assert (job_dir / "NOTES.md").is_file()
-    prompt2 = (job_dir / "evidence" / "iter-0002" / "prompt.txt").read_text()
-    assert "Handoff notes from the previous iteration" in prompt2
-    assert "handoff after iteration 1" in prompt2
+    # Nothing here writes NOTES.md: it is the coding agent's document, and
+    # the fake adapter does not write one.
+    assert not (job_dir / "NOTES.md").exists()
 
     # target/ is a git repo with one commit per iteration + the initial commit.
     log = subprocess.run(
@@ -108,23 +105,22 @@ def test_lock_held_exits_zero_silently(tmp_path, capsys):
     assert not (job_dir / "state.json").exists()  # no iteration ran
 
 
-def test_stuck_on_no_progress(tmp_path):
+def test_no_progress_is_not_a_verdict(tmp_path):
+    """An iteration that changes nothing and fails the same gate keeps
+    running: whether that is progress is the agent's judgment, not the
+    machine's. Only the iteration budget stops it."""
     job_dir = tmp_path / "job"
-    # progress.log is gitignored, so the fake adapter's writes never show in
-    # the diff, and the gate keeps failing with the same set -> no progress.
-    make_job(job_dir, gates=["false"], no_progress_limit=2)
+    make_job(job_dir, gates=["false"], max_iterations=4)
     target = job_dir / "target"
     target.mkdir(parents=True)
     (target / ".gitignore").write_text("progress.log\n", encoding="utf-8")
 
-    assert run_once(job_dir) == EXIT_CONTINUE  # iter 1 commits .gitignore -> progress
-    assert run_once(job_dir) == EXIT_CONTINUE  # no-progress 1/2
-    assert run_once(job_dir) == EXIT_STUCK     # no-progress 2/2 -> stuck
-
+    assert run_once(job_dir) == EXIT_CONTINUE
+    assert run_once(job_dir) == EXIT_CONTINUE
+    assert run_once(job_dir) == EXIT_CONTINUE
+    assert run_once(job_dir) == EXIT_STUCK
     state = read_state(job_dir)
-    assert state["status"] == "stuck"
-    assert state["consecutive_no_progress"] == 2
-    assert "no progress" in state["error"]
+    assert "max_iterations" in state["error"]
 
 
 def test_stuck_on_max_iterations(tmp_path):
@@ -174,11 +170,23 @@ def test_missing_job_dir_errors(tmp_path):
     assert run_once(tmp_path / "does-not-exist") == EXIT_ERROR
 
 
-def test_gate_failure_output_lands_in_notes(tmp_path):
+def test_gate_failure_output_lands_in_evidence(tmp_path):
     job_dir = tmp_path / "job"
-    make_job(job_dir, gates=["echo boom-details >&2; false"], no_progress_limit=5)
+    make_job(job_dir, gates=["echo boom-details >&2; false"])
     assert run_once(job_dir) == EXIT_CONTINUE
-    notes = (job_dir / "NOTES.md").read_text()
-    assert "boom-details" in notes
-    prompt2_gates = read_state(job_dir)["last_gate_summary"]["failing"]
-    assert prompt2_gates == ["echo boom-details >&2; false"]
+    gates = json.loads((job_dir / "evidence" / "iter-0001" / "gates.json").read_text())
+    assert "boom-details" in gates[0]["output_tail"]
+    assert read_state(job_dir)["last_gate_summary"]["failing"] == [
+        "echo boom-details >&2; false"
+    ]
+
+
+def test_agent_written_notes_are_carried_forward(tmp_path):
+    """The handoff is whatever the agent left, passed on as written."""
+    job_dir = tmp_path / "job"
+    make_job(job_dir, gates=["test $(wc -l < progress.log) -ge 2"])
+    assert run_once(job_dir) == EXIT_CONTINUE
+    (job_dir / "NOTES.md").write_text("appended once; gate wants two lines\n")
+    assert run_once(job_dir) == EXIT_CONVERGED
+    prompt2 = (job_dir / "evidence" / "iter-0002" / "prompt.txt").read_text()
+    assert "appended once; gate wants two lines" in prompt2

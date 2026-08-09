@@ -7,7 +7,7 @@ Stdlib-only single-file server. Routes:
   POST /director  {"text": str}  -> the director's workspace-backed window
   GET  /guide     agent/GUIDE.md, the capability card, as plain text
   POST /mission   {"mission": str, "max_sessions": int?}  -> start drive.sh
-  GET  /status    mission/driver/NOTES/session summary, scoped to the
+  GET  /status    mission/driver/done/session summary, scoped to the
                   current run (sessions started before it are excluded;
                   "game" says whether the served build is from this run)
   GET  /log       ?tail=N  tail of the current (or last) drive log
@@ -20,11 +20,10 @@ Stdlib-only single-file server. Routes:
   GET  /healthz   liveness probe (unauthenticated)
 
 POST /window is this node's single desire-accepting conversational entrance
-(devpolicy/policy.md, Single Entrance). It answers job/progress questions
-from the same job state the typed GETs expose, answers capability/cost
-questions from agent/GUIDE.md, and — deliberately — accepts no work: a
-development request is answered with the POST /mission redirect and nothing
-else. It never writes job state; its only side effect is its own run record.
+(devpolicy/policy.md, Single Entrance). It is handed the same job state the
+typed GETs expose plus agent/GUIDE.md, and answers from them. Starting work
+needs POST /mission and a token; the window has no route to it, which is a
+property of the token, not an instruction in its prompt.
 
 Only POST /mission requires `Authorization: Bearer <token>` matching
 .local/agent/gateway_token. Every GET is unauthenticated: this is an
@@ -53,6 +52,9 @@ State lives under .local/agent/ next to the rest of the agent layer:
   gateway/run-NNNN.log   drive.sh combined output per accepted mission
   gateway/run-NNNN.exit  drive.sh exit code, written when it finishes
   gateway/current        run id + pid + start time of the active (or last) drive
+  done                   written by the agent when it considers the mission
+                         over; drive.sh stops on its existence and never reads
+                         it, /status carries its content verbatim
   window/run-NNNN.json   one record per window answer (devpolicy/agent_records.md)
   director/run-NNNN.json one record per director answer
 """
@@ -139,89 +141,32 @@ def drive_running():
     return cur if pid_alive(cur.get("pid")) else None
 
 
-def notes_are_stale():
-    """NOTES.md older than MISSION.md is the previous mission's, not this one's."""
-    notes = STATE / "NOTES.md"
-    mission = STATE / "MISSION.md"
-    return (
-        notes.is_file()
-        and mission.is_file()
-        and mission.stat().st_mtime > notes.stat().st_mtime
-    )
+def agent_done():
+    """The agent's own end-of-mission note, or None while it is still working.
 
-
-def notes_status():
-    notes = STATE / "NOTES.md"
-    if not notes.is_file():
-        return "STATUS: (no notes)"
-    if notes_are_stale():
-        return "STATUS: (stale notes, predates mission)"
-    with notes.open() as f:
-        return f.readline().strip() or "STATUS: (empty notes)"
-
-
-def mission_headline(path):
-    """The mission's first paragraph of substance, on one line.
-
-    Missions are markdown: they open with a `# Mission` heading that tells a
-    human nothing, and their prose is hard-wrapped, so the literal first line
-    stops mid-sentence. Skip headings, then join until the blank line.
+    Existence is what drive.sh stops on; the content is the agent's words and
+    is carried as written. POST /mission clears a previous mission's file.
     """
     try:
-        lines = path.read_text().splitlines()
+        return (STATE / "done").read_text()
     except OSError:
         return None
-    para = []
-    for line in lines:
-        line = line.strip()
-        if not line or line.startswith("#"):
-            if para:
-                break
-            continue
-        para.append(line)
-    return " ".join(para) or None
 
 
-def devstyle_report():
-    """The 3-line devstyle report every final mission report must answer
-    (`Style chosen / Why / Was it right in hindsight`, see styles/*/STYLE.md).
-    It is an ENT asset, so the monitor surfaces it whenever NOTES.md has it —
-    except when NOTES.md predates the mission, where the report on disk is the
-    previous mission's and showing it under this one's headline would lie."""
-    if notes_are_stale():
-        return None
+def agent_notes():
+    """The agent's NOTES.md, whole. It writes it; nothing here parses it."""
     try:
-        text = (STATE / "NOTES.md").read_text()
+        return (STATE / "NOTES.md").read_text()
     except OSError:
         return None
-    keys = {
-        "style chosen": "style_chosen",
-        "why": "why",
-        "was it right in hindsight": "hindsight",
-    }
-    label = re.compile(r"^\s*[-*]?\s*([^:]{1,40}):\s*(.*)$")
-    out = {}
-    lines = text.splitlines()
-    for i, line in enumerate(lines):
-        m = label.match(line)
-        if not m or m.group(1).strip().lower() not in keys:
-            continue
-        # The answers are prose in a hard-wrapped file, so a one-line read
-        # truncates them mid-sentence. Absorb the continuation lines: anything
-        # up to the next blank line, bullet, heading or `Key:` line.
-        parts = [m.group(2).strip()]
-        for nxt in lines[i + 1:]:
-            stripped = nxt.strip()
-            nm = label.match(nxt)
-            if (
-                not stripped
-                or stripped[0] in "-*#"
-                or (nm and nm.group(1).strip().lower() in keys)
-            ):
-                break
-            parts.append(stripped)
-        out[keys[m.group(1).strip().lower()]] = " ".join(p for p in parts if p)
-    return out if "style_chosen" in out else None
+
+
+def mission_text(path):
+    """The mission as written."""
+    try:
+        return path.read_text()
+    except OSError:
+        return None
 
 
 def session_summaries(since=None):
@@ -375,66 +320,31 @@ def iter_cost(job_dir, name):
 
 SUMMARY_ALLOWED_TOOLS = "Read,Glob,Grep"
 
-SUMMARY_PROMPT = """You are a one-shot summarizer for an autolab job iteration.
+SUMMARY_PROMPT = """`{rel}` holds the evidence of one autolab coding-agent
+iteration: `prompt.txt` (what the agent was asked), `diff.patch` (what it
+changed), `gates.json` (the verification commands and their exit codes),
+`adapter_result.json` (turns, duration, exit code, cost in USD),
+`error.txt` when the iteration failed, and whatever else is there.
 
-Read only the files in the directory `{rel}` (relative to the current working
-directory). Do not read, write or modify anything else, and do not run
-commands. That directory holds the evidence of one coding-agent iteration:
-
-- `prompt.txt`      what the coding agent was asked to do
-- `diff.patch`      what it actually changed
-- `gates.json`      the verification commands and their exit codes
-- `adapter_result.json` turns, duration, exit code, cost in USD
-- `error.txt`       present only when the iteration failed
-- other files may be present; read what helps.
-
-Write 5 to 10 sentences of plain prose for a human who is watching this job
-and has not seen the files. Cover: what the iteration was asked to do, what
-changed, which gates ran and which failed, whether it errored, and what it
-cost in turns/time/dollars. Be concrete (name files, gate commands and
-numbers) but do not dump file contents, diffs or JSON. No headings, no bullet
-lists, no preamble such as "Here is the summary" — output the prose only.
-Do not narrate your reading process: your final message must begin with the
-first sentence of the summary itself.
+Summarize that iteration for someone watching this job who has not seen the
+files. Your reply is shown to them as written.
 """
 
-# The model still opens with a line of narration often enough to matter, and
-# the summary is shown to the user unabridged, so drop a leading one-line
-# paragraph that is clearly throat-clearing rather than content.
-NARRATION = re.compile(
-    r"^(now|ok|okay|alright|right|good|let me|i(?:'ve| have)? |here(?:'s| is)|"
-    r"based on|i'll|i will)",
-    re.IGNORECASE,
-)
-
-
-def tidy_summary(text):
-    text = text.strip()
-    head, sep, rest = text.partition("\n\n")
-    if sep and "\n" not in head and len(head) < 200 and NARRATION.match(head):
-        return rest.strip()
-    return text
-
-
 # Promotion runs in a separate interpreter so the wrapper stays a one-liner:
-# claude's JSON goes in, prose comes out only when the run really succeeded,
-# and the summarizer's own cost is recorded — an unauthenticated route that
-# spends money should at least say how much.
+# claude's stdout goes in, the summary comes out as written, and the
+# summarizer's own cost is recorded — an unauthenticated route that spends
+# money should at least say how much. Non-JSON stdout is carried through as
+# the summary rather than discarded; `?force=1` regenerates anything unwanted.
 EXTRACT_PY = r"""
 import json, pathlib, sys
-raw, md, cost, tidy = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
-sys.path.insert(0, tidy)
-from gateway import tidy_summary
+raw, md, cost = sys.argv[1], sys.argv[2], sys.argv[3]
+stdout = pathlib.Path(raw).read_text()
 try:
-    doc = json.loads(pathlib.Path(raw).read_text())
-except Exception as exc:
-    sys.exit(f"summarizer output was not JSON: {exc}")
-if doc.get("is_error"):
-    sys.exit(f"summarizer reported an error: {doc.get('subtype')}")
-text = tidy_summary(str(doc.get("result") or ""))
-if not text:
-    sys.exit("summarizer produced no text")
-pathlib.Path(md).write_text(text + "\n")
+    doc = json.loads(stdout)
+except Exception:
+    doc = {}
+text = str(doc.get("result") or stdout)
+pathlib.Path(md).write_text(text.strip() + "\n")
 pathlib.Path(cost).write_text(json.dumps({
     "cost_usd": doc.get("total_cost_usd"),
     "num_turns": doc.get("num_turns"),
@@ -556,15 +466,13 @@ def start_summarizer(job_dir, iteration):
     for stale in ("md", "raw", "cost", "exit"):
         p[stale].unlink(missing_ok=True)
     model = os.environ.get("AUTOLAB_SUMMARY_MODEL", "claude-sonnet-5")
-    # claude's JSON lands in .raw.json; the extractor promotes it to .md only
-    # on a clean, non-empty, non-error run, so a failed summarizer can never
-    # be served as a cached summary.
-    agent_dir = Path(__file__).resolve().parent
+    # claude's stdout lands in .raw.json; the extractor writes the summary and
+    # the cost record beside it when the run exits 0.
     cmd = (
         f'"$BIN" -p --output-format json --model "$MODEL" '
         f'--allowedTools "$TOOLS" <"{p["prompt"]}" >"{p["raw"]}"; rc=$?; '
         f'if [ $rc -eq 0 ]; then python3 -c "$EXTRACT" "{p["raw"]}" "{p["md"]}" '
-        f'"{p["cost"]}" "{agent_dir}" || rc=$?; fi; echo $rc > "{p["exit"]}"'
+        f'"{p["cost"]}" || rc=$?; fi; echo $rc > "{p["exit"]}"'
     )
     log = open(p["log"], "w")
     proc = subprocess.Popen(
@@ -604,7 +512,6 @@ def job_summary(job_dir):
         phase=state.get("phase"),
         awaiting_approval=state.get("status") == "awaiting_approval",
         iteration=state.get("iteration"),
-        consecutive_no_progress=state.get("consecutive_no_progress"),
         last_gate_summary=state.get("last_gate_summary"),
         state_error=state.get("error"),
     )
@@ -668,38 +575,19 @@ def job_detail(job_dir):
 # than shared, because a shared library between these two workspaces would
 # buy nothing and couple them.
 
-WINDOW_DEFAULT_MODELS = {"ollama": "gemma3:latest", "claude": "claude-sonnet-5"}
+WINDOW_DEFAULT_MODELS = {
+    "ollama": "qwen3.6:35b-a3b-coding-nvfp4",
+    "claude": "claude-sonnet-5",
+}
 WINDOW_TIMEOUT_SECONDS = 120
-WINDOW_MAX_TEXT = 4000
 
 WINDOW_PROMPT = """You are the conversational window of an autolab node: a
-headless auto-development loop that runs coding-agent iterations against
-jobs. You are the node's only free-text entrance, and you are a reader — you
-cannot start, stop or change anything.
+headless auto-development loop that runs coding-agent iterations against jobs,
+leaving evidence (prompt, diff, gate results, cost) on disk per iteration.
 
-Answer the user's message using only the material below, following these
-rules:
-
-- If they ask about jobs, progress, results or spending, answer from JOB
-  STATE. Be concrete: name jobs, statuses, iteration counts and dollar
-  amounts as they appear there. A `cost_usd` of null means that job's
-  adapter reported no cost, not that it was free to run.
-- If they ask you to build, fix, change or make something, do not accept the
-  work and do not plan it. Reply that this window takes no work, and that
-  the door is `POST /mission` with an `Authorization: Bearer <token>` header.
-- If they ask what you can do, what this is, or what something costs, answer
-  from GUIDE. Tentative figures are fine; say "unknown" where the guide
-  says unknown.
-- If the material does not contain the answer, say you do not know. Never
-  invent a job name, a status or a number. In particular, a job whose
-  status is `converged`, `stuck` or `error` has finished — do not describe
-  it as running.
-- Mention `POST /mission` only when the user actually asked for work to be
-  done. Do not append it to an answer that was a question.
-
-Reply in plain prose, at most six sentences. No markdown headings, no bullet
-lists, no preamble such as "Here is the answer" — the first sentence of your
-reply is the answer itself.
+Missions are started by `POST /mission` with an `Authorization: Bearer <token>`
+header; you hold no token. GUIDE is this node's capability card and JOB STATE
+is its live job state, both below. Your reply is shown to the user as written.
 
 === GUIDE ===
 {guide}
@@ -764,9 +652,9 @@ def window_state():
     return {
         "node_time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "mission": {
-            "headline": mission_headline(STATE / "MISSION.md"),
+            "text": mission_text(STATE / "MISSION.md"),
             "driver_running": drive_running() is not None,
-            "notes_status": notes_status(),
+            "done": agent_done(),
             "current": cur,
         },
         "cost": sessions_cost(),
@@ -811,12 +699,18 @@ def run_ollama(prompt):
     return text, meta
 
 
+WINDOW_ALLOWED_TOOLS = "Read,Glob,Grep"
+
+
 def run_claude(prompt):
-    """`claude -p` one-shot, same binary resolution as the summarizer. No
-    tool allowlist is passed: the window answers from the prompt alone, and
-    a headless run with no granted tools simply has none to reach for."""
+    """`claude -p` one-shot, same binary resolution as the summarizer, with
+    read-only tools in the autolab checkout so the window can look things up
+    for itself rather than only reading the context it was handed."""
     model = window_model("claude")
-    argv = [claude_bin(), "-p", "--output-format", "json", "--model", model]
+    argv = [
+        claude_bin(), "-p", "--output-format", "json", "--model", model,
+        "--allowedTools", WINDOW_ALLOWED_TOOLS,
+    ]
     try:
         proc = subprocess.run(
             argv,
@@ -831,23 +725,25 @@ def run_claude(prompt):
         raise WindowError(f"claude backend timed out after {WINDOW_TIMEOUT_SECONDS}s")
     except OSError as error:
         raise WindowError(f"could not launch claude ({argv[0]}): {error}")
+    # Whatever the backend said is the answer: JSON `result` when stdout
+    # parses, the raw stdout when it does not. Only silence is an error,
+    # because there is then nothing to carry.
     try:
         doc = json.loads(proc.stdout)
     except ValueError:
-        tail = (proc.stderr or proc.stdout or "").strip()[-400:] or "no output"
-        raise WindowError(f"claude backend exited {proc.returncode}: {tail}")
-    if doc.get("is_error"):
-        raise WindowError(f"claude backend reported an error: {doc.get('subtype')}")
-    text = str(doc.get("result") or "").strip()
+        doc = {}
+    text = str(doc.get("result") or proc.stdout or "").strip()
     if not text:
-        raise WindowError("claude backend produced no text")
+        tail = (proc.stderr or "").strip()[-400:] or "no output"
+        raise WindowError(f"claude backend exited {proc.returncode}: {tail}")
     meta = {
         "model": model,
         "cost_usd": doc.get("total_cost_usd"),
         "num_turns": doc.get("num_turns"),
         "backend_duration_ms": doc.get("duration_ms"),
+        "is_error": doc.get("is_error"),
     }
-    return tidy_summary(text), meta
+    return text, meta
 
 
 WINDOW_BACKENDS = {"ollama": run_ollama, "claude": run_claude}
@@ -861,7 +757,12 @@ window_lock = threading.Lock()
 
 # --- the director window -------------------------------------------------
 
-DIRECTOR_PROMPT_PREFIX = "First, read GUIDE.md. Then, follow this request.:\n"
+DIRECTOR_PROMPT = """You are the director window of this workspace. `GUIDE.md`
+at the workspace root describes what is here.
+
+=== MESSAGE ===
+{text}
+"""
 DIRECTOR_ALLOWED_TOOLS = "Read,Glob,Grep"
 
 
@@ -918,18 +819,17 @@ def run_director_claude(prompt):
     try:
         doc = json.loads(proc.stdout)
     except ValueError:
-        tail = (proc.stderr or proc.stdout or "").strip()[-400:] or "no output"
-        raise WindowError(f"claude backend exited {proc.returncode}: {tail}")
-    if doc.get("is_error"):
-        raise WindowError(f"claude backend reported an error: {doc.get('subtype')}")
-    reply = str(doc.get("result") or "")
+        doc = {}
+    reply = str(doc.get("result") or proc.stdout or "")
     if not reply.strip():
-        raise WindowError("claude backend produced no text")
+        tail = (proc.stderr or "").strip()[-400:] or "no output"
+        raise WindowError(f"claude backend exited {proc.returncode}: {tail}")
     return reply, {
         "model": model,
         "cost_usd": doc.get("total_cost_usd"),
         "num_turns": doc.get("num_turns"),
         "backend_duration_ms": doc.get("duration_ms"),
+        "is_error": doc.get("is_error"),
     }
 
 
@@ -963,7 +863,7 @@ def answer_director(text):
         "outcome": "failed",
     }
     try:
-        reply, meta = run_director_claude(DIRECTOR_PROMPT_PREFIX + text)
+        reply, meta = run_director_claude(DIRECTOR_PROMPT.format(text=text))
     except WindowError as error:
         record["failure"] = str(error)
         record["duration_ms"] = int((time.monotonic() - started) * 1000)
@@ -1114,6 +1014,8 @@ class Handler(BaseHTTPRequestHandler):
         while (GATEWAY / f"run-{run:04d}.log").exists():
             run += 1
         (STATE / "MISSION.md").write_text(mission)
+        # A previous mission's end-of-mission note must not stop this one.
+        (STATE / "done").unlink(missing_ok=True)
         log = open(GATEWAY / f"run-{run:04d}.log", "w")
         exit_file = GATEWAY / f"run-{run:04d}.exit"
         cmd = f'agent/drive.sh {max_sessions}; echo $? > "{exit_file}"'
@@ -1146,10 +1048,6 @@ class Handler(BaseHTTPRequestHandler):
             assert isinstance(text, str) and text.strip()
         except Exception:
             return self.send_json(400, {"error": 'body must be {"text": "..."}'})
-        if len(text) > WINDOW_MAX_TEXT:
-            return self.send_json(
-                400, {"error": f"text longer than {WINDOW_MAX_TEXT} characters"}
-            )
         if not window_lock.acquire(blocking=False):
             return self.send_json(
                 409, {"error": "the window is already answering someone"}
@@ -1172,10 +1070,6 @@ class Handler(BaseHTTPRequestHandler):
             assert isinstance(text, str) and text.strip()
         except Exception:
             return self.send_json(400, {"error": 'body must be {"text": "..."}'})
-        if len(text) > WINDOW_MAX_TEXT:
-            return self.send_json(
-                400, {"error": f"text longer than {WINDOW_MAX_TEXT} characters"}
-            )
         if not director_lock.acquire(blocking=False):
             return self.send_json(
                 409, {"error": "the director is already answering someone"}
@@ -1206,14 +1100,14 @@ class Handler(BaseHTTPRequestHandler):
                 "kind": KIND,
                 "type": "status",
                 "cost": sessions_cost(),
-                "mission_headline": mission_headline(mission),
+                "mission": mission_text(mission),
                 "driver": {
                     "running": drive_running() is not None,
                     "current": cur,
                     "exit_code": exit_code,
                 },
-                "notes_status": notes_status(),
-                "devstyle": devstyle_report(),
+                "done": agent_done(),
+                "notes": agent_notes(),
                 "sessions": session_summaries(since=started),
                 "sessions_total_on_disk": sessions_on_disk(),
                 "game": game,

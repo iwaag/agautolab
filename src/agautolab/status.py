@@ -12,7 +12,12 @@ import sys
 from pathlib import Path
 
 from .job import Job, JobError
-from .run_once import PLAN_FILE, load_proposed_gates
+from .run_once import (
+    NOTES_FILE,
+    PLAN_FILE,
+    PROPOSED_GATES_FILE,
+    load_proposed_gates,
+)
 from .state import AWAITING_APPROVAL, State, TERMINAL_STATUSES
 
 
@@ -36,11 +41,10 @@ def collect_status(job_dir: Path) -> dict:
         "awaiting_approval": state.status == AWAITING_APPROVAL,
         "approved_gates": state.approved_gates,
         "iteration": state.iteration,
-        "consecutive_no_progress": state.consecutive_no_progress,
         "last_gate_summary": state.last_gate_summary,
         "error": state.error,
         "last_evidence": _last_evidence_dir(job_dir),
-        "has_notes": (job_dir / "NOTES.md").is_file(),
+        "has_notes": (job_dir / NOTES_FILE).is_file(),
     }
     if doc["awaiting_approval"]:
         doc["proposed_gates"] = load_proposed_gates(job_dir / "target")
@@ -55,7 +59,6 @@ def collect_status(job_dir: Path) -> dict:
             "adapter": job.adapter,
             "gates": job.gates,
             "max_iterations": job.max_iterations,
-            "no_progress_limit": job.no_progress_limit,
             "push": job.push,
         }
     except JobError as exc:
@@ -75,7 +78,6 @@ def _render_text(doc: dict) -> str:
             if doc.get("job")
             else ""
         ),
-        f"consecutive_no_progress: {doc['consecutive_no_progress']}",
     ]
     summary = doc["last_gate_summary"]
     if summary is None:
@@ -83,14 +85,18 @@ def _render_text(doc: dict) -> str:
     else:
         total = summary.get("total", 0)
         failing = summary.get("failing", [])
-        lines.append(f"gates: {total - len(failing)}/{total} passing")
+        lines.append(f"gates: {total - len(failing)}/{total} exited 0")
         for g in failing:
             lines.append(f"  failing: {g}")
     if doc["awaiting_approval"]:
-        lines.append("awaiting approval: read target/PLAN.md, then "
-                     "`autolab approve` or `autolab reject --feedback ...`")
-        for g in doc.get("proposed_gates") or []:
-            lines.append(f"  proposed: {g}")
+        lines.append("awaiting approval: `autolab approve` or "
+                     "`autolab reject --feedback ...`")
+        proposed = doc.get("proposed_gates")
+        if proposed:
+            for g in proposed:
+                lines.append(f"  proposed: {g}")
+        else:
+            lines.append(f"  proposed: (nothing readable in target/{PROPOSED_GATES_FILE})")
     if doc["error"]:
         lines.append(f"error: {doc['error']}")
     if doc["last_evidence"]:

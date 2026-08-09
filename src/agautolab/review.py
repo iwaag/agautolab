@@ -1,14 +1,15 @@
 """`autolab approve` / `autolab reject`: the reviewer's verdict on a plan.
 
-The reviewer (the autolab agent) reads target/PLAN.md and
-target/proposed_gates.yaml while the job sits in awaiting_approval, then:
+The reviewer is the mediator agent. While the job sits in awaiting_approval it
+reads whatever the coding agent produced, then:
 
-- approve: the proposed gates become the job's official gates (stored in
-  state.json `approved_gates`; job.yaml stays untouched as the input record)
-  and the job moves to the implement phase.
-- reject: feedback is appended to NOTES.md — the same channel every prompt
-  already merges — and the job returns to the plan phase for another
-  iteration.
+- approve: gates become official (stored in state.json `approved_gates`;
+  job.yaml stays untouched as the input record) and the job moves to the
+  implement phase. The gates come from `target/proposed_gates.yaml` when it
+  holds a readable YAML list, and from `--gates FILE` / `--gate CMD` otherwise
+  — the reviewer decides what they are.
+- reject: feedback is appended to NOTES.md, the handoff the coding agent
+  writes and reads, and the job returns to the plan phase.
 
 Both commands take the job lock non-blocking: awaiting_approval means no
 iteration is running, so a held lock is a real conflict worth surfacing.
@@ -20,7 +21,9 @@ import fcntl
 import sys
 from pathlib import Path
 
-from .run_once import PLAN_FILE, PROPOSED_GATES_FILE, load_proposed_gates
+import yaml
+
+from .run_once import NOTES_FILE, PROPOSED_GATES_FILE, load_proposed_gates
 from .state import AWAITING_APPROVAL, IMPLEMENT_PHASE, PLAN_PHASE, RUNNING, State
 
 EXIT_OK = 0
@@ -57,25 +60,50 @@ def _locked_state(job_dir: Path):
     return state, lock_file
 
 
-def approve(job_dir: Path) -> int:
+def _gates_from_file(path: Path) -> list[str] | None:
+    """A gates file the reviewer points at: bare YAML list or `gates:` mapping."""
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as exc:
+        print(f"autolab: cannot read gates from {path}: {exc}", file=sys.stderr)
+        return None
+    if isinstance(raw, dict):
+        raw = raw.get("gates")
+    if isinstance(raw, list) and raw:
+        return [str(g).strip() for g in raw if str(g).strip()]
+    print(f"autolab: no gate commands found in {path}", file=sys.stderr)
+    return None
+
+
+def approve(
+    job_dir: Path,
+    gates_file: Path | None = None,
+    gate: list[str] | None = None,
+) -> int:
     job_dir = job_dir.resolve()
     got = _locked_state(job_dir)
     if got is None:
         return EXIT_USAGE
     state, lock_file = got
     try:
-        gates = load_proposed_gates(job_dir / "target")
-        if gates is None:
+        gates = [g.strip() for g in (gate or []) if g.strip()]
+        if gates_file is not None:
+            from_file = _gates_from_file(gates_file)
+            if from_file is None:
+                return EXIT_USAGE
+            gates = from_file + gates
+        if not gates:
+            gates = load_proposed_gates(job_dir / "target") or []
+        if not gates:
             print(
-                f"autolab: target/{PROPOSED_GATES_FILE} is missing or invalid; "
-                "nothing to approve",
+                f"autolab: no gates to approve — target/{PROPOSED_GATES_FILE} held "
+                "nothing readable; pass --gates FILE or --gate CMD",
                 file=sys.stderr,
             )
             return EXIT_USAGE
         state.approved_gates = gates
         state.phase = IMPLEMENT_PHASE
         state.status = RUNNING
-        state.consecutive_no_progress = 0
         state.last_gate_summary = None
         state.error = None
         state.save(job_dir)
@@ -110,22 +138,22 @@ def reject(job_dir: Path, feedback: str) -> int:
     state, lock_file = got
     try:
         text = _resolve_feedback(feedback).strip()
-        notes_path = job_dir / "NOTES.md"
+        notes_path = job_dir / NOTES_FILE
         existing = (
             notes_path.read_text(encoding="utf-8") if notes_path.is_file() else ""
         )
-        block = (
-            "\n## Reviewer feedback — plan REJECTED\n\n"
-            f"Revise {PLAN_FILE} and {PROPOSED_GATES_FILE} to address this:\n\n"
-            f"{text}\n"
+        notes_path.write_text(
+            existing.rstrip("\n") + "\n\nReviewer feedback:\n\n" + text + "\n",
+            encoding="utf-8",
         )
-        notes_path.write_text(existing.rstrip("\n") + "\n" + block, encoding="utf-8")
         state.phase = PLAN_PHASE
         state.status = RUNNING
         state.error = None
         state.save(job_dir)
-        print("autolab: plan rejected — feedback appended to NOTES.md; "
-              "next iteration replans")
+        print(
+            f"autolab: plan rejected — feedback appended to {NOTES_FILE}; "
+            "next iteration replans"
+        )
         return EXIT_OK
     finally:
         fcntl.flock(lock_file, fcntl.LOCK_UN)

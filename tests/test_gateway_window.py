@@ -42,7 +42,7 @@ def sandbox(tmp_path, monkeypatch):
 
 def test_backend_defaults_to_ollama(sandbox):
     assert gateway.window_backend() == "ollama"
-    assert gateway.window_model("ollama") == "gemma3:latest"
+    assert gateway.window_model("ollama") == "qwen3.6:35b-a3b-coding-nvfp4"
 
 
 def test_process_env_wins_over_local_env_file(sandbox, monkeypatch):
@@ -85,12 +85,12 @@ def test_a_successful_run_records_the_policy_fields(sandbox, monkeypatch):
     monkeypatch.setitem(
         gateway.WINDOW_BACKENDS,
         "ollama",
-        lambda prompt: ("six jobs converged.", {"model": "gemma3:latest", "cost_usd": None}),
+        lambda prompt: ("six jobs converged.", {"model": "m1", "cost_usd": None}),
     )
     record = gateway.answer_window("which jobs finished?")
     assert record["outcome"] == "done"
     assert record["id"] == "window/run-0001"
-    assert record["backend_model"] == "ollama/gemma3:latest"
+    assert record["backend_model"] == "ollama/m1"
     assert record["cost_usd"] is None  # ollama reports no price; none invented
     assert isinstance(record["duration_ms"], int)
     assert record["reply"] == "six jobs converged."
@@ -164,7 +164,7 @@ def test_a_plain_path_is_returned_as_written(sandbox, monkeypatch):
 
 # --- director window ---------------------------------------------------------
 
-def test_director_uses_only_the_required_prompt_prefix(sandbox, monkeypatch):
+def test_director_carries_the_message_and_records_the_run(sandbox, monkeypatch):
     seen = {}
 
     def capture(prompt):
@@ -174,10 +174,8 @@ def test_director_uses_only_the_required_prompt_prefix(sandbox, monkeypatch):
     monkeypatch.setattr(gateway, "run_director_claude", capture)
     record = gateway.answer_director("What is this project?")
 
-    assert seen["prompt"] == (
-        "First, read GUIDE.md. Then, follow this request.:\n"
-        "What is this project?"
-    )
+    assert "What is this project?" in seen["prompt"]
+    assert "GUIDE.md" in seen["prompt"]  # named as a fact, not commanded
     assert record["id"] == "director/run-0001"
     assert record["outcome"] == "done"
     assert record["reply"] == "raw reply"

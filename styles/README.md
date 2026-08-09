@@ -1,12 +1,14 @@
 # Development styles
 
-A mission may name a development style explicitly; that choice always wins.
-Otherwise, read the mission and choose either Instant Ramen or Slow Brew using
-your judgment: Instant Ramen tends to fit small, reversible work; Slow Brew
-tends to fit shared contracts, infrastructure, or harder-to-reverse work.
-These are hints, not rules. Choose before opening either `STYLE.md`. In the
-first session, write
-`STYLE: <name> — <one-line reason>` in `.local/agent/NOTES.md`, then read only
-the chosen style folder. On later sessions, reuse the choice recorded in
-NOTES. You may switch styles mid-mission: record the new style and reason,
-continue the same jobs, and never restart a mission merely to change style.
+Two ways to run a mission. Name one in NOTES.md with a one-line reason, or
+switch mid-mission the same way; the same jobs continue either way.
+
+- **instant-ramen** — write `gates` straight into `job.yaml`, so the job
+  starts in the implement phase. No plan/approve round trip. Small,
+  reversible work.
+- **slow-brew** — leave `gates` out, so the coding agent proposes a plan and
+  gates and you approve or reject them, then audit the result yourself.
+  Shared contracts, infrastructure, hard-to-reverse work.
+
+Cost differs: slow-brew spends at least one extra coding-agent iteration plus
+your review sessions.

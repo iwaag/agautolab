@@ -1,12 +1,12 @@
 """Fake adapter: token-free stand-in for a coding agent.
 
-Implement-phase prompts: appends one line to a file in the target repo per
-run (the classic behavior the loop tests are built on).
+Implement phase: appends one line to a file in the target repo per run (the
+classic behavior the loop tests are built on). Plan phase: writes PLAN.md and
+proposed_gates.yaml like a planning coding agent would, adding a revision
+section when a plan is already there, so reject→replan flows are observable.
 
-Plan-phase prompts (detected by the plan-prompt deliverable markers): writes
-PLAN.md and proposed_gates.yaml like a planning coding agent would. When the
-prompt carries reviewer feedback (a rejection), the plan gains a revision
-section, so reject→replan flows are observable.
+Which phase it is in is read from the job's state.json — a fact recorded on
+disk — rather than sniffed out of the prompt text.
 
 adapter_config keys:
 
@@ -15,19 +15,16 @@ adapter_config keys:
     plan_gates: gates to propose in the plan phase
                 (default: ["test -s <file>"] so the implement phase
                 converges after one append)
+    phase: force "plan" or "implement" instead of reading state.json
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import AdapterResult
-
-# Substrings of build_plan_prompt() output. Literals rather than imports:
-# adapters must not import run_once (which imports adapters).
-_PLAN_MARKER = "plan, do not implement yet"
-_REJECT_MARKER = "plan REJECTED"
 
 
 @dataclass
@@ -35,9 +32,11 @@ class FakeAdapter:
     file: str = "progress.log"
     line: str = "fake adapter was here"
     plan_gates: list[str] = field(default_factory=list)
+    phase: str | None = None
+    job_dir: Path | None = None
 
     @classmethod
-    def from_config(cls, config: dict) -> "FakeAdapter":
+    def from_config(cls, config: dict, job_dir: Path | None = None) -> "FakeAdapter":
         plan_gates = config.get("plan_gates", [])
         if not isinstance(plan_gates, list):
             plan_gates = [str(plan_gates)]
@@ -45,18 +44,30 @@ class FakeAdapter:
             file=str(config.get("file", cls.file)),
             line=str(config.get("line", cls.line)),
             plan_gates=[str(g) for g in plan_gates],
+            phase=config.get("phase"),
+            job_dir=job_dir,
         )
 
+    def _current_phase(self, workdir: Path) -> str:
+        if self.phase:
+            return self.phase
+        job_dir = self.job_dir or workdir.parent
+        try:
+            state = json.loads((job_dir / "state.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return "implement"
+        return state.get("phase") or "implement"
+
     def run(self, prompt: str, workdir: Path, timeout: int) -> AdapterResult:
-        if _PLAN_MARKER in prompt:
-            return self._plan(prompt, workdir)
+        if self._current_phase(workdir) == "plan":
+            return self._plan(workdir)
         return self._implement(prompt, workdir)
 
-    def _plan(self, prompt: str, workdir: Path) -> AdapterResult:
+    def _plan(self, workdir: Path) -> AdapterResult:
         gates = self.plan_gates or [f"test -s {self.file}"]
         plan_path = workdir / "PLAN.md"
-        rejected = _REJECT_MARKER in prompt
-        if rejected and plan_path.is_file():
+        revising = plan_path.is_file()
+        if revising:
             revisions = plan_path.read_text(encoding="utf-8").count("## Revision") + 1
             with plan_path.open("a", encoding="utf-8") as fh:
                 fh.write(f"\n## Revision {revisions}\n\nAddressed reviewer feedback.\n")
@@ -68,7 +79,7 @@ class FakeAdapter:
         (workdir / "proposed_gates.yaml").write_text(
             "gates:\n" + "".join(f'  - "{g}"\n' for g in gates), encoding="utf-8"
         )
-        verb = "revised" if rejected else "wrote"
+        verb = "revised" if revising else "wrote"
         return AdapterResult(
             output=f"fake adapter {verb} PLAN.md and proposed {len(gates)} gate(s)",
             exit_code=0,

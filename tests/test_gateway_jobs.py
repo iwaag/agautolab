@@ -43,7 +43,6 @@ def test_summary_rolls_up_state_and_cost(tmp_path):
         {
             "status": "converged",
             "iteration": 3,
-            "consecutive_no_progress": 0,
             "last_gate_summary": {"total": 2, "passed": True, "failing": []},
             "error": None,
         },
@@ -121,11 +120,11 @@ def test_sessions_cost_sums_every_session(monkeypatch, tmp_path):
     assert cost["current_run_sessions_usd"] is None  # no run recorded
 
 
-def test_mission_headline_skips_the_markdown_heading(tmp_path):
+def test_mission_is_served_as_written(tmp_path):
     p = tmp_path / "MISSION.md"
     p.write_text("# Mission\n\nI want a Snake game in my browser.\n")
-    assert gateway.mission_headline(p) == "I want a Snake game in my browser."
-    assert gateway.mission_headline(tmp_path / "absent.md") is None
+    assert gateway.mission_text(p) == "# Mission\n\nI want a Snake game in my browser.\n"
+    assert gateway.mission_text(tmp_path / "absent.md") is None
 
 
 def test_live_session_reads_as_in_progress_not_broken(monkeypatch, tmp_path):
@@ -143,61 +142,17 @@ def test_live_session_reads_as_in_progress_not_broken(monkeypatch, tmp_path):
     assert gateway.session_summaries()[0]["is_error"] == "unparsed"
 
 
-def test_stale_notes_suppress_the_devstyle_report(monkeypatch, tmp_path):
-    state = tmp_path / "agent"
-    state.mkdir()
-    monkeypatch.setattr(gateway, "STATE", state)
-    (state / "NOTES.md").write_text("STATUS: complete\n- Style chosen: slow-brew\n")
-    now = time.time()
-    os.utime(state / "NOTES.md", (now - 60, now - 60))
-    (state / "MISSION.md").write_text("# Mission\n\nA newer mission.\n")
-
-    # The report on disk belongs to the previous mission; showing it under this
-    # mission's headline would be a lie.
-    assert gateway.notes_are_stale() is True
-    assert gateway.devstyle_report() is None
-    assert gateway.notes_status() == "STATUS: (stale notes, predates mission)"
-
-
-def test_devstyle_report_extracted_from_notes(monkeypatch, tmp_path):
+def test_done_file_is_existence_plus_verbatim_content(monkeypatch, tmp_path):
+    """drive.sh stops on the file existing; the gateway carries whatever the
+    agent wrote in it, unparsed."""
     state = tmp_path / "agent"
     state.mkdir()
     monkeypatch.setattr(gateway, "STATE", state)
 
-    assert gateway.devstyle_report() is None  # no NOTES.md
+    assert gateway.agent_done() is None
+    assert gateway.agent_notes() is None
 
-    (state / "NOTES.md").write_text("STATUS: complete\n\nnothing structured here\n")
-    assert gateway.devstyle_report() is None  # NOTES.md without the report
-
-    (state / "NOTES.md").write_text(
-        "STATUS: complete\n\n## Report\n\n"
-        "- Style chosen: instant-ramen\n"
-        "- Why: the job was small and the gates were cheap\n"
-        "- Was it right in hindsight: yes\n"
-    )
-    assert gateway.devstyle_report() == {
-        "style_chosen": "instant-ramen",
-        "why": "the job was small and the gates were cheap",
-        "hindsight": "yes",
-    }
-
-
-def test_devstyle_answers_are_joined_across_wrapped_lines(monkeypatch, tmp_path):
-    # Real NOTES.md is hard-wrapped prose, so a one-line read cuts the answer
-    # off mid-sentence (observed on a live mission).
-    state = tmp_path / "agent"
-    state.mkdir()
-    monkeypatch.setattr(gateway, "STATE", state)
-    (state / "NOTES.md").write_text(
-        "STATUS: complete\n\n"
-        "Style chosen: instant-ramen\n"
-        "Why: mission explicitly bounded itself (max_iterations <= 3),\n"
-        "textbook small/reversible work per styles/README.md.\n"
-        "Was it right in hindsight: yes\n"
-    )
-    report = gateway.devstyle_report()
-    assert report["why"] == (
-        "mission explicitly bounded itself (max_iterations <= 3), "
-        "textbook small/reversible work per styles/README.md."
-    )
-    assert report["hindsight"] == "yes"
+    (state / "done").write_text("shipped it; the audit screenshot is in evidence/\n")
+    (state / "NOTES.md").write_text("whatever the agent felt like writing\n")
+    assert gateway.agent_done() == "shipped it; the audit screenshot is in evidence/\n"
+    assert gateway.agent_notes() == "whatever the agent felt like writing\n"

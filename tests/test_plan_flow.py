@@ -38,7 +38,6 @@ def test_plan_approve_implement_converged(tmp_path):
     assert (job_dir / "target" / "PLAN.md").is_file()
     assert (job_dir / "target" / "proposed_gates.yaml").is_file()
     prompt = latest_prompt(job_dir)
-    assert "plan, do not implement yet" in prompt
     assert "Toy goal for tests." in prompt
 
     # Another run-once while awaiting: refuses to run anything.
@@ -74,7 +73,6 @@ def test_reject_feeds_back_and_replans(tmp_path):
     # Next plan iteration sees the feedback and revises the plan.
     assert run_once(job_dir) == EXIT_AWAITING_APPROVAL
     prompt = latest_prompt(job_dir)
-    assert "plan REJECTED" in prompt
     assert feedback in prompt
     assert "## Revision 1" in (job_dir / "target" / "PLAN.md").read_text(
         encoding="utf-8"
@@ -94,15 +92,21 @@ def test_reject_feedback_from_file(tmp_path):
     assert str(feedback_file) not in notes  # content, not the path
 
 
-def test_incomplete_plan_deliverables_continue(tmp_path):
+def test_plan_stops_for_review_whatever_it_produced(tmp_path):
+    """No parser decides whether planning "happened": one plan iteration is
+    one review opportunity, and the reviewer supplies gates when the file
+    holds none."""
     job_dir = tmp_path / "job"
-    # Whitespace-only gate -> proposed_gates.yaml parses as invalid.
     make_job(job_dir, adapter_config={"plan_gates": [" "]}, max_iterations=2)
-    assert run_once(job_dir) == EXIT_CONTINUE
-    state = read_state(job_dir)
-    assert state["status"] == "running"
-    assert state["phase"] == "plan"
-    # Iteration ceiling still bounds the plan phase.
+    assert run_once(job_dir) == EXIT_AWAITING_APPROVAL
+    assert read_state(job_dir)["status"] == "awaiting_approval"
+    assert main(["approve", str(job_dir), "--gate", "true"]) == 0
+    assert read_state(job_dir)["approved_gates"] == ["true"]
+
+
+def test_plan_phase_is_bounded_by_max_iterations(tmp_path):
+    job_dir = tmp_path / "job"
+    make_job(job_dir, max_iterations=1)
     assert run_once(job_dir) == EXIT_STUCK
     assert "plan phase" in read_state(job_dir)["error"]
 
@@ -116,13 +120,27 @@ def test_approve_reject_require_awaiting_state(tmp_path):
     assert main(["reject", str(job_dir), "--feedback", "x"]) == 2
 
 
-def test_approve_refuses_invalid_proposed_gates(tmp_path):
+def test_approve_needs_gates_from_somewhere(tmp_path):
+    """Empty file and no --gate: there is nothing to make official. The
+    reviewer's own gates are accepted instead."""
     job_dir = tmp_path / "job"
     make_job(job_dir)
     assert run_once(job_dir) == EXIT_AWAITING_APPROVAL
     (job_dir / "target" / "proposed_gates.yaml").write_text("gates: []\n")
     assert main(["approve", str(job_dir)]) == 2
     assert read_state(job_dir)["status"] == "awaiting_approval"
+    assert main(["approve", str(job_dir), "--gate", "test -s progress.log"]) == 0
+    assert read_state(job_dir)["approved_gates"] == ["test -s progress.log"]
+
+
+def test_approve_reads_a_reviewer_supplied_gates_file(tmp_path):
+    job_dir = tmp_path / "job"
+    make_job(job_dir)
+    assert run_once(job_dir) == EXIT_AWAITING_APPROVAL
+    gates_file = tmp_path / "reviewed_gates.yaml"
+    gates_file.write_text("gates:\n  - \"test -s progress.log\"\n  - \"true\"\n")
+    assert main(["approve", str(job_dir), "--gates", str(gates_file)]) == 0
+    assert read_state(job_dir)["approved_gates"] == ["test -s progress.log", "true"]
 
 
 def test_implement_phase_without_gates_errors(tmp_path):

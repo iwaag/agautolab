@@ -46,6 +46,19 @@ def main(argv: list[str] | None = None) -> int:
         help="Accept the proposed plan+gates; the job moves to the implement phase.",
     )
     p_approve.add_argument("job_dir", type=Path, help="Path to the job directory")
+    p_approve.add_argument(
+        "--gates",
+        type=Path,
+        metavar="FILE",
+        help="YAML file of gate commands (bare list, or under a `gates:` key). "
+        "Default: target/proposed_gates.yaml when it holds one.",
+    )
+    p_approve.add_argument(
+        "--gate",
+        action="append",
+        metavar="COMMAND",
+        help="A single gate command; repeatable.",
+    )
 
     p_reject = sub.add_parser(
         "reject",
@@ -67,7 +80,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "status":
         return status(args.job_dir, as_json=args.json)
     if args.command == "approve":
-        return approve(args.job_dir)
+        return approve(args.job_dir, gates_file=args.gates, gate=args.gate)
     if args.command == "reject":
         return reject(args.job_dir, args.feedback)
     parser.error(f"unknown command {args.command!r}")

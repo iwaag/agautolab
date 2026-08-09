@@ -4,6 +4,10 @@ An adapter is one coding-agent backend. The interface is deliberately tiny so
 claude/codex/opencode stay swappable:
 
     run(prompt, workdir, timeout) -> AdapterResult(output, exit_code)
+
+A backend is built by `from_config(config, job_dir=None)`; `job_dir` is the
+job directory that contains `workdir` (`target/`), for backends that can grant
+access to more than the cwd.
 """
 
 from __future__ import annotations
@@ -32,19 +36,21 @@ class AdapterError(Exception):
     """Adapter could not be constructed or failed outside its own exit code."""
 
 
-_REGISTRY: dict[str, Callable[[dict], Adapter]] = {}
+_REGISTRY: dict[str, Callable[..., Adapter]] = {}
 
 
-def register(name: str, factory: Callable[[dict], Adapter]) -> None:
+def register(name: str, factory: Callable[..., Adapter]) -> None:
     _REGISTRY[name] = factory
 
 
-def create(name: str, config: dict) -> Adapter:
+def create(name: str, config: dict, job_dir: Path | None = None) -> Adapter:
+    """Build an adapter. `job_dir` lets a backend grant access to the job
+    directory alongside target/, so NOTES.md and evidence/ are reachable."""
     factory = _REGISTRY.get(name)
     if factory is None:
         known = ", ".join(sorted(_REGISTRY)) or "(none)"
         raise AdapterError(f"unknown adapter {name!r}; known adapters: {known}")
-    return factory(config)
+    return factory(config, job_dir=job_dir)
 
 
 from . import claude_code as _claude_code  # noqa: E402

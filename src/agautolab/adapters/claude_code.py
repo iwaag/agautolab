@@ -1,13 +1,18 @@
 """Claude Code headless adapter.
 
 Runs `claude -p --output-format json` one-shot with cwd=target/, feeding the
-prompt on stdin and capturing the stdout JSON as evidence. adapter_config:
+prompt on stdin and capturing stdout as evidence. The whole result JSON goes
+into the iteration's adapter_result.json when stdout parses; when it does not,
+stdout is the output as written. The process's own exit code is the exit code.
+
+adapter_config:
 
     command: claude binary name or path (default "claude")
     args: extra CLI args, e.g. ["--model", "...", "--allowedTools", "..."]
+    add_job_dir: also grant the job directory (NOTES.md, evidence/) via
+        --add-dir, default true
     skip_permissions: add --dangerously-skip-permissions (default false).
-        Policy: only ever true on experimental nodes/VMs, never on a machine
-        holding real credentials beyond what the job needs.
+        Only ever true on experimental nodes/VMs.
 """
 
 from __future__ import annotations
@@ -19,21 +24,6 @@ from pathlib import Path
 
 from . import AdapterError, AdapterResult
 
-# Keys copied from the result JSON into adapter_result.json evidence.
-META_KEYS = (
-    "total_cost_usd",
-    "usage",
-    "modelUsage",
-    "num_turns",
-    "duration_ms",
-    "duration_api_ms",
-    "is_error",
-    "subtype",
-    "terminal_reason",
-    "session_id",
-    "permission_denials",
-)
-
 OUTPUT_JSON_FILENAME = "claude_output.json"
 
 
@@ -42,20 +32,28 @@ class ClaudeCodeAdapter:
     command: str = "claude"
     args: list[str] = field(default_factory=list)
     skip_permissions: bool = False
+    add_dirs: list[str] = field(default_factory=list)
 
     @classmethod
-    def from_config(cls, config: dict) -> "ClaudeCodeAdapter":
+    def from_config(cls, config: dict, job_dir: Path | None = None) -> "ClaudeCodeAdapter":
         args = config.get("args", [])
         if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
             raise AdapterError("claude_code adapter_config: 'args' must be a list of strings")
+        add_dirs = [str(d) for d in config.get("add_dirs", [])]
+        if job_dir is not None and config.get("add_job_dir", True):
+            add_dirs.append(str(job_dir))
         return cls(
             command=str(config.get("command", cls.command)),
             args=list(args),
             skip_permissions=bool(config.get("skip_permissions", False)),
+            add_dirs=add_dirs,
         )
 
     def run(self, prompt: str, workdir: Path, timeout: int) -> AdapterResult:
-        argv = [self.command, "-p", "--output-format", "json", *self.args]
+        argv = [self.command, "-p", "--output-format", "json"]
+        for directory in self.add_dirs:
+            argv += ["--add-dir", directory]
+        argv += self.args
         if self.skip_permissions:
             argv.append("--dangerously-skip-permissions")
         try:
@@ -90,17 +88,19 @@ class ClaudeCodeAdapter:
         try:
             result_json = json.loads(stdout)
         except json.JSONDecodeError:
-            output = stdout or proc.stderr or "(no output)"
+            # Prose is a legitimate answer; it is not a failed iteration.
             return AdapterResult(
-                output=output,
-                exit_code=proc.returncode if proc.returncode != 0 else 1,
-                meta={"json_parse_error": True, "stderr_tail": (proc.stderr or "")[-2000:]},
+                output=stdout or proc.stderr or "(no output)",
+                exit_code=proc.returncode,
+                meta={"stderr_tail": (proc.stderr or "")[-2000:]},
                 artifacts=artifacts,
             )
 
-        meta = {k: result_json[k] for k in META_KEYS if k in result_json}
-        output = result_json.get("result") or "(no result text)"
-        exit_code = proc.returncode
-        if exit_code == 0 and result_json.get("is_error"):
-            exit_code = 1
-        return AdapterResult(output=output, exit_code=exit_code, meta=meta, artifacts=artifacts)
+        meta = dict(result_json) if isinstance(result_json, dict) else {"result": result_json}
+        output = meta.pop("result", None) or stdout
+        return AdapterResult(
+            output=str(output),
+            exit_code=proc.returncode,
+            meta=meta,
+            artifacts=artifacts,
+        )

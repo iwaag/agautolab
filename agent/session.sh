@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Run exactly one headless autolab-agent session (claude -p, never resumed).
 # State lives in .local/agent/: MISSION.md (input), NOTES.md (agent-owned),
-# sessions/session-NNNN.json (full output + cost evidence).
+# done (agent-written, stops drive.sh), sessions/session-NNNN.json (full
+# output + cost evidence).
 set -uo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -14,11 +15,30 @@ if [[ ! -f "$state/MISSION.md" ]]; then
     exit 2
 fi
 
-# Claude binary: env override > .local pointer file > PATH.
+# Claude binary: env override > .local pointer file > PATH. Either of the
+# first two may be a glob — the usual value points into a version-numbered
+# editor-extension directory that goes stale on every update — so the newest
+# match is resolved here, the same way agent/gateway.py's claude_bin() does.
+# A plain path is used as written, so a wrong one fails loudly with the path.
+resolve_bin() {
+    local pattern="$1" newest="" match
+    for match in $pattern; do
+        [[ -e "$match" ]] || continue
+        [[ -z "$newest" || "$match" -nt "$newest" ]] && newest="$match"
+    done
+    if [[ -n "$newest" ]]; then
+        echo "$newest"
+    elif [[ "$pattern" == *[*?[]* ]]; then
+        echo "claude"   # a glob that matches nothing: fall through to PATH
+    else
+        echo "$pattern"
+    fi
+}
+
 if [[ -n "${AUTOLAB_CLAUDE_BIN:-}" ]]; then
-    bin="$AUTOLAB_CLAUDE_BIN"
+    bin="$(resolve_bin "$AUTOLAB_CLAUDE_BIN")"
 elif [[ -f "$state/claude_bin" ]]; then
-    bin="$(<"$state/claude_bin")"
+    bin="$(resolve_bin "$(<"$state/claude_bin")")"
 else
     bin="claude"
 fi
@@ -29,11 +49,17 @@ while [[ -e "$state/sessions/session-$(printf '%04d' "$n").json" ]]; do
 done
 out="$state/sessions/session-$(printf '%04d' "$n").json"
 
-# No --dangerously-skip-permissions on agstudio (standing rule): the agent
-# gets an explicit tool allowlist instead. Judgment lives in CHARTER.md.
-allowed="Read,Write,Edit,Glob,Grep,TodoWrite,BashOutput,KillShell"
-for c in git uv curl node python3 npx autolab-cagent ls cat head tail wc mkdir cp mv chmod \
-         find grep sed echo printf test date pwd which sleep kill lsof; do
+# An explicit allowlist rather than --dangerously-skip-permissions: this node
+# holds real credentials, and a headless session cannot answer a prompt. The
+# list covers what the charter points at; a denial is a finding worth widening
+# for, not misbehaviour to work around.
+allowed="Read,Write,Edit,Glob,Grep,TodoWrite,BashOutput,KillShell,WebFetch,WebSearch,NotebookEdit"
+for c in git uv uvx curl wget node npm npx python3 pip jq autolab autolab-cagent \
+         ls cat head tail wc sort uniq cut tr diff stat du df file \
+         mkdir rmdir cp mv rm chmod touch ln readlink realpath basename dirname \
+         find grep rg sed awk echo printf test true false date pwd cd which type \
+         env export sleep kill pkill lsof ps ss nc ping open tar gzip unzip \
+         yq python make bash sh xargs tee timeout nohup; do
     allowed+=",Bash($c:*)"
 done
 

@@ -1,21 +1,23 @@
-"""One autolab iteration: the per-iteration contract.
+"""One autolab iteration.
 
 Jobs run in two phases. Plan phase (job.yaml has no gates): the coding agent
-receives the goal verbatim and must produce PLAN.md + proposed_gates.yaml in
-target/; when both exist and parse, the job stops in awaiting_approval for a
-reviewer to `autolab approve` or `autolab reject`. Implement phase (job.yaml
-gates, or approved gates in state.json): the classic make-the-gates-pass loop.
+receives the goal and the fact that a reviewer will approve or reject what it
+produces; the iteration ends in awaiting_approval. Implement phase (job.yaml
+gates, or approved gates in state.json): run the gates, record what happened.
 
 1. flock <job-dir>/.lock; exit 0 silently if already held.
 2. Read state.json; exit immediately on terminal states or awaiting_approval.
-3. Build the phase-appropriate prompt (goal + gate failures + previous
-   NOTES.md in implement phase; goal + plan deliverables in plan phase).
+3. Build the phase-appropriate prompt from the goal, the gate results, and the
+   handoff the previous iteration left in NOTES.md.
 4. Run the adapter with a wall-clock timeout.
-5. Implement phase only: run gates; pass = all exit 0.
-6. Write evidence/iter-NNNN/, regenerate NOTES.md, update state.json,
-   commit target/.
+5. Implement phase only: run the gates.
+6. Write evidence/iter-NNNN/, update state.json, commit target/.
 7. Exit codes: 0=converged, 10=continue, 20=stuck, 30=error,
    40=awaiting approval.
+
+NOTES.md is not written here. It is the coding agent's handoff to its next
+iteration, written by the agent in the job directory (reachable via the
+adapter's --add-dir grant); this module only reads it forward.
 """
 
 from __future__ import annotations
@@ -51,9 +53,9 @@ from .state import (
 
 PLAN_FILE = "PLAN.md"
 PROPOSED_GATES_FILE = "proposed_gates.yaml"
+NOTES_FILE = "NOTES.md"
 
 GIT_ENV_ARGS = ["-c", "user.name=autolab", "-c", "user.email=autolab@localhost"]
-ADAPTER_OUTPUT_TAIL_CHARS = 2000
 
 
 class IterationError(Exception):
@@ -82,48 +84,51 @@ def _ensure_target_repo(target: Path) -> None:
         _git(target, "commit", "-q", "--allow-empty", "-m", "autolab: initial state")
 
 
-def build_plan_prompt(job: Job, notes: str | None) -> str:
+def _workspace_facts(job_dir: Path, iteration: int) -> list[str]:
+    """Where things are. The adapter grants access to the job dir alongside
+    target/, so these paths are reachable, not just nameable."""
+    return [
+        "",
+        "# Where things are",
+        f"- `{job_dir / 'target'}` — the repo you are working in (your cwd).",
+        f"- `{job_dir / NOTES_FILE}` — the handoff between iterations. Yours to "
+        "write; the next iteration is given whatever is there.",
+        f"- `{job_dir / 'evidence'}` — one directory per iteration: the prompt, "
+        "the diff, gate results, cost. `evidence/iter-"
+        f"{iteration:04d}/` will hold this one when it ends.",
+    ]
+
+
+def build_plan_prompt(job: Job, job_dir: Path, iteration: int, notes: str | None) -> str:
     parts = [
-        "# Goal (the client's request, verbatim)",
+        "# Goal (the client's request)",
         job.goal.strip(),
         "",
-        "# Your task: plan, do not implement yet",
-        "You are the engineer who will both design and build this. This "
-        "iteration you produce the plan and the acceptance criteria; "
-        "implementation starts only after a reviewer approves them.",
+        "# This iteration",
+        "This is the plan phase. A reviewer reads what you produce and either "
+        "approves it or sends it back with feedback; implementation runs after "
+        "an approval. The gates that are approved become the acceptance "
+        "condition every later iteration is measured against.",
         "",
-        "Write exactly these two files at the repo root:",
-        "",
-        f"1. `{PLAN_FILE}` — your implementation plan: what you will build, "
-        "file layout, and the technical decisions you are making. Written "
-        "for a reviewer who knows the goal but not the codebase.",
-        f"2. `{PROPOSED_GATES_FILE}` — the acceptance gates you propose, as "
-        "YAML:",
-        "",
-        "```yaml",
-        "gates:",
-        '  - "shell command run from the repo root"',
-        "```",
-        "",
-        "Gate requirements:",
-        "- Deterministic shell commands; all must exit 0 when the goal is met.",
-        "- Every requirement in the goal maps to at least one gate; state the "
-        f"mapping in {PLAN_FILE}.",
-        "- Gates must not pass trivially against the current (empty or "
-        "unmodified) repo.",
-        "- Name the exact endpoint/process each gate verifies.",
-        "",
-        "You may also create test files the gates will run. Do not write "
-        "product implementation code yet.",
+        f"`autolab approve` reads proposed gates from `target/{PROPOSED_GATES_FILE}` "
+        "when that file holds a YAML list of shell commands (bare list, or under "
+        "a `gates:` key), and takes them on the command line otherwise. A plan "
+        f"at `target/{PLAN_FILE}` is what the reviewer reads to judge them.",
     ]
+    parts += _workspace_facts(job_dir, iteration)
     if notes:
-        parts += ["", "# Notes from the previous iteration (including "
-                  "reviewer feedback, if any)", notes.strip()]
+        parts += ["", f"# {NOTES_FILE} from the previous iteration", notes.strip()]
     return "\n".join(parts) + "\n"
 
 
 def build_implement_prompt(
-    job: Job, gates: list[str], state: State, notes: str | None, plan: str | None
+    job: Job,
+    job_dir: Path,
+    iteration: int,
+    gates: list[str],
+    state: State,
+    notes: str | None,
+    plan: str | None,
 ) -> str:
     parts = [
         "# Goal",
@@ -131,31 +136,28 @@ def build_implement_prompt(
     ]
     if plan:
         parts += ["", "# Approved plan (yours; the reviewer accepted it)", plan.strip()]
-    parts += ["", "# Acceptance gates (all must exit 0, run from the repo root)"]
+    parts += ["", "# Acceptance gates (run from the repo root after every iteration)"]
     parts += [f"- `{g}`" for g in gates]
-    parts += ["", "# Current gate status"]
+    parts += ["", "# Gate results last iteration"]
     if state.last_gate_summary is None:
         parts.append("No gates have been run yet (first iteration).")
     elif state.last_gate_summary.get("failing"):
-        parts.append("Currently failing gates:")
+        parts.append("Failing:")
         parts += [f"- `{g}`" for g in state.last_gate_summary["failing"]]
     else:
-        parts.append("All gates passed last iteration.")
+        parts.append("All gates exited 0.")
+    parts += _workspace_facts(job_dir, iteration)
     if notes:
-        parts += ["", "# Handoff notes from the previous iteration", notes.strip()]
-    parts += [
-        "",
-        "Work in the current directory. Make the failing gates pass "
-        "without weakening or deleting the gates themselves.",
-    ]
+        parts += ["", f"# {NOTES_FILE} from the previous iteration", notes.strip()]
     return "\n".join(parts) + "\n"
 
 
 def load_proposed_gates(target: Path) -> list[str] | None:
-    """Parse target/proposed_gates.yaml. None = absent or invalid.
+    """Read target/proposed_gates.yaml for a reviewer. None = nothing readable.
 
-    Accepts either a bare YAML list or a mapping with a `gates:` list
-    (the prompted form), mirroring job.yaml.
+    This is a convenience for `autolab approve` and `autolab status`, not a
+    verdict on the iteration: nothing branches on the result. Accepts a bare
+    YAML list or a mapping with a `gates:` list.
     """
     path = target / PROPOSED_GATES_FILE
     if not path.is_file():
@@ -222,53 +224,6 @@ def _push_target(target: Path, evidence_dir: Path) -> None:
         print(f"autolab: push skipped/failed: {result}", file=sys.stderr)
 
 
-def _made_progress(old_summary: dict | None, new_failing: set[str], diff_nonempty: bool) -> bool:
-    """No progress = failing-gate set didn't shrink AND diff effectively empty."""
-    if diff_nonempty:
-        return True
-    if old_summary is None:
-        return True  # first gate run: nothing to compare against
-    old_failing = set(old_summary.get("failing", []))
-    return new_failing < old_failing or len(new_failing) < len(old_failing)
-
-
-def _write_notes(
-    job_dir: Path,
-    iteration: int,
-    status: str,
-    gate_results: list[gates_mod.GateResult],
-    adapter_result: adapters.AdapterResult,
-    diff_stat: str,
-) -> None:
-    summary = gates_mod.summarize(gate_results)
-    lines = [
-        f"# NOTES — handoff after iteration {iteration}",
-        "",
-        f"- status after this iteration: {status}",
-        f"- gates: {summary['total'] - len(summary['failing'])}/{summary['total']} passing",
-    ]
-    for r in gate_results:
-        mark = "PASS" if r.passed else ("TIMEOUT" if r.timed_out else f"FAIL({r.exit_code})")
-        lines.append(f"  - [{mark}] `{r.command}`")
-    lines += ["", "## Diff this iteration", "```", diff_stat.strip() or "(no changes)", "```"]
-    lines += [
-        "",
-        "## Adapter output (tail)",
-        "```",
-        adapter_result.output[-ADAPTER_OUTPUT_TAIL_CHARS:].strip() or "(empty)",
-        "```",
-        "",
-        "## Failing gate output (tails)",
-    ]
-    failing = [r for r in gate_results if not r.passed]
-    if not failing:
-        lines.append("(none)")
-    else:
-        for r in failing:
-            lines += [f"### `{r.command}`", "```", r.output_tail.strip() or "(empty)", "```"]
-    (job_dir / "NOTES.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-
 def _write_evidence(
     evidence_dir: Path,
     prompt: str,
@@ -291,6 +246,7 @@ def _write_evidence(
                 **adapter_result.meta,
             },
             indent=2,
+            default=str,
         )
         + "\n",
         encoding="utf-8",
@@ -303,34 +259,19 @@ def _write_evidence(
     )
 
 
-def _write_plan_notes(
-    job_dir: Path,
-    iteration: int,
-    status: str,
-    plan_exists: bool,
-    proposed: list[str] | None,
-    adapter_result: adapters.AdapterResult,
-    diff_stat: str,
-) -> None:
-    lines = [
-        f"# NOTES — handoff after plan iteration {iteration}",
-        "",
-        f"- status after this iteration: {status}",
-        f"- {PLAN_FILE}: {'present' if plan_exists else 'MISSING'}",
-        f"- {PROPOSED_GATES_FILE}: "
-        + (f"{len(proposed)} gate(s) proposed" if proposed else "missing or invalid"),
-    ]
-    if proposed:
-        lines += [f"  - `{g}`" for g in proposed]
-    lines += ["", "## Diff this iteration", "```", diff_stat.strip() or "(no changes)", "```"]
-    lines += [
-        "",
-        "## Adapter output (tail)",
-        "```",
-        adapter_result.output[-ADAPTER_OUTPUT_TAIL_CHARS:].strip() or "(empty)",
-        "```",
-    ]
-    (job_dir / "NOTES.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+def _commit_target(target: Path, message: str) -> tuple[str, bool]:
+    """Stage everything, return the diff, and commit it if there is one.
+
+    The commit is the recording device: it is what makes diff.patch per
+    iteration possible and what keeps an iteration's work recoverable when
+    the next one overwrites it.
+    """
+    _git(target, "add", "-A")
+    diff_text = _git(target, "diff", "--cached").stdout
+    if diff_text.strip():
+        _git(target, "commit", "-q", "-m", message)
+        return diff_text, True
+    return diff_text, False
 
 
 def _run_plan_iteration(
@@ -344,31 +285,24 @@ def _run_plan_iteration(
     notes: str | None,
     started_at: str,
 ) -> int:
-    prompt = build_plan_prompt(job, notes)
+    prompt = build_plan_prompt(job, job_dir, iteration, notes)
 
     adapter_result, adapter_timed_out = _run_adapter_with_timeout(
         adapter, prompt, target, job.iteration_timeout_seconds
     )
 
-    plan_exists = (target / PLAN_FILE).is_file()
-    proposed = load_proposed_gates(target)
+    diff_text, diff_nonempty = _commit_target(
+        target, f"autolab: plan iteration {iteration:04d}"
+    )
 
-    _git(target, "add", "-A")
-    diff_text = _git(target, "diff", "--cached").stdout
-    diff_stat = _git(target, "diff", "--cached", "--stat").stdout
-    diff_nonempty = bool(diff_text.strip())
-    if diff_nonempty:
-        _git(target, "commit", "-q", "-m", f"autolab: plan iteration {iteration:04d}")
-
-    # No no-progress tracking here: a good plan can be a small diff. Only the
-    # iteration ceiling bounds the plan phase.
-    if plan_exists and proposed:
-        state.status = AWAITING_APPROVAL
-    elif iteration >= job.max_iterations:
+    # One plan iteration is one review opportunity: the job stops for a
+    # reviewer regardless of what the agent left behind. Nothing here inspects
+    # the agent's files to decide whether planning "happened".
+    if iteration >= job.max_iterations:
         state.status = STUCK
         state.error = f"max_iterations ({job.max_iterations}) reached in plan phase"
     else:
-        state.status = RUNNING
+        state.status = AWAITING_APPROVAL
 
     _write_evidence(
         evidence_dir, prompt, adapter_result, adapter_timed_out,
@@ -380,18 +314,9 @@ def _run_plan_iteration(
         or state.status == AWAITING_APPROVAL
     ):
         _push_target(target, evidence_dir)
-    _write_plan_notes(
-        job_dir, iteration, state.status, plan_exists, proposed,
-        adapter_result, diff_stat,
-    )
     state.save(job_dir)
 
-    detail = (
-        f"{len(proposed)} gate(s) proposed" if proposed
-        else f"plan deliverables incomplete ({PLAN_FILE}: {plan_exists}, "
-             f"{PROPOSED_GATES_FILE}: invalid/missing)"
-    )
-    print(f"autolab: plan iteration {iteration} done — status={state.status}, {detail}")
+    print(f"autolab: plan iteration {iteration} done — status={state.status}")
     return STATUS_EXIT_CODES.get(state.status, EXIT_CONTINUE)
 
 
@@ -444,7 +369,7 @@ def _run_locked(job_dir: Path) -> int:
         return EXIT_ERROR
 
     try:
-        adapter = adapters.create(job.adapter, job.adapter_config)
+        adapter = adapters.create(job.adapter, job.adapter_config, job_dir=job_dir)
     except adapters.AdapterError as exc:
         print(f"autolab: {exc}", file=sys.stderr)
         state.status = ERROR
@@ -453,6 +378,7 @@ def _run_locked(job_dir: Path) -> int:
         return EXIT_ERROR
 
     # Resolve phase: sticky in state; first iteration derives it from job.yaml.
+    # This is the operator's style choice, made before any agent runs.
     if state.phase is None:
         state.phase = IMPLEMENT_PHASE if job.gates else PLAN_PHASE
     effective_gates = state.approved_gates or job.gates
@@ -477,7 +403,7 @@ def _run_locked(job_dir: Path) -> int:
     try:
         _ensure_target_repo(target)
 
-        notes_path = job_dir / "NOTES.md"
+        notes_path = job_dir / NOTES_FILE
         notes = notes_path.read_text(encoding="utf-8") if notes_path.is_file() else None
 
         if state.phase == PLAN_PHASE:
@@ -488,7 +414,9 @@ def _run_locked(job_dir: Path) -> int:
 
         plan_path = target / PLAN_FILE
         plan = plan_path.read_text(encoding="utf-8") if plan_path.is_file() else None
-        prompt = build_implement_prompt(job, effective_gates, state, notes, plan)
+        prompt = build_implement_prompt(
+            job, job_dir, iteration, effective_gates, state, notes, plan
+        )
 
         adapter_result, adapter_timed_out = _run_adapter_with_timeout(
             adapter, prompt, target, job.iteration_timeout_seconds
@@ -499,24 +427,17 @@ def _run_locked(job_dir: Path) -> int:
         )
         summary = gates_mod.summarize(gate_results)
 
-        _git(target, "add", "-A")
-        diff_text = _git(target, "diff", "--cached").stdout
-        diff_stat = _git(target, "diff", "--cached", "--stat").stdout
-        diff_nonempty = bool(diff_text.strip())
-        if diff_nonempty:
-            _git(target, "commit", "-q", "-m", f"autolab: iteration {iteration:04d}")
+        diff_text, diff_nonempty = _commit_target(
+            target, f"autolab: iteration {iteration:04d}"
+        )
 
-        progressed = _made_progress(state.last_gate_summary, set(summary["failing"]), diff_nonempty)
-        state.consecutive_no_progress = 0 if progressed else state.consecutive_no_progress + 1
         state.last_gate_summary = summary
 
+        # `converged` restates the observation (every gate exited 0); `stuck`
+        # means the iteration budget ran out. Neither is an opinion about how
+        # the iteration went — that is the agent's to write in NOTES.md.
         if summary["passed"]:
             state.status = CONVERGED
-        elif state.consecutive_no_progress >= job.no_progress_limit:
-            state.status = STUCK
-            state.error = (
-                f"no progress for {state.consecutive_no_progress} consecutive iterations"
-            )
         elif iteration >= job.max_iterations:
             state.status = STUCK
             state.error = f"max_iterations ({job.max_iterations}) reached"
@@ -529,12 +450,12 @@ def _run_locked(job_dir: Path) -> int:
         )
         if job.push and (diff_nonempty or state.status in TERMINAL_STATUSES):
             _push_target(target, evidence_dir)
-        _write_notes(job_dir, iteration, state.status, gate_results, adapter_result, diff_stat)
         state.save(job_dir)
 
         print(
             f"autolab: iteration {iteration} done — status={state.status}, "
-            f"gates {summary['total'] - len(summary['failing'])}/{summary['total']} passing"
+            f"gates {summary['total'] - len(summary['failing'])}/{summary['total']} "
+            "exited 0"
         )
         return STATUS_EXIT_CODES.get(state.status, EXIT_CONTINUE)
 

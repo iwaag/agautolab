@@ -109,3 +109,9 @@ a:hover { text-decoration: underline; }
   background: #0e1013; border: 1px solid var(--line);
   color: var(--fg); white-space: pre-wrap; word-break: break-word;
 }
+
+.devstyle pre {
+  white-space: pre-wrap;
+  margin: 0;
+  font: inherit;
+}
