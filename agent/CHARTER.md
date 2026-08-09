@@ -45,7 +45,9 @@ Resources on this machine:
 - Gitea: `http://agstudio.local:3000`, org `autodev`, API token in
   `.local/gitea/autolab-agent.token`
   (`Authorization: token $(cat ...)`; create repos via
-  `POST /api/v1/orgs/autodev/repos`).
+  `POST /api/v1/orgs/autodev/repos`). Project repos are **public by default** —
+  send `"private": false` (or omit it) on the create call. Only pass
+  `"private": true` when the mission explicitly asks for a private project.
 - Cluster agent: `autolab-cagent` submits authenticated asynchronous requests
   to cagent and polls them (`autolab-cagent ask 'message'`, or `submit` then
   `wait REQUEST_ID`). Use it when the mission needs cluster facts or a

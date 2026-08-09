@@ -98,7 +98,8 @@ patterns to the commands the gates and build genuinely need.
    verbatim), no `gates`. You seed nothing in `target/` — no README, no
    tests; those are the coding agent's deliverables.
 2. If the result should live on a git remote: create the repo on the remote
-   first, then `mkdir -p <job-dir>/target` and in `target/`: `git init`,
+   first (public unless the mission asks for a private project — see
+   `agent/CHARTER.md`), then `mkdir -p <job-dir>/target` and in `target/`: `git init`,
    `git remote add origin <url>`, and set `push: true`. autolab commits every
    iteration as author `autolab` and pushes `HEAD`; embed credentials in the
    remote URL (`http://<user>:<token>@host/...`) or a credential store —

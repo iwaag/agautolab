@@ -23,6 +23,10 @@ services:
       - GITEA__service__DISABLE_REGISTRATION=true
       - GITEA__repository__ENABLE_PUSH_CREATE_ORG=true
       - GITEA__repository__ENABLE_PUSH_CREATE_USER=true
+      # Auto-dev project repos are public by default; a job asks for a private
+      # repo explicitly (`"private": true` on the create call).
+      - GITEA__repository__DEFAULT_PRIVATE=public
+      - GITEA__repository__DEFAULT_PUSH_CREATE_PRIVATE=false
     volumes:
       - autodev_gitea_data:/data
     ports:

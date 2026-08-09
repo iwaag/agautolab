@@ -41,7 +41,7 @@ docker exec -u git autodev-gitea gitea admin user generate-access-token \
 curl -X POST http://localhost:3000/api/v1/orgs \
   -H "Authorization: token $(cat ../../.local/gitea/autolab-agent.token)" \
   -H "Content-Type: application/json" \
-  -d '{"username":"autodev","visibility":"private"}'
+  -d '{"username":"autodev","visibility":"public"}'
 ```
 
 Verified 2026-08-07: repo create via API (201), push over HTTP with the token,
@@ -51,6 +51,12 @@ clone round-trip, then smoke repo deleted (204). Also reachable as
 ## Conventions
 
 - Job repos live under the `autodev` org (e.g. `autodev/othello-web`).
+- Repos are **public by default**: the org is public, and the compose file
+  sets `DEFAULT_PRIVATE=public` + `DEFAULT_PUSH_CREATE_PRIVATE=false` so both
+  API-created and push-created repos land public. A private repo is an opt-in
+  (`"private": true` at create time) requested by the mission.
+  Changed 2026-08-09; the org and all seven repos existing then were flipped
+  from private to public.
 - Clone/push URL for agents:
   `http://autolab-agent:<token>@agstudio.local:3000/autodev/<repo>.git`
   (token read from `.local/`; never write this URL into tracked files).
