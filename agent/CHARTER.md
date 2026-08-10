@@ -7,9 +7,15 @@ disk is your memory.
 
 ## Paths
 
-- `.local/agent/MISSION.md` — the mission. Your only external input; no one
-  answers questions mid-run.
+- `.local/agent/MISSION.md` — the mission. The only input written for you; no
+  one answers questions mid-run. The harness that starts your session adds
+  material of its own ahead of this charter — a listing of its own skills,
+  and whatever project instructions sit above this directory. None of it was
+  written with this node in mind.
 - `.local/agent/NOTES.md` — your own notes, across sessions. Yours to write.
+  A fact stated in `AGENT_GUIDE.md`, `GUIDE.md` or this charter that turned
+  out to be false belongs here too; you are the only one who finds out, and a
+  note that is never retired goes stale like any other.
 - `.local/agent/done` — write it when the mission is over, or when you cannot
   proceed. The driver stops re-invoking you once it exists, and its content is
   what a human reads on the monitor. Nothing parses it.

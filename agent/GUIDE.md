@@ -23,16 +23,22 @@ evidence on disk — prompt, diff, gate results, cost.
 
 ## What it costs
 
-Measured on this node (2026-08-09), tentative figures rather than quotes:
+`GET /jobs` carries `cost_usd` for every job this node has run, and
+`GET /status` carries its cumulative session spend under `cost`. Those are
+the live numbers. The figures below are examples from 2026-08-10, tentative
+rather than quotes; a number written here goes stale as jobs run, the paths
+do not.
 
-- A small CLI-sized job, `claude_code` adapter: **~0.13–0.21 USD**,
+- A small CLI-sized job, `claude_code` adapter: **~0.09–0.21 USD**,
   1 iteration, a few minutes.
-- A small web game (snake): **~0.9–1.35 USD** over 2 iterations.
+- A small web game (snake): **~0.9–1.35 USD** over 2–3 iterations.
+- The largest job this node has run: **3.78 USD** — jobs are not bounded by
+  the examples above, only by `max_iterations`.
 - The `fake` adapter: **0 USD** — no credentials, exists to test the loop.
-- A mission is the sum of its sessions plus mediator time; `GET /status`
-  reports this node's cumulative session spend under `cost`.
-- An iteration summary: **0.11–0.19 USD**, 11–15 s, paid once per iteration
-  and cached after.
+- A mission is the sum of its sessions plus mediator time.
+- An iteration summary: **~0.13–0.21 USD**, 11–18 s, paid once per iteration
+  and cached after; each cached summary carries its own
+  `summarizer.cost_usd` and `duration_ms` — read those rather than this line.
 - Talking to this window: **unknown in USD on the default backend** — a local
   model via ollama (`qwen3.6:35b-a3b-coding-nvfp4`), which reports tokens but
   no price: ~2500 prompt tokens and 3–28 s per answer, measured 2026-08-10.

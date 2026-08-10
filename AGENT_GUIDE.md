@@ -92,7 +92,8 @@ Evidence numbering continues from `iteration`.
 - `http://<host>:8791/monitor/` shows all of this live, read-only, without
   taking the lock — assume someone may be watching.
 - `POST /jobs/<job>/summarize/<iter>` on that gateway runs a separate
-  one-shot `claude -p` over one evidence directory (~$0.15, once per
-  iteration, cached). Its prose is the only iteration content that leaves
-  this node.
+  one-shot `claude -p` over one evidence directory (once per iteration,
+  cached; the cached summary carries its own `summarizer.cost_usd` and
+  `duration_ms`, lately ~$0.13–0.21 and 11–18 s). Its prose is the only
+  iteration content that leaves this node.
 - Unattended runs: `devenv/systemd/autolab@.service`, one instance per job.
