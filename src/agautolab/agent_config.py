@@ -7,7 +7,7 @@ import os
 import re
 import shutil
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +42,7 @@ class ResolvedAgent:
     model_options: dict[str, Any]
     command: str
     provider_base_url: str | None
+    environment: dict[str, str] = field(default_factory=dict)
 
     @property
     def native_model(self) -> str:
@@ -161,6 +162,30 @@ def _resolve_command(harness: str, overlay: dict[str, Any], *, check_available: 
     return str(resolved or command)
 
 
+def _resolve_secret_environment(provider: str, overlay: dict[str, Any], *,
+                                check_available: bool) -> dict[str, str]:
+    if provider != "anthropic":
+        return {}
+    secrets = _table(_table(overlay, "local"), "secrets")
+    if reference := secrets.get("anthropic_api_key_env"):
+        value = os.environ.get(reference, "")
+        if check_available and not value:
+            raise AgentConfigError("E_UNAVAILABLE", f"secret environment variable {reference!r} is unavailable")
+        return {"ANTHROPIC_API_KEY": value} if value else {}
+    if reference := secrets.get("anthropic_api_key_file"):
+        path = Path(os.path.expanduser(reference))
+        try:
+            value = path.read_text(encoding="utf-8").strip()
+        except OSError as error:
+            if check_available:
+                raise AgentConfigError("E_UNAVAILABLE", f"secret file {reference!r} is unavailable: {error}") from error
+            return {}
+        if check_available and not value:
+            raise AgentConfigError("E_UNAVAILABLE", f"secret file {reference!r} is empty")
+        return {"ANTHROPIC_API_KEY": value} if value else {}
+    return {}
+
+
 def resolve_role(config: dict[str, Any], overlay: dict[str, Any], role: str, *,
                  profile_override: str | None = None, check_available: bool = True) -> ResolvedAgent:
     roles = _table(config, "roles")
@@ -188,7 +213,9 @@ def resolve_role(config: dict[str, Any], overlay: dict[str, Any], role: str, *,
     return ResolvedAgent(role, profile_name, harness, provider, model,
                          dict(_table(config, "models")[model]),
                          _resolve_command(harness, overlay, check_available=check_available),
-                         provider_base_url)
+                         provider_base_url,
+                         _resolve_secret_environment(provider, overlay,
+                                                     check_available=check_available))
 
 
 def resolve_project_role(role: str, *, profile_override: str | None = None,

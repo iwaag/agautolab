@@ -58,6 +58,22 @@ def test_unknown_job_profile_has_contract_code():
     assert caught.value.code == "E_UNKNOWN_PROFILE"
 
 
+def test_anthropic_secret_file_reference_becomes_process_environment(tmp_path):
+    committed = Path(__file__).resolve().parents[1] / "agents.toml"
+    secret = tmp_path / "anthropic-key"
+    secret.write_text("deployment-secret\n")
+    overlay = tmp_path / "agents.local.toml"
+    overlay.write_text(f'''schema = "ag.agent-config.v1"
+[local.harness.claude_code]
+command = "/usr/bin/true"
+[local.secrets]
+anthropic_api_key_file = "{secret}"
+''')
+    config, local = load_config(committed, overlay)
+    resolved = resolve_role(config, local, "coding")
+    assert resolved.environment == {"ANTHROPIC_API_KEY": "deployment-secret"}
+
+
 def test_job_profile_override_fails_with_contract_code(tmp_path):
     job = tmp_path / "job"
     job.mkdir()

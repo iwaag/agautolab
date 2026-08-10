@@ -123,7 +123,7 @@ def run_harness(agent: ResolvedAgent, prompt: str, *, cwd: Path, timeout: float,
                           extra_args=extra_args, skip_permissions=skip_permissions)
     except ValueError as error:
         return HarnessResult(str(error), -1, {**meta, "outcome": "failed", "failure": str(error)})
-    env = {**os.environ, "NO_COLOR": "1"}
+    env = {**os.environ, **agent.environment, "NO_COLOR": "1"}
     if agent.provider_base_url:
         env[f"AGENT_PROVIDER_{agent.provider.upper()}_BASE_URL"] = agent.provider_base_url
     if opencode_config:
