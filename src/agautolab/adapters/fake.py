@@ -24,6 +24,8 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..agent_config import ResolvedAgent
+from ..harness import identity
 from . import AdapterResult
 
 
@@ -34,9 +36,11 @@ class FakeAdapter:
     plan_gates: list[str] = field(default_factory=list)
     phase: str | None = None
     job_dir: Path | None = None
+    agent: ResolvedAgent | None = None
 
     @classmethod
-    def from_config(cls, config: dict, job_dir: Path | None = None) -> "FakeAdapter":
+    def from_config(cls, config: dict, job_dir: Path | None = None,
+                    agent: ResolvedAgent | None = None) -> "FakeAdapter":
         plan_gates = config.get("plan_gates", [])
         if not isinstance(plan_gates, list):
             plan_gates = [str(plan_gates)]
@@ -46,6 +50,7 @@ class FakeAdapter:
             plan_gates=[str(g) for g in plan_gates],
             phase=config.get("phase"),
             job_dir=job_dir,
+            agent=agent,
         )
 
     def _current_phase(self, workdir: Path) -> str:
@@ -80,9 +85,12 @@ class FakeAdapter:
             "gates:\n" + "".join(f'  - "{g}"\n' for g in gates), encoding="utf-8"
         )
         verb = "revised" if revising else "wrote"
+        meta = identity(self.agent) if self.agent else {}
+        meta["outcome"] = "done"
         return AdapterResult(
             output=f"fake adapter {verb} PLAN.md and proposed {len(gates)} gate(s)",
             exit_code=0,
+            meta=meta,
         )
 
     def _implement(self, prompt: str, workdir: Path) -> AdapterResult:
@@ -95,4 +103,6 @@ class FakeAdapter:
             f"fake adapter appended line {count} to {self.file} "
             f"(prompt was {len(prompt)} chars)"
         )
-        return AdapterResult(output=output, exit_code=0)
+        meta = identity(self.agent) if self.agent else {}
+        meta["outcome"] = "done"
+        return AdapterResult(output=output, exit_code=0, meta=meta)

@@ -11,16 +11,18 @@ job's acceptance gates exit 0.
   so crash recovery needs no code.
 - Each iteration's prompt is built from the goal, the current gate results,
   and the handoff the coding agent left in `NOTES.md`.
-- Backends are adapters with a tiny interface:
+- Harness adapters have a tiny interface:
   `run(prompt, workdir, timeout) -> {output, exit}` plus optional metadata and
   evidence artifacts.
 
 ## Adapters
 
 - `fake` — appends a line per run; no credentials, 0 USD, used by the tests.
+- `opencode` — `opencode run --format json` with the profile's full canonical
+  model ID; raw JSONL is retained as `agent_output.jsonl`.
 - `claude_code` — `claude -p --output-format json` one-shot, `cwd=target/`,
-  prompt on stdin. Saves stdout as `claude_output.json` and the parsed result
-  JSON into `adapter_result.json`. `adapter_config`: `command`, `args`,
+  prompt on stdin. Saves stdout as `agent_output.json` and normalized metadata
+  into `adapter_result.json`. `adapter_config`: `args`, `allowed_tools`,
   `add_job_dir` (grants the job dir via `--add-dir`, default true),
   `skip_permissions` (experimental nodes only; never on a machine holding
   real credentials).
@@ -29,7 +31,7 @@ job's acceptance gates exit 0.
 
 ```
 <job-dir>/
-  job.yaml        # goal, adapter, gates, max_iterations, timeouts, push
+  job.yaml        # goal, optional profile override, gates, timeouts, push
   state.json      # status, iteration, phase, gate summary, approved gates
   target/         # the repo being developed (auto git-init on first run)
   evidence/iter-NNNN/   # prompt, adapter output, diff, gate results, cost
@@ -53,6 +55,11 @@ uv run autolab approve path/to/job [--gates FILE | --gate CMD]
 uv run autolab reject path/to/job --feedback <file|text>
 uv run pytest -q
 ```
+
+`agents.toml` declares the five roles and named profiles. Machine paths,
+provider endpoints, and per-node role overrides belong only in the ignored
+`.local/agents.local.toml`. Selection failures use `ag.agent-config.v1` error
+codes and never fall back to another harness or model.
 
 ## Around it
 

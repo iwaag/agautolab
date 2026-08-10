@@ -7,7 +7,7 @@ every request: edit it and the next answer changes, no restart. Served raw at
 ## What this is
 
 An autolab node: a headless auto-development loop. You describe something you
-want built; a mediator agent turns it into a *job* (a goal, a coding adapter,
+want built; a mediator agent turns it into a *job* (a goal, a coding profile,
 and acceptance gates) and runs one-shot coding-agent iterations against it
 until the gates exit 0 or the iteration cap is reached. Every iteration leaves
 evidence on disk — prompt, diff, gate results, cost.
@@ -41,10 +41,10 @@ do not.
 - An iteration summary: **~0.13–0.21 USD**, 11–18 s, paid once per iteration
   and cached after; each cached summary carries its own
   `summarizer.cost_usd` and `duration_ms` — read those rather than this line.
-- Talking to this window: **unknown in USD on the default backend** — a local
-  model via ollama (`qwen3.6:35b-a3b-coding-nvfp4`), which reports tokens but
+- Talking to this window: **unknown in USD on the default profile** — OpenCode
+  with the local Ollama model (`ollama/qwen3.6:35b-a3b-coding-nvfp4`), which reports tokens but
   no price: ~2500 prompt tokens and 3–28 s per answer, measured 2026-08-10.
-  On the `claude` backend answers measured **0.10–0.26 USD** and 7–8 s. Every
+  Claude Code answers measured **0.10–0.26 USD** and 7–8 s. Every
   answer is recorded under `.local/agent/window/`.
 
 Timing: an iteration's budget is `iteration_timeout_seconds` (default 900).
@@ -55,6 +55,13 @@ request/response wait.
 
 Project workspaces live under `.local/projects/<name>/direction/`;
 `.local/projects/projects.md` lists every project, one line each. To consult
-a project's director, run `claude -p --allowedTools Read,Glob,Grep` with the
-request on stdin and that project's `direction/` directory as the working
-directory.
+a project's director, pass the request to the common runner and name record
+paths so the nested identity is reviewable:
+
+```bash
+uv run python -m agautolab.role_run director \
+  --prompt "your question" \
+  --cwd .local/projects/<name>/direction \
+  --transcript .local/agent/director/run-<id>.agent.jsonl \
+  --record .local/agent/director/run-<id>.json
+```

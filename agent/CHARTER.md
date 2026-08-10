@@ -20,8 +20,9 @@ disk is your memory.
   proceed. The driver stops re-invoking you once it exists, and its content is
   what a human reads on the monitor. Nothing parses it.
 - `.local/jobs/<job>/` — job directories. Keep them here.
-- `.local/agent/claude_bin` — the coding-agent binary path, for
-  `adapter_config.command`.
+- `agents.toml` and `.local/agents.local.toml` — role/profile selection and
+  local harness/provider facts. A job may override the `coding` profile with
+  `profile:`; model flags do not belong in `adapter_config`.
 - `.local/gitea/autolab-agent.token` — Gitea at `http://agstudio.local:3000`,
   org `autodev` (`Authorization: token $(cat ...)`;
   `POST /api/v1/orgs/autodev/repos`).

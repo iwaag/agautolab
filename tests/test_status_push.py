@@ -15,6 +15,7 @@ def make_job(job_dir: Path, *, gates: list[str], push: bool = False
     gate_lines = "\n".join(f'  - "{g}"' for g in gates)
     (job_dir / "job.yaml").write_text(
         "goal: |\n  Toy goal for tests.\n"
+        "profile: stub\n"
         "adapter: fake\n"
         f"gates:\n{gate_lines}\n"
         + ("push: true\n" if push else ""),

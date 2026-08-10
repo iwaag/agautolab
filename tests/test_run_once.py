@@ -31,6 +31,7 @@ def make_job(job_dir: Path, *, gates: list[str] | None = None,
     job_dir.mkdir(parents=True, exist_ok=True)
     doc: dict = {
         "goal": "Toy goal for tests.",
+        "profile": "stub",
         "adapter": "fake",
         "max_iterations": max_iterations,
     }
@@ -163,7 +164,7 @@ def test_unknown_adapter_errors(tmp_path):
     assert run_once(job_dir) == EXIT_ERROR
     state = read_state(job_dir)
     assert state["status"] == "error"
-    assert "unknown adapter" in state["error"]
+    assert "disagrees with profile harness" in state["error"]
 
 
 def test_missing_job_dir_errors(tmp_path):

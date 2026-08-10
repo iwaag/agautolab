@@ -19,7 +19,8 @@ class JobError(Exception):
 @dataclass
 class Job:
     goal: str
-    adapter: str
+    profile: str | None = None
+    adapter: str | None = None
     # Empty gates = the job starts in the plan phase: the coding agent's first
     # deliverable is PLAN.md + proposed_gates.yaml, confirmed via `autolab
     # approve` into state.json. Non-empty gates skip planning entirely.
@@ -45,12 +46,15 @@ class Job:
             raise JobError("job.yaml must be a mapping")
 
         goal = raw.get("goal")
+        profile = raw.get("profile")
         adapter = raw.get("adapter")
         gates = raw.get("gates") or []
         if not isinstance(goal, str) or not goal.strip():
             raise JobError("job.yaml: 'goal' must be a non-empty string")
-        if not isinstance(adapter, str) or not adapter.strip():
-            raise JobError("job.yaml: 'adapter' must be a non-empty string")
+        if profile is not None and (not isinstance(profile, str) or not profile.strip()):
+            raise JobError("job.yaml: 'profile' must be a non-empty string when present")
+        if adapter is not None and (not isinstance(adapter, str) or not adapter.strip()):
+            raise JobError("job.yaml: 'adapter' must be a non-empty string when present")
         if not isinstance(gates, list) or not all(
             isinstance(g, str) and g.strip() for g in gates
         ):
@@ -72,7 +76,8 @@ class Job:
 
         return cls(
             goal=goal,
-            adapter=adapter.strip(),
+            profile=profile.strip() if profile else None,
+            adapter=adapter.strip() if adapter else None,
             gates=[g.strip() for g in gates],
             max_iterations=_pos_int("max_iterations", DEFAULT_MAX_ITERATIONS),
             iteration_timeout_seconds=_pos_int(

@@ -16,8 +16,8 @@ Runtime state under `../.local/agent/`:
 - `NOTES.md` — the agent's own continuity, agent-written.
 - `done` — the agent's end-of-mission note. `drive.sh` stops on its existence
   and never reads it; starting a new mission clears it.
-- `claude_bin` — absolute path (or glob) to the claude binary.
-- `sessions/session-NNNN.json` — full claude output per session.
+- `sessions/session-NNNN.agent.jsonl` — raw mediator harness output.
+- `sessions/session-NNNN.run.json` — normalized mediator run record.
 - `gateway/`, `window/` — run logs and per-answer records. (`director/` holds
   records of the removed `/director` route, kept as evidence.)
 
@@ -27,13 +27,13 @@ Per-job state lives under `../.local/jobs/<job>/`; the summarizer adds
 ## Run
 
 ```bash
-echo "/path/to/claude" > .local/agent/claude_bin   # once
 $EDITOR .local/agent/MISSION.md                    # the mission
 agent/drive.sh [max_sessions]                      # default 12; 0 = done file exists, 10 = budget spent
 ```
 
-`AUTOLAB_AGENT_MODEL` sets the agent model (default `claude-sonnet-5`);
-`AUTOLAB_CLAUDE_BIN` the binary. Sessions are never resumed.
+Configure role profiles in `agents.toml`; put binary paths/globs, the Ollama
+endpoint, and per-node role overrides in `.local/agents.local.toml`. Sessions
+are never resumed and unavailable selections fail without fallback.
 
 ## Gateway routes (default `:8791`)
 
@@ -42,8 +42,8 @@ Stdlib-only. No route carries authentication (zero_auth episode).
 - `POST /window` `{"text": str}` — the conversational entrance, and the only
   way in for work: a `<<mission>>…<</mission>>` block in the window's reply
   writes MISSION.md and launches `drive.sh` detached (409 while one runs).
-  One answer at a time (409). On the `claude` backend it may launch a project
-  director's one-shot in a `.local/direction/<name>/` workspace (see
+  One answer at a time (409). It may launch the profile-selected project
+  director in a `.local/projects/<name>/direction/` workspace (see
   `GUIDE.md`).
 - `GET /guide` — `GUIDE.md` as plain text.
 - `GET /status` — driver liveness/exit, mission text, the agent's `done` note
@@ -53,7 +53,7 @@ Stdlib-only. No route carries authentication (zero_auth episode).
 - `GET /jobs/<job>` — that row plus the evidence timeline.
 - `GET /jobs/<job>/evidence/<iter>/<file>` — the raw evidence file.
 - `POST /jobs/<job>/summarize/<iter>` `?force=1` — summarize one evidence
-  directory on this node with a one-shot `claude -p`. Paid: one summarizer
+  directory on this node with the `summarizer` role. One summarizer
   at a time, one paid call per iteration ever.
 - `GET /jobs/<job>/summarize/<iter>` — `{status, summary?, summarizer?}`.
 - `GET /monitor/` — the watch page. `GET /game/` — `.local/agent/serve/`.
@@ -62,21 +62,13 @@ Stdlib-only. No route carries authentication (zero_auth episode).
 Reads never write and never take a job's `.lock`. JSON carries a
 `"kind": "autolab.monitor.v1"` envelope.
 
-## Window backends (Agent ≠ Model)
+## Agent profiles (Agent ≠ Model)
 
-Process env first, then `../.local/.env`:
-
-| variable | default | meaning |
-|---|---|---|
-| `AUTOLAB_WINDOW_BACKEND` | `ollama` | `ollama` \| `claude` |
-| `AUTOLAB_WINDOW_MODEL` | `qwen3.6:35b-a3b-coding-nvfp4` / `claude-sonnet-5` | model |
-| `AUTOLAB_OLLAMA_URL` | `http://127.0.0.1:11434` | ollama endpoint |
-
-`AUTOLAB_CLAUDE_BIN` and `.local/agent/claude_bin` may be globs, and should
-be: the usual value points into a version-numbered editor-extension directory
-that goes stale on every update. Write
-`/path/to/anthropic.claude-code-*-<arch>/resources/native-binary/claude` and
-the newest match resolves per call.
+All five roles resolve through `ag.agent-config.v1`: `front`, `director`,
+`mediator`, `coding`, and `summarizer`. The committed file names profiles;
+the ignored local overlay selects per-node profiles and supplies commands and
+provider endpoints. Every new window, session, summary, director, and coding
+record carries role, profile, harness, provider, canonical model, and outcome.
 
 ## Monitoring page
 

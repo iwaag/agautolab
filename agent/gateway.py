@@ -29,7 +29,7 @@ cluster. The guards that exist are cost/concurrency guards, not auth.
 POST /jobs/.../summarize/... spends money, so it is bounded by a
 one-at-a-time guard and by the per-iteration cache (one paid call per
 iteration ever). POST /window carries the same one-at-a-time guard; its
-default backend is a local ollama model that costs nothing but electricity.
+selected profile may use OpenCode or Claude Code.
 
 Monitoring reads never write and never take a job's `.lock`, so they are safe
 against a live iteration; half-written JSON degrades to an `error` field on
@@ -48,7 +48,6 @@ State lives under .local/agent/ next to the rest of the agent layer:
   window/run-NNNN.json   one record per window answer (devpolicy/agent_records.md)
 """
 
-import glob
 import json
 import os
 import re
@@ -57,12 +56,14 @@ import subprocess
 import sys
 import threading
 import time
-import urllib.error
-import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "src"))
+
+from agautolab.agent_config import AgentConfigError  # noqa: E402
+from agautolab.role_run import run_role  # noqa: E402
 STATE = ROOT / ".local" / "agent"
 GATEWAY = STATE / "gateway"
 SERVE = STATE / "serve"
@@ -200,16 +201,19 @@ def session_summaries(since=None):
     # so /status can report the current run instead of every run ever.
     out = []
     sessions = STATE / "sessions"
-    for p in sorted(sessions.glob("session-*.json")):
+    current_records = sorted(sessions.glob("session-*.run.json"))
+    legacy_records = sorted(p for p in sessions.glob("session-*.json")
+                            if not p.name.endswith(".run.json"))
+    for p in [*legacy_records, *current_records]:
         if since is not None and p.stat().st_mtime < since - 1:
             continue
         row = {"file": p.name}
         try:
             d = json.loads(p.read_text())
             row.update(
-                is_error=d.get("is_error"),
+                is_error=d.get("is_error", d.get("outcome") == "failed"),
                 turns=d.get("num_turns"),
-                cost_usd=d.get("total_cost_usd"),
+                cost_usd=d.get("cost_usd", d.get("total_cost_usd")),
                 duration_s=round(d.get("duration_ms", 0) / 1000),
             )
         except ValueError:
@@ -222,7 +226,10 @@ def session_summaries(since=None):
 
 
 def sessions_on_disk():
-    return len(list((STATE / "sessions").glob("session-*.json")))
+    sessions = STATE / "sessions"
+    return len(list(sessions.glob("session-*.run.json"))) + len([
+        p for p in sessions.glob("session-*.json") if not p.name.endswith(".run.json")
+    ])
 
 
 def game_info(started=None):
@@ -246,9 +253,13 @@ def sessions_cost():
     total = 0.0
     started = (current_run() or {}).get("started")
     run_total = 0.0
-    for p in (STATE / "sessions").glob("session-*.json"):
+    records = list((STATE / "sessions").glob("session-*.run.json"))
+    records += [p for p in (STATE / "sessions").glob("session-*.json")
+                if not p.name.endswith(".run.json")]
+    for p in records:
         try:
-            c = json.loads(p.read_text()).get("total_cost_usd")
+            doc = json.loads(p.read_text())
+            c = doc.get("cost_usd", doc.get("total_cost_usd"))
         except (OSError, ValueError):
             continue
         if not isinstance(c, (int, float)):
@@ -291,7 +302,7 @@ def job_yaml_fields(job_dir):
         pass
     out = {}
     for line in text.splitlines():
-        m = re.match(r"^(adapter|max_iterations|push):\s*(\S+)\s*$", line)
+        m = re.match(r"^(profile|adapter|max_iterations|push):\s*(\S+)\s*$", line)
         if m:
             out[m.group(1)] = m.group(2).strip("\"'")
     return _job_fields(out)
@@ -303,6 +314,8 @@ def _job_fields(doc):
     out = {}
     if isinstance(doc.get("adapter"), str):
         out["adapter"] = doc["adapter"]
+    if isinstance(doc.get("profile"), str):
+        out["profile"] = doc["profile"]
     try:
         out["max_iterations"] = int(doc["max_iterations"])
     except (KeyError, TypeError, ValueError):
@@ -321,20 +334,18 @@ def evidence_iters(job_dir):
 
 
 def iter_cost(job_dir, name):
-    """Per-iteration cost. adapter_result.json is the adapter's own record;
-    claude_output.json is the raw agent JSON and carries the same number."""
-    for fname in ("adapter_result.json", "claude_output.json"):
-        doc = read_json(job_dir / "evidence" / name / fname)
-        if isinstance(doc, dict) and isinstance(
-            doc.get("total_cost_usd"), (int, float)
-        ):
-            return doc["total_cost_usd"]
+    """Per-iteration cost from the normalized adapter record."""
+    doc = read_json(job_dir / "evidence" / name / "adapter_result.json")
+    if isinstance(doc, dict):
+        cost = doc.get("cost_usd", doc.get("total_cost_usd"))
+        if isinstance(cost, (int, float)):
+            return cost
     return None
 
 
 # --- iteration summaries -------------------------------------------------
 #
-# An iteration's evidence is summarized where it lives: a one-shot `claude -p`
+# An iteration's evidence is summarized where it lives: a one-shot profile run
 # reads .local/jobs/<job>/evidence/<iter>/ and writes prose next to it under
 # summaries/. Callers outside this node get the prose, never the raw files —
 # that boundary is the point of the feature, not an implementation detail.
@@ -343,8 +354,6 @@ def iter_cost(job_dir, name):
 # state.json, evidence, MISSION.md, NOTES.md or the job's .lock, so it is safe
 # to run against an iteration that is still being written (such a summary is
 # allowed to be wrong; `?force=1` regenerates it).
-
-SUMMARY_ALLOWED_TOOLS = "Read,Glob,Grep"
 
 SUMMARY_PROMPT = """`{rel}` holds the evidence of one autolab coding-agent
 iteration: `prompt.txt` (what the agent was asked), `diff.patch` (what it
@@ -355,29 +364,6 @@ changed), `gates.json` (the verification commands and their exit codes),
 Summarize that iteration for someone watching this job who has not seen the
 files. Your reply is shown to them as written.
 """
-
-# Promotion runs in a separate interpreter so the wrapper stays a one-liner:
-# claude's stdout goes in, the summary comes out as written, and the
-# summarizer's own cost is recorded — an open route that spends
-# money should at least say how much. Non-JSON stdout is carried through as
-# the summary rather than discarded; `?force=1` regenerates anything unwanted.
-EXTRACT_PY = r"""
-import json, pathlib, sys
-raw, md, cost = sys.argv[1], sys.argv[2], sys.argv[3]
-stdout = pathlib.Path(raw).read_text()
-try:
-    doc = json.loads(stdout)
-except Exception:
-    doc = {}
-text = str(doc.get("result") or stdout)
-pathlib.Path(md).write_text(text.strip() + "\n")
-pathlib.Path(cost).write_text(json.dumps({
-    "cost_usd": doc.get("total_cost_usd"),
-    "num_turns": doc.get("num_turns"),
-    "duration_ms": doc.get("duration_ms"),
-}))
-"""
-
 
 def summaries_dir(job_dir):
     return job_dir / "summaries"
@@ -394,45 +380,6 @@ def summary_paths(job_dir, iteration):
         "log": d / f"{iteration}.log",
         "prompt": d / f"{iteration}.prompt.txt",
     }
-
-
-def newest_match(pattern):
-    """Newest existing file matching a glob, or None.
-
-    The pointer file may hold a glob rather than a fixed path. That exists
-    because the usual value is an absolute path into a *version-numbered*
-    editor-extension directory, which goes stale on every update and fails as
-    `No such file or directory` — an infra-looking error with a config cause.
-    It cost a summarizer run once and a window run again before this was
-    written; a glob survives the next update on its own.
-    """
-    matches = [p for p in glob.glob(pattern) if os.path.isfile(p)]
-    if not matches:
-        return None
-    return max(matches, key=lambda p: os.stat(p).st_mtime)
-
-
-def claude_bin():
-    """Same resolution order as session.sh: env, then the .local pointer file,
-    then PATH. The gateway may run without the developer's interactive PATH.
-    Either of the first two may be a glob (see newest_match)."""
-    for candidate in (os.environ.get("AUTOLAB_CLAUDE_BIN"), read_claude_pointer()):
-        if not candidate:
-            continue
-        if any(ch in candidate for ch in "*?["):
-            resolved = newest_match(candidate)
-            if resolved:
-                return resolved
-            continue
-        return candidate
-    return "claude"
-
-
-def read_claude_pointer():
-    try:
-        return (STATE / "claude_bin").read_text().strip()
-    except OSError:
-        return None
 
 
 def summary_status(job_dir, iteration):
@@ -491,14 +438,17 @@ def start_summarizer(job_dir, iteration):
     p["prompt"].write_text(SUMMARY_PROMPT.format(rel=rel))
     for stale in ("md", "raw", "cost", "exit"):
         p[stale].unlink(missing_ok=True)
-    model = os.environ.get("AUTOLAB_SUMMARY_MODEL", "claude-sonnet-5")
-    # claude's stdout lands in .raw.json; the extractor writes the summary and
-    # the cost record beside it when the run exits 0.
+    temporary = p["md"].with_suffix(".tmp")
+    temporary.unlink(missing_ok=True)
+    # The role runner extracts either protocol to prose, preserves the raw
+    # transcript, and writes the normalized record to the historic cost path.
     cmd = (
-        f'"$BIN" -p --output-format json --model "$MODEL" '
-        f'--allowedTools "$TOOLS" <"{p["prompt"]}" >"{p["raw"]}"; rc=$?; '
-        f'if [ $rc -eq 0 ]; then python3 -c "$EXTRACT" "{p["raw"]}" "{p["md"]}" '
-        f'"{p["cost"]}" || rc=$?; fi; echo $rc > "{p["exit"]}"'
+        f'PYTHONPATH="{ROOT / "src"}${{PYTHONPATH:+:$PYTHONPATH}}" '
+        f'python3 -m agautolab.role_run summarizer --cwd "{ROOT}" --timeout 300 '
+        f'--prompt-file "{p["prompt"]}" --transcript "{p["raw"]}" '
+        f'--record "{p["cost"]}" >"{temporary}"; rc=$?; '
+        f'if [ $rc -eq 0 ] && [ -s "{temporary}" ]; then mv "{temporary}" "{p["md"]}"; '
+        f'else rm -f "{temporary}"; fi; echo $rc > "{p["exit"]}"'
     )
     log = open(p["log"], "w")
     proc = subprocess.Popen(
@@ -508,12 +458,11 @@ def start_summarizer(job_dir, iteration):
         stderr=subprocess.STDOUT,
         stdin=subprocess.DEVNULL,
         start_new_session=True,
-        env={**os.environ, "BIN": claude_bin(), "MODEL": model,
-             "TOOLS": SUMMARY_ALLOWED_TOOLS, "EXTRACT": EXTRACT_PY},
+        env={**os.environ},
     )
     log.close()
     p["run"].write_text(
-        json.dumps({"pid": proc.pid, "started": time.time(), "model": model})
+        json.dumps({"pid": proc.pid, "started": time.time(), "role": "summarizer"})
     )
     return proc.pid
 
@@ -595,18 +544,8 @@ def job_detail(job_dir):
 # re-walking the job dirs, and the only thing it writes is its own run
 # record under .local/agent/window/.
 #
-# Backend selection copies agforge's pattern verbatim in shape
-# (service/agent_run.py: local_env / agent_backend) — process env first,
-# then `.local/.env`, default `ollama` — deliberately duplicated rather
-# than shared, because a shared library between these two workspaces would
-# buy nothing and couple them.
-
-WINDOW_DEFAULT_MODELS = {
-    "ollama": "qwen3.6:35b-a3b-coding-nvfp4",
-    "claude": "claude-sonnet-5",
-}
 # 300, not 120: a window answer may itself launch a project director's
-# one-shot (`Bash(claude:*)` below), so the budget covers a nested run.
+# profile-selected one-shot, so the budget covers a nested run.
 WINDOW_TIMEOUT_SECONDS = 300
 
 WINDOW_PROMPT = """You are the conversational window of an autolab node: a
@@ -643,10 +582,6 @@ both below.
 """
 
 
-class WindowError(Exception):
-    """The window's backend could not produce an answer; str() is the record."""
-
-
 # The window's mission ability (devpolicy: Tool Giving): a structured block in
 # the reply that the gateway executes. Optional max_sessions attribute; the
 # block body is the mission text.
@@ -665,37 +600,6 @@ def apply_mission_block(reply, record):
     code, doc = start_mission(match.group(2), max_sessions)
     record["mission"] = {"status": code, **doc}
     return (reply[: match.start()] + reply[match.end() :]).strip()
-
-
-def local_env(name):
-    """Resolve a config value: process env first, then `.local/.env`.
-    Same resolution order as agforge's service/agent_run.py."""
-    if os.environ.get(name):
-        return os.environ[name]
-    env_file = ROOT / ".local" / ".env"
-    try:
-        lines = env_file.read_text().splitlines()
-    except OSError:
-        return None
-    for line in lines:
-        line = line.strip()
-        if line.startswith(f"{name}="):
-            value = line.partition("=")[2].strip()
-            if value:
-                return value
-    return None
-
-
-def window_backend():
-    """Which backend answers the window: `ollama` (default) or `claude`."""
-    backend = local_env("AUTOLAB_WINDOW_BACKEND") or "ollama"
-    if backend not in WINDOW_DEFAULT_MODELS:
-        raise WindowError(f"unknown AUTOLAB_WINDOW_BACKEND: {backend!r}")
-    return backend
-
-
-def window_model(backend):
-    return local_env("AUTOLAB_WINDOW_MODEL") or WINDOW_DEFAULT_MODELS[backend]
 
 
 def read_guide():
@@ -726,105 +630,7 @@ def window_state():
     }
 
 
-def run_ollama(prompt):
-    """A small local model over ollama's /api/chat. Reports tokens, never a
-    price — so the record carries token counts and a null cost."""
-    url = (local_env("AUTOLAB_OLLAMA_URL") or "http://127.0.0.1:11434").rstrip("/")
-    model = window_model("ollama")
-    body = json.dumps(
-        {
-            "model": model,
-            "stream": False,
-            "messages": [{"role": "user", "content": prompt}],
-        }
-    ).encode()
-    req = urllib.request.Request(
-        f"{url}/api/chat", data=body, headers={"Content-Type": "application/json"}
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=WINDOW_TIMEOUT_SECONDS) as resp:
-            doc = json.loads(resp.read())
-    except urllib.error.HTTPError as error:
-        raise WindowError(f"ollama at {url} returned HTTP {error.code}")
-    except (urllib.error.URLError, TimeoutError, OSError) as error:
-        raise WindowError(f"ollama at {url} is unreachable: {error}")
-    except ValueError as error:
-        raise WindowError(f"ollama at {url} returned non-JSON: {error}")
-    text = ((doc.get("message") or {}).get("content") or "").strip()
-    if not text:
-        raise WindowError(f"ollama model {model} returned an empty message")
-    meta = {
-        "model": model,
-        "cost_usd": None,  # ollama reports no price; never invent one
-        "prompt_tokens": doc.get("prompt_eval_count"),
-        "output_tokens": doc.get("eval_count"),
-    }
-    return text, meta
-
-
-# Bash is limited to launching the coding CLI: enough to open a chat in a
-# project workspace under .local/direction/, and nothing else. `cd` is
-# allowed because reaching a workspace takes `cd <dir> && claude -p ...`,
-# and the permission check matches each part of a compound command.
-WINDOW_ALLOWED_TOOLS = "Read,Glob,Grep,Bash(cd:*),Bash(claude:*)"
-
-
-def run_claude(prompt):
-    """`claude -p` one-shot, same binary resolution as the summarizer, with
-    read-only tools in the autolab checkout so the window can look things up
-    for itself rather than only reading the context it was handed."""
-    model = window_model("claude")
-    binary = claude_bin()
-    argv = [
-        binary, "-p", "--output-format", "json", "--model", model,
-        "--allowedTools", WINDOW_ALLOWED_TOOLS,
-    ]
-    # The window may launch a project director with a plain `claude` command
-    # (GUIDE.md, Project directors); the resolved binary's directory goes on
-    # PATH so that name exists inside the one-shot's Bash tool too.
-    path = os.environ.get("PATH", "")
-    bin_dir = os.path.dirname(binary)
-    if bin_dir:
-        path = f"{bin_dir}:{path}" if path else bin_dir
-    try:
-        proc = subprocess.run(
-            argv,
-            input=prompt,
-            cwd=ROOT,
-            capture_output=True,
-            text=True,
-            timeout=WINDOW_TIMEOUT_SECONDS,
-            env={**os.environ, "NO_COLOR": "1", "PATH": path},
-        )
-    except subprocess.TimeoutExpired:
-        raise WindowError(f"claude backend timed out after {WINDOW_TIMEOUT_SECONDS}s")
-    except OSError as error:
-        raise WindowError(f"could not launch claude ({argv[0]}): {error}")
-    # Whatever the backend said is the answer: JSON `result` when stdout
-    # parses, the raw stdout when it does not. Only silence is an error,
-    # because there is then nothing to carry.
-    try:
-        doc = json.loads(proc.stdout)
-    except ValueError:
-        doc = {}
-    text = str(doc.get("result") or proc.stdout or "").strip()
-    if not text:
-        tail = (proc.stderr or "").strip()[-400:] or "no output"
-        raise WindowError(f"claude backend exited {proc.returncode}: {tail}")
-    meta = {
-        "model": model,
-        "cost_usd": doc.get("total_cost_usd"),
-        "num_turns": doc.get("num_turns"),
-        "backend_duration_ms": doc.get("duration_ms"),
-        "is_error": doc.get("is_error"),
-    }
-    return text, meta
-
-
-WINDOW_BACKENDS = {"ollama": run_ollama, "claude": run_claude}
-
-# One answer at a time — a cost/concurrency guard: the `claude` backend
-# spends money, so the window gets the same shape of guard the summarizer
+# One answer at a time — the window gets the same cost/concurrency guard the summarizer
 # has — here an in-process lock, because a window answer is served inside
 # the request thread rather than by a detached process.
 window_lock = threading.Lock()
@@ -839,8 +645,7 @@ def next_window_id():
 
 
 def record_window_run(run_id, record):
-    """devpolicy/agent_records.md: id, backend, outcome, cost/time when the
-    backend reports them, and on failure the failing party's own words."""
+    """Persist canonical identity, outcome, cost/time, and failure words."""
     WINDOW.mkdir(parents=True, exist_ok=True)
     path = WINDOW / f"run-{run_id:04d}.json"
     path.write_text(json.dumps(record, indent=2, ensure_ascii=False) + "\n")
@@ -848,39 +653,33 @@ def record_window_run(run_id, record):
 
 
 def answer_window(text):
-    """One window run: build context, ask the backend, record, return the
-    record. Backend failures come back as a `failed` record, not an
-    exception — a window that cannot reach its model still has to say so."""
+    """Resolve the front role, run it once, persist its canonical record."""
     run_id = next_window_id()
     started = time.monotonic()
     record = {
         "id": f"window/run-{run_id:04d}",
         "started": time.time(),
         "question": text,
-        "backend": None,
         "outcome": "failed",
     }
     try:
-        backend = window_backend()
-        record["backend"] = backend
         prompt = WINDOW_PROMPT.format(
             guide=read_guide(),
             state=json.dumps(window_state(), indent=2, default=str),
             text=text,
         )
-        reply, meta = WINDOW_BACKENDS[backend](prompt)
-    except WindowError as error:
-        # The agent never spoke, so the free-text report the record policy
-        # asks for is the backend's own failure text, verbatim.
+        reply, meta, code = run_role(
+            "front", prompt, cwd=ROOT, timeout=WINDOW_TIMEOUT_SECONDS,
+            transcript=WINDOW / f"run-{run_id:04d}.agent.jsonl",
+        )
+    except AgentConfigError as error:
         record["failure"] = str(error)
         record["duration_ms"] = int((time.monotonic() - started) * 1000)
         record_window_run(run_id, record)
         return record
     record.update(meta)
-    record["backend_model"] = f"{record['backend']}/{meta.get('model')}"
-    record["outcome"] = "done"
-    record["duration_ms"] = int((time.monotonic() - started) * 1000)
-    record["reply"] = apply_mission_block(reply, record)
+    if code == 0 and record.get("outcome") == "done":
+        record["reply"] = apply_mission_block(reply, record)
     record_window_run(run_id, record)
     return record
 
@@ -946,9 +745,9 @@ class Handler(BaseHTTPRequestHandler):
             record = answer_window(text.strip())
         finally:
             window_lock.release()
-        # The record is the response: a caller sees which backend answered and
-        # what it cost without a second request, and a failed backend is a
-        # 502 with the backend's own words rather than a silent empty reply.
+        # The record is the response: a caller sees which harness answered and
+        # what it cost without a second request; a failed harness returns its
+        # own words rather than a silent empty reply.
         body = {"kind": KIND, "type": "window", **record}
         self.send_json(200 if record["outcome"] == "done" else 502, body)
 

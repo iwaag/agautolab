@@ -38,8 +38,9 @@ Ctrl-C.
 `evidence/iter-NNNN/`: `prompt.txt` (what the agent was told) · `diff.patch`
 (what the iteration changed in `target/`) · `gates.json` (per-gate exit codes
 and output tails) · `adapter_output.txt` and `adapter_result.json` (the
-agent's final message, exit code, timing, cost) · `claude_output.json` (raw
-backend JSON) · `push.json` (when `push` triggered one) · `error.txt` (error
+agent's final message, canonical identity, exit code, timing, cost) ·
+`agent_output.json` or `agent_output.jsonl` (raw harness output) · `push.json`
+(when `push` triggered one) · `error.txt` (error
 iterations only).
 
 `NOTES.md` is written by the coding agent, not by autolab, and is passed
@@ -50,12 +51,9 @@ forward into the next iteration's prompt as written.
 ```yaml
 goal: |
   The client's request.
-adapter: claude_code          # or "fake" (no-token test adapter)
+profile: sonnet-coder         # optional; defaults to the coding role profile
 adapter_config:
-  command: "claude"           # binary path if not on PATH; a glob (e.g. the
-                              # one in .local/agent/claude_bin) resolves to its
-                              # newest match at each launch
-  args: ["--model", "claude-sonnet-5", "--allowedTools", "Write,Edit,Read,Bash(node:*)"]
+  allowed_tools: "Write,Edit,Read,Bash(node:*)"  # Claude Code role grant
   add_job_dir: true           # grant the job dir via --add-dir (default true)
 gates:                        # omit → the job starts in the plan phase
   - "node --test"
@@ -64,6 +62,11 @@ iteration_timeout_seconds: 900
 gate_timeout_seconds: 300
 push: true                    # push target/ to `origin` after commits and on terminal status
 ```
+
+The profile determines both harness and canonical model. Do not pass model
+flags in `adapter_config`; executable paths and globs are local overlay facts
+in `.local/agents.local.toml`. The shared profiles are `local-coder`
+(OpenCode + Ollama), `sonnet-coder` (Claude Code), and test-only `stub`.
 
 `goal` heads every iteration's prompt unchanged, in both phases — the client's
 standing request, not one iteration's instruction. A plan-phase sentence left
@@ -91,8 +94,8 @@ Evidence numbering continues from `iteration`.
   `--add-dir`, so `NOTES.md` and `evidence/` are reachable.
 - `http://<host>:8791/monitor/` shows all of this live, read-only, without
   taking the lock — assume someone may be watching.
-- `POST /jobs/<job>/summarize/<iter>` on that gateway runs a separate
-  one-shot `claude -p` over one evidence directory (once per iteration,
+- `POST /jobs/<job>/summarize/<iter>` on that gateway resolves the
+  `summarizer` role for a one-shot over one evidence directory (once per iteration,
   cached; the cached summary carries its own `summarizer.cost_usd` and
   `duration_ms`, lately ~$0.13–0.21 and 11–18 s). Its prose is the only
   iteration content that leaves this node.

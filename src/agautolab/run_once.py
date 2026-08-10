@@ -34,6 +34,7 @@ from pathlib import Path
 import yaml
 
 from . import adapters, gates as gates_mod
+from .agent_config import AgentConfigError, resolve_project_role
 from .job import Job, JobError
 from .state import (
     AWAITING_APPROVAL,
@@ -405,8 +406,17 @@ def _run_locked(job_dir: Path) -> int:
         return EXIT_ERROR
 
     try:
-        adapter = adapters.create(job.adapter, job.adapter_config, job_dir=job_dir)
-    except adapters.AdapterError as exc:
+        agent = resolve_project_role("coding", profile_override=job.profile,
+                                     check_available=False)
+        if agent.harness != "fake":
+            agent = resolve_project_role("coding", profile_override=job.profile)
+        if job.adapter is not None and job.adapter != agent.harness:
+            raise adapters.AdapterError(
+                f"job adapter {job.adapter!r} disagrees with profile harness {agent.harness!r}"
+            )
+        adapter = adapters.create(agent.harness, job.adapter_config,
+                                  job_dir=job_dir, agent=agent)
+    except (adapters.AdapterError, AgentConfigError) as exc:
         print(f"autolab: {exc}", file=sys.stderr)
         state.status = ERROR
         state.error = str(exc)
