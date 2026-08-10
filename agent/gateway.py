@@ -15,24 +15,20 @@ Stdlib-only single-file server. Routes:
   GET  /jobs/<job>/evidence/<iter>/<file>   raw evidence file passthrough
   POST /jobs/<job>/summarize/<iter>  ?force=1  start a one-shot summarizer
   GET  /jobs/<job>/summarize/<iter>  {status: absent|pending|done|error, summary?}
-  GET  /game/...  static files from .local/agent/serve/ (unauthenticated)
-  GET  /healthz   liveness probe (unauthenticated)
+  GET  /game/...  static files from .local/agent/serve/
+  GET  /healthz   liveness probe
 
 POST /window is this node's single desire-accepting conversational entrance
 (devpolicy/policy.md, Single Entrance). It is handed the same job state the
-typed GETs expose plus agent/GUIDE.md, and answers from them. Starting work
-needs POST /mission and a token; the window has no route to it, which is a
-property of the token, not an instruction in its prompt.
+typed GETs expose plus agent/GUIDE.md, and answers from them. Missions start
+via the open POST /mission route.
 
-Only POST /mission requires `Authorization: Bearer <token>` matching
-.local/agent/gateway_token. Every GET is unauthenticated: this is an
-experimental node and the read side is deliberately thin-auth until auth is
-designed system-wide. POST /jobs/.../summarize/... is unauthenticated too even
-though it spends money: accepted for this phase, bounded by a one-at-a-time
-guard and by the per-iteration cache (one paid call per iteration ever).
-POST /window is unauthenticated on the same reasoning and carries the same
-one-at-a-time guard; its default backend is a local ollama model that costs
-nothing but electricity.
+No route carries authentication: this node serves a single-user experimental
+cluster. The guards that exist are cost/concurrency guards, not auth.
+POST /jobs/.../summarize/... spends money, so it is bounded by a
+one-at-a-time guard and by the per-iteration cache (one paid call per
+iteration ever). POST /window carries the same one-at-a-time guard; its
+default backend is a local ollama model that costs nothing but electricity.
 
 Monitoring reads never write and never take a job's `.lock`, so they are safe
 against a live iteration; half-written JSON degrades to an `error` field on
@@ -41,7 +37,6 @@ the affected row instead of a 500.
 One mission at a time: POST /mission returns 409 while drive.sh is alive.
 State lives under .local/agent/ next to the rest of the agent layer:
 
-  gateway_token          bearer token (0600, provisioned by ansible)
   serve/                 static dir the finished game is installed into
   gateway/run-NNNN.log   drive.sh combined output per accepted mission
   gateway/run-NNNN.exit  drive.sh exit code, written when it finishes
@@ -70,7 +65,6 @@ ROOT = Path(__file__).resolve().parent.parent
 STATE = ROOT / ".local" / "agent"
 GATEWAY = STATE / "gateway"
 SERVE = STATE / "serve"
-TOKEN_FILE = STATE / "gateway_token"
 JOBS = ROOT / ".local" / "jobs"
 MONITOR = Path(__file__).resolve().parent / "monitor"
 GUIDE = Path(__file__).resolve().parent / "GUIDE.md"
@@ -93,13 +87,6 @@ CONTENT_TYPES = {
     ".svg": "image/svg+xml",
     ".ico": "image/x-icon",
 }
-
-
-def read_token():
-    try:
-        return TOKEN_FILE.read_text().strip()
-    except OSError:
-        return None
 
 
 def current_run():
@@ -324,7 +311,7 @@ files. Your reply is shown to them as written.
 
 # Promotion runs in a separate interpreter so the wrapper stays a one-liner:
 # claude's stdout goes in, the summary comes out as written, and the
-# summarizer's own cost is recorded — an unauthenticated route that spends
+# summarizer's own cost is recorded — an open route that spends
 # money should at least say how much. Non-JSON stdout is carried through as
 # the summary rather than discarded; `?force=1` regenerates anything unwanted.
 EXTRACT_PY = r"""
@@ -428,7 +415,7 @@ def summary_status(job_dir, iteration):
 
 def summary_running(job_dir=None, iteration=None):
     """The one-at-a-time guard. Scans every job's summaries/ for a live run —
-    cheap (a handful of small files) and it keeps an unauthenticated POST from
+    cheap (a handful of small files) and it keeps an open POST from
     fanning out into arbitrarily many paid processes."""
     if not JOBS.is_dir():
         return None
@@ -579,9 +566,9 @@ WINDOW_PROMPT = """You are the conversational window of an autolab node: a
 headless auto-development loop that runs coding-agent iterations against jobs,
 leaving evidence (prompt, diff, gate results, cost) on disk per iteration.
 
-Missions are started by `POST /mission` with an `Authorization: Bearer <token>`
-header; you hold no token. GUIDE is this node's capability card and JOB STATE
-is its live job state, both below. Your reply is shown to the user as written.
+Missions are started via the open `POST /mission` route. GUIDE is this node's
+capability card and JOB STATE is its live job state, both below. Your reply is
+shown to the user as written.
 
 === GUIDE ===
 {guide}
@@ -754,8 +741,8 @@ def run_claude(prompt):
 
 WINDOW_BACKENDS = {"ollama": run_ollama, "claude": run_claude}
 
-# One answer at a time. The window is unauthenticated and the `claude`
-# backend spends money, so it gets the same shape of guard the summarizer
+# One answer at a time — a cost/concurrency guard: the `claude` backend
+# spends money, so the window gets the same shape of guard the summarizer
 # has — here an in-process lock, because a window answer is served inside
 # the request thread rather than by a detached process.
 window_lock = threading.Lock()
@@ -835,17 +822,6 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def authorized(self):
-        token = read_token()
-        if not token:
-            self.send_json(500, {"error": "gateway_token missing on server"})
-            return False
-        got = self.headers.get("Authorization", "")
-        if got == f"Bearer {token}":
-            return True
-        self.send_json(401, {"error": "missing or wrong bearer token"})
-        return False
-
     def do_GET(self):
         path = self.path.split("?")[0]
         if path == "/healthz":
@@ -872,8 +848,6 @@ class Handler(BaseHTTPRequestHandler):
             return self.post_summarize(path)
         if path != "/mission":
             return self.send_json(404, {"error": "unknown route"})
-        if not self.authorized():
-            return
         running = drive_running()
         if running:
             return self.send_json(
@@ -1121,8 +1095,6 @@ def main():
     port = int(os.environ.get("AUTOLAB_GATEWAY_PORT", "8791"))
     for d in (GATEWAY, SERVE, STATE / "sessions"):
         d.mkdir(parents=True, exist_ok=True)
-    if not read_token():
-        sys.exit(f"refusing to start: {TOKEN_FILE} is missing or empty")
     signal.signal(signal.SIGTERM, lambda *a: sys.exit(0))
     signal.signal(signal.SIGCHLD, signal.SIG_IGN)  # auto-reap drive.sh wrappers
     server = ThreadingHTTPServer((host, port), Handler)
