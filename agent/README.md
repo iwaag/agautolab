@@ -18,7 +18,8 @@ Runtime state under `../.local/agent/`:
   and never reads it; `POST /mission` clears it.
 - `claude_bin` — absolute path (or glob) to the claude binary.
 - `sessions/session-NNNN.json` — full claude output per session.
-- `gateway/`, `window/`, `director/` — run logs and per-answer records.
+- `gateway/`, `window/` — run logs and per-answer records. (`director/` holds
+  records of the removed `/director` route, kept as evidence.)
 
 Per-job state lives under `../.local/jobs/<job>/`; the summarizer adds
 `summaries/iter-NNNN.*` there and writes nowhere else.
@@ -42,9 +43,8 @@ Stdlib-only. Refuses to start without a token in `.local/agent/gateway_token`.
   and launches `drive.sh` detached; 409 while one runs. **The only
   authenticated route** (`Authorization: Bearer <token>`).
 - `POST /window` `{"text": str}` — the conversational entrance. One answer at
-  a time (409).
-- `POST /director` `{"text": str}` — a workspace-backed director window,
-  half-implemented. Read-only tools, cwd = the configured direction clone.
+  a time (409). On the `claude` backend it may launch a project director's
+  one-shot in a `.local/direction/<name>/` workspace (see `GUIDE.md`).
 - `GET /guide` — `GUIDE.md` as plain text.
 - `GET /status` — driver liveness/exit, mission text, the agent's `done` note
   and NOTES.md, per-session and cumulative cost, game-build presence.
@@ -63,7 +63,7 @@ Every `GET` is unauthenticated on this experimental node; auth is designed
 system-wide later. Reads never write and never take a job's `.lock`. JSON
 carries a `"kind": "autolab.monitor.v1"` envelope.
 
-## Window and director backends (Agent ≠ Model)
+## Window backends (Agent ≠ Model)
 
 Process env first, then `../.local/.env`:
 
@@ -72,8 +72,6 @@ Process env first, then `../.local/.env`:
 | `AUTOLAB_WINDOW_BACKEND` | `ollama` | `ollama` \| `claude` |
 | `AUTOLAB_WINDOW_MODEL` | `qwen3.6:35b-a3b-coding-nvfp4` / `claude-sonnet-5` | model |
 | `AUTOLAB_OLLAMA_URL` | `http://127.0.0.1:11434` | ollama endpoint |
-| `AUTOLAB_DIRECTOR_WORKSPACE` | `.local/direction/scifi-direction` | director cwd |
-| `AUTOLAB_DIRECTOR_MODEL` | `claude-sonnet-5` | director model |
 
 `AUTOLAB_CLAUDE_BIN` and `.local/agent/claude_bin` may be globs, and should
 be: the usual value points into a version-numbered editor-extension directory

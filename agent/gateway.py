@@ -4,7 +4,6 @@
 Stdlib-only single-file server. Routes:
 
   POST /window    {"text": str}  -> the conversational window (see below)
-  POST /director  {"text": str}  -> the director's workspace-backed window
   GET  /guide     agent/GUIDE.md, the capability card, as plain text
   POST /mission   {"mission": str, "max_sessions": int?}  -> start drive.sh
   GET  /status    mission/driver/done/session summary, scoped to the
@@ -35,11 +34,6 @@ POST /window is unauthenticated on the same reasoning and carries the same
 one-at-a-time guard; its default backend is a local ollama model that costs
 nothing but electricity.
 
-POST /director is a separate agent entrance: a minimal, stateless director
-whose only context is a direction repository on disk. It always runs Claude
-with read-only workspace tools and does not inject file contents into the
-prompt. Its one side effect is its own run record.
-
 Monitoring reads never write and never take a job's `.lock`, so they are safe
 against a live iteration; half-written JSON degrades to an `error` field on
 the affected row instead of a 500.
@@ -56,7 +50,6 @@ State lives under .local/agent/ next to the rest of the agent layer:
                          over; drive.sh stops on its existence and never reads
                          it, /status carries its content verbatim
   window/run-NNNN.json   one record per window answer (devpolicy/agent_records.md)
-  director/run-NNNN.json one record per director answer
 """
 
 import glob
@@ -82,7 +75,6 @@ JOBS = ROOT / ".local" / "jobs"
 MONITOR = Path(__file__).resolve().parent / "monitor"
 GUIDE = Path(__file__).resolve().parent / "GUIDE.md"
 WINDOW = STATE / "window"
-DIRECTOR = STATE / "director"
 
 # Versioned envelope, in the spirit of nctl's `nctl.drift.v1`: scope 3 points
 # agdevworld at this same feed, and the kind is what keeps that cheap.
@@ -579,7 +571,9 @@ WINDOW_DEFAULT_MODELS = {
     "ollama": "qwen3.6:35b-a3b-coding-nvfp4",
     "claude": "claude-sonnet-5",
 }
-WINDOW_TIMEOUT_SECONDS = 120
+# 300, not 120: a window answer may itself launch a project director's
+# one-shot (`Bash(claude:*)` below), so the budget covers a nested run.
+WINDOW_TIMEOUT_SECONDS = 300
 
 WINDOW_PROMPT = """You are the conversational window of an autolab node: a
 headless auto-development loop that runs coding-agent iterations against jobs,
@@ -699,7 +693,11 @@ def run_ollama(prompt):
     return text, meta
 
 
-WINDOW_ALLOWED_TOOLS = "Read,Glob,Grep"
+# Bash is limited to launching the coding CLI: enough to open a chat in a
+# project workspace under .local/direction/, and nothing else. `cd` is
+# allowed because reaching a workspace takes `cd <dir> && claude -p ...`,
+# and the permission check matches each part of a compound command.
+WINDOW_ALLOWED_TOOLS = "Read,Glob,Grep,Bash(cd:*),Bash(claude:*)"
 
 
 def run_claude(prompt):
@@ -707,10 +705,18 @@ def run_claude(prompt):
     read-only tools in the autolab checkout so the window can look things up
     for itself rather than only reading the context it was handed."""
     model = window_model("claude")
+    binary = claude_bin()
     argv = [
-        claude_bin(), "-p", "--output-format", "json", "--model", model,
+        binary, "-p", "--output-format", "json", "--model", model,
         "--allowedTools", WINDOW_ALLOWED_TOOLS,
     ]
+    # The window may launch a project director with a plain `claude` command
+    # (GUIDE.md, Project directors); the resolved binary's directory goes on
+    # PATH so that name exists inside the one-shot's Bash tool too.
+    path = os.environ.get("PATH", "")
+    bin_dir = os.path.dirname(binary)
+    if bin_dir:
+        path = f"{bin_dir}:{path}" if path else bin_dir
     try:
         proc = subprocess.run(
             argv,
@@ -719,7 +725,7 @@ def run_claude(prompt):
             capture_output=True,
             text=True,
             timeout=WINDOW_TIMEOUT_SECONDS,
-            env={**os.environ, "NO_COLOR": "1"},
+            env={**os.environ, "NO_COLOR": "1", "PATH": path},
         )
     except subprocess.TimeoutExpired:
         raise WindowError(f"claude backend timed out after {WINDOW_TIMEOUT_SECONDS}s")
@@ -753,129 +759,6 @@ WINDOW_BACKENDS = {"ollama": run_ollama, "claude": run_claude}
 # has — here an in-process lock, because a window answer is served inside
 # the request thread rather than by a detached process.
 window_lock = threading.Lock()
-
-
-# --- the director window -------------------------------------------------
-
-DIRECTOR_PROMPT = """You are the director window of this workspace. `GUIDE.md`
-at the workspace root describes what is here.
-
-=== MESSAGE ===
-{text}
-"""
-DIRECTOR_ALLOWED_TOOLS = "Read,Glob,Grep"
-
-
-def director_workspace():
-    """The single configured direction clone used as Claude's cwd.
-
-    A relative override is rooted at the autolab checkout, which keeps local
-    configuration portable and avoids putting a developer's absolute path in
-    tracked source.
-    """
-    configured = local_env("AUTOLAB_DIRECTOR_WORKSPACE")
-    path = Path(configured).expanduser() if configured else Path(
-        ".local/direction/scifi-direction"
-    )
-    return path if path.is_absolute() else ROOT / path
-
-
-def director_model():
-    return local_env("AUTOLAB_DIRECTOR_MODEL") or WINDOW_DEFAULT_MODELS["claude"]
-
-
-def run_director_claude(prompt):
-    """Run the director one-shot in its workspace with read-only tools."""
-    workspace = director_workspace()
-    if not workspace.is_dir():
-        raise WindowError(f"director workspace is missing: {workspace}")
-    model = director_model()
-    argv = [
-        claude_bin(),
-        "-p",
-        "--output-format",
-        "json",
-        "--model",
-        model,
-        "--allowedTools",
-        DIRECTOR_ALLOWED_TOOLS,
-    ]
-    try:
-        proc = subprocess.run(
-            argv,
-            input=prompt,
-            cwd=workspace,
-            capture_output=True,
-            text=True,
-            timeout=WINDOW_TIMEOUT_SECONDS,
-            env={**os.environ, "NO_COLOR": "1"},
-        )
-    except subprocess.TimeoutExpired:
-        raise WindowError(
-            f"claude backend timed out after {WINDOW_TIMEOUT_SECONDS}s"
-        )
-    except OSError as error:
-        raise WindowError(f"could not launch claude ({argv[0]}): {error}")
-    try:
-        doc = json.loads(proc.stdout)
-    except ValueError:
-        doc = {}
-    reply = str(doc.get("result") or proc.stdout or "")
-    if not reply.strip():
-        tail = (proc.stderr or "").strip()[-400:] or "no output"
-        raise WindowError(f"claude backend exited {proc.returncode}: {tail}")
-    return reply, {
-        "model": model,
-        "cost_usd": doc.get("total_cost_usd"),
-        "num_turns": doc.get("num_turns"),
-        "backend_duration_ms": doc.get("duration_ms"),
-        "is_error": doc.get("is_error"),
-    }
-
-
-director_lock = threading.Lock()
-
-
-def next_director_id():
-    DIRECTOR.mkdir(parents=True, exist_ok=True)
-    n = 1
-    while (DIRECTOR / f"run-{n:04d}.json").exists():
-        n += 1
-    return n
-
-
-def record_director_run(run_id, record):
-    DIRECTOR.mkdir(parents=True, exist_ok=True)
-    path = DIRECTOR / f"run-{run_id:04d}.json"
-    path.write_text(json.dumps(record, indent=2, ensure_ascii=False) + "\n")
-    return path
-
-
-def answer_director(text):
-    """Ask the workspace-backed director and persist success or failure."""
-    run_id = next_director_id()
-    started = time.monotonic()
-    record = {
-        "id": f"director/run-{run_id:04d}",
-        "started": time.time(),
-        "question": text,
-        "backend": "claude",
-        "outcome": "failed",
-    }
-    try:
-        reply, meta = run_director_claude(DIRECTOR_PROMPT.format(text=text))
-    except WindowError as error:
-        record["failure"] = str(error)
-        record["duration_ms"] = int((time.monotonic() - started) * 1000)
-        record_director_run(run_id, record)
-        return record
-    record.update(meta)
-    record["backend_model"] = f"claude/{meta.get('model')}"
-    record["outcome"] = "done"
-    record["duration_ms"] = int((time.monotonic() - started) * 1000)
-    record["reply"] = reply
-    record_director_run(run_id, record)
-    return record
 
 
 def next_window_id():
@@ -985,8 +868,6 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?")[0]
         if path == "/window":
             return self.post_window()
-        if path == "/director":
-            return self.post_director()
         if path.startswith("/jobs/"):
             return self.post_summarize(path)
         if path != "/mission":
@@ -1060,25 +941,6 @@ class Handler(BaseHTTPRequestHandler):
         # what it cost without a second request, and a failed backend is a
         # 502 with the backend's own words rather than a silent empty reply.
         body = {"kind": KIND, "type": "window", **record}
-        self.send_json(200 if record["outcome"] == "done" else 502, body)
-
-    def post_director(self):
-        try:
-            length = int(self.headers.get("Content-Length", 0))
-            req = json.loads(self.rfile.read(length))
-            text = req["text"]
-            assert isinstance(text, str) and text.strip()
-        except Exception:
-            return self.send_json(400, {"error": 'body must be {"text": "..."}'})
-        if not director_lock.acquire(blocking=False):
-            return self.send_json(
-                409, {"error": "the director is already answering someone"}
-            )
-        try:
-            record = answer_director(text.strip())
-        finally:
-            director_lock.release()
-        body = {"kind": KIND, "type": "director", **record}
         self.send_json(200 if record["outcome"] == "done" else 502, body)
 
     def get_status(self):

@@ -48,3 +48,10 @@ do not.
 Timing: an iteration's budget is `iteration_timeout_seconds` (default 900).
 Missions run unattended for tens of minutes; nothing here is an interactive
 request/response wait.
+
+## Project directors
+
+Project workspaces live under `.local/direction/<name>/`;
+`.local/direction/projects.md` lists them, one line each. To consult a
+project's director, run `claude -p --allowedTools Read,Glob,Grep` with the
+request on stdin and that workspace as the working directory.
