@@ -5,7 +5,6 @@ Stdlib-only single-file server. Routes:
 
   POST /window    {"text": str}  -> the conversational window (see below)
   GET  /guide     agent/GUIDE.md, the capability card, as plain text
-  POST /mission   {"mission": str, "max_sessions": int?}  -> start drive.sh
   GET  /status    mission/driver/done/session summary, scoped to the
                   current run (sessions started before it are excluded;
                   "game" says whether the served build is from this run)
@@ -22,8 +21,8 @@ POST /window is this node's single desire-accepting conversational entrance
 (devpolicy/policy.md, Single Entrance). It is handed the same job state the
 typed GETs expose plus agent/GUIDE.md, and answers from them — and it can
 start work: a <<mission>>...<</mission>> block in its reply is executed by
-the gateway (start_mission: write MISSION.md, spawn drive.sh). The open
-POST /mission route drives the same seam.
+the gateway (start_mission: write MISSION.md, spawn drive.sh). The window
+is the only entrance; there is no separate mission route.
 
 No route carries authentication: this node serves a single-user experimental
 cluster. The guards that exist are cost/concurrency guards, not auth.
@@ -36,7 +35,7 @@ Monitoring reads never write and never take a job's `.lock`, so they are safe
 against a live iteration; half-written JSON degrades to an `error` field on
 the affected row instead of a 500.
 
-One mission at a time: POST /mission returns 409 while drive.sh is alive.
+One mission at a time: a start is refused (409) while drive.sh is alive.
 State lives under .local/agent/ next to the rest of the agent layer:
 
   serve/                 static dir the finished game is installed into
@@ -126,8 +125,8 @@ def start_mission(mission, max_sessions=12):
     """The one mission-starting seam: write MISSION.md, spawn drive.sh.
 
     Returns (http-shaped code, document): 202 accepted, 400 bad input,
-    409 while a drive is alive. Callers — the window's mission block and,
-    until it is retired, POST /mission — share these semantics.
+    409 while a drive is alive. The window's mission block is the caller;
+    the codes are its concurrency semantics, kept from the retired route.
     """
     if not (isinstance(mission, str) and mission.strip()):
         return 400, {"error": "mission must be a non-empty string"}
@@ -485,7 +484,7 @@ def summary_running(job_dir=None, iteration=None):
 
 def start_summarizer(job_dir, iteration):
     """Spawn the one-shot summarizer detached, in the same shape as
-    POST /mission's drive.sh wrapper: log file, exit file, pid recorded."""
+    start_mission's drive.sh wrapper: log file, exit file, pid recorded."""
     p = summary_paths(job_dir, iteration)
     summaries_dir(job_dir).mkdir(parents=True, exist_ok=True)
     rel = f".local/jobs/{job_dir.name}/evidence/{iteration}"
@@ -929,17 +928,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.post_window()
         if path.startswith("/jobs/"):
             return self.post_summarize(path)
-        if path != "/mission":
-            return self.send_json(404, {"error": "unknown route"})
-        try:
-            length = int(self.headers.get("Content-Length", 0))
-            req = json.loads(self.rfile.read(length))
-            mission = req["mission"]
-            assert isinstance(mission, str) and mission.strip()
-        except Exception:
-            return self.send_json(400, {"error": 'body must be {"mission": "..."}'})
-        code, doc = start_mission(mission, req.get("max_sessions", 12))
-        self.send_json(code, doc)
+        self.send_json(404, {"error": "unknown route"})
 
     def post_window(self):
         try:

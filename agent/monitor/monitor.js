@@ -300,7 +300,7 @@ async function renderLog() {
     const r = await fetch("/log?tail=" + LOG_TAIL, { cache: "no-store" });
     if (r.status === 404) {
       pre.className = "log dim";
-      text(pre, "no drive run yet (POST /mission starts one)");
+      text(pre, "no drive run yet (ask the window to start one)");
       return;
     }
     pre.className = "log";

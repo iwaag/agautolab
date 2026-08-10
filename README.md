@@ -58,6 +58,7 @@ uv run pytest -q
 
 - [AGENT_GUIDE.md](AGENT_GUIDE.md) — the manual for an agent operating autolab.
 - [agent/](agent/) — the mediator agent layer and the HTTP gateway
-  (`/monitor/`, `POST /mission`, the conversational window).
+  (`/monitor/` and the conversational window, which is the entrance and
+  starts missions).
 - `devenv/systemd/autolab@.service` — one unit instance per job.
 - Design history: the autodev episode in `devdocs/episodes/`.

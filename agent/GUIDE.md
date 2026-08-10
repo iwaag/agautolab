@@ -14,12 +14,10 @@ evidence on disk — prompt, diff, gate results, cost.
 
 ## Doors
 
-- `POST /window` — this window, the node's entrance: job, progress, spend and
-  capability questions — and starting work. A `<<mission>>…<</mission>>`
-  block in the window's reply starts a mission (one at a time; a refusal
-  while one runs is recorded).
-- `POST /mission` — open deterministic mission start, the same seam the
-  window's block drives.
+- `POST /window` — this window, the node's only entrance: job, progress,
+  spend and capability questions — and starting work. A
+  `<<mission>>…<</mission>>` block in the window's reply starts a mission
+  (one at a time; a refusal while one runs is recorded).
 - `GET /status`, `/log`, `/jobs`, `/jobs/<job>`,
   `/jobs/<job>/evidence/<iter>/<file>`, `/monitor/`, `/game/...`, `/healthz`.
 - `POST /jobs/<job>/summarize/<iter>` — prose for one iteration's evidence,

@@ -42,7 +42,7 @@ disk is your memory.
 
 ## Safety devices
 
-Three things on this node are not judgment calls:
+Two things on this node are not judgment calls:
 
 - No `--dangerously-skip-permissions`, by you or in a job config. This machine
   holds real credentials; every other mistake here is recoverable from
@@ -50,4 +50,3 @@ Three things on this node are not judgment calls:
 - Secrets stay under `.local/` and never enter a job's `target/` repo. `push`
   publishes to Gitea irreversibly. (A token inside `target/.git/config` is
   fine — `.git/` is not pushed content.)
-- `POST /mission` is the only authenticated route on this node's gateway.
