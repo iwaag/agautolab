@@ -20,8 +20,10 @@ Stdlib-only single-file server. Routes:
 
 POST /window is this node's single desire-accepting conversational entrance
 (devpolicy/policy.md, Single Entrance). It is handed the same job state the
-typed GETs expose plus agent/GUIDE.md, and answers from them. Missions start
-via the open POST /mission route.
+typed GETs expose plus agent/GUIDE.md, and answers from them — and it can
+start work: a <<mission>>...<</mission>> block in its reply is executed by
+the gateway (start_mission: write MISSION.md, spawn drive.sh). The open
+POST /mission route drives the same seam.
 
 No route carries authentication: this node serves a single-user experimental
 cluster. The guards that exist are cost/concurrency guards, not auth.
@@ -120,11 +122,57 @@ def drive_running():
     return cur if pid_alive(cur.get("pid")) else None
 
 
+def start_mission(mission, max_sessions=12):
+    """The one mission-starting seam: write MISSION.md, spawn drive.sh.
+
+    Returns (http-shaped code, document): 202 accepted, 400 bad input,
+    409 while a drive is alive. Callers — the window's mission block and,
+    until it is retired, POST /mission — share these semantics.
+    """
+    if not (isinstance(mission, str) and mission.strip()):
+        return 400, {"error": "mission must be a non-empty string"}
+    if not (isinstance(max_sessions, int) and 1 <= max_sessions <= 50):
+        return 400, {"error": "max_sessions must be 1..50"}
+    running = drive_running()
+    if running:
+        return 409, {"error": "a mission is already running", "current": running}
+    GATEWAY.mkdir(parents=True, exist_ok=True)
+    run = 1
+    while (GATEWAY / f"run-{run:04d}.log").exists():
+        run += 1
+    (STATE / "MISSION.md").write_text(mission)
+    # A previous mission's end-of-mission note must not stop this one.
+    (STATE / "done").unlink(missing_ok=True)
+    log = open(GATEWAY / f"run-{run:04d}.log", "w")
+    exit_file = GATEWAY / f"run-{run:04d}.exit"
+    cmd = f'agent/drive.sh {max_sessions}; echo $? > "{exit_file}"'
+    proc = subprocess.Popen(
+        ["bash", "-c", cmd],
+        cwd=ROOT,
+        stdout=log,
+        stderr=subprocess.STDOUT,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    log.close()
+    (GATEWAY / "current").write_text(
+        json.dumps(
+            {
+                "run": run,
+                "pid": proc.pid,
+                "max_sessions": max_sessions,
+                "started": time.time(),
+            }
+        )
+    )
+    return 202, {"accepted": True, "run": run, "pid": proc.pid}
+
+
 def agent_done():
     """The agent's own end-of-mission note, or None while it is still working.
 
     Existence is what drive.sh stops on; the content is the agent's words and
-    is carried as written. POST /mission clears a previous mission's file.
+    is carried as written. start_mission clears a previous mission's file.
     """
     try:
         return (STATE / "done").read_text()
@@ -566,9 +614,24 @@ WINDOW_PROMPT = """You are the conversational window of an autolab node: a
 headless auto-development loop that runs coding-agent iterations against jobs,
 leaving evidence (prompt, diff, gate results, cost) on disk per iteration.
 
-Missions are started via the open `POST /mission` route. GUIDE is this node's
-capability card and JOB STATE is its live job state, both below. Your reply is
-shown to the user as written.
+You are this node's entrance, and you can start work yourself. When the user
+asks for something to be built, include in your reply a block of the form
+
+<<mission>>
+...the mission text the auto-development loop should pursue...
+<</mission>>
+
+(optionally `<<mission max_sessions=N>>`, 1..50, default 12). The gateway
+executes the block after you answer: it writes MISSION.md and spawns the
+drive loop. One mission runs at a time — while one is alive the start is
+refused and the refusal is recorded next to your answer. Only start a
+mission when the user clearly asks for work, and put everything the loop
+needs to know inside the block: it is the whole briefing. The block itself
+is removed from the reply the user sees; the rest of your reply is shown as
+written.
+
+GUIDE is this node's capability card and JOB STATE is its live job state,
+both below.
 
 === GUIDE ===
 {guide}
@@ -583,6 +646,26 @@ shown to the user as written.
 
 class WindowError(Exception):
     """The window's backend could not produce an answer; str() is the record."""
+
+
+# The window's mission ability (devpolicy: Tool Giving): a structured block in
+# the reply that the gateway executes. Optional max_sessions attribute; the
+# block body is the mission text.
+MISSION_BLOCK = re.compile(
+    r"<<mission(?:\s+max_sessions=(\d+))?>>\s*(.*?)\s*<</mission>>", re.S
+)
+
+
+def apply_mission_block(reply, record):
+    """Execute the reply's mission block, if any. The start's outcome goes on
+    the window record under `mission`; the block is cut from the shown reply."""
+    match = MISSION_BLOCK.search(reply)
+    if not match:
+        return reply
+    max_sessions = int(match.group(1)) if match.group(1) else 12
+    code, doc = start_mission(match.group(2), max_sessions)
+    record["mission"] = {"status": code, **doc}
+    return (reply[: match.start()] + reply[match.end() :]).strip()
 
 
 def local_env(name):
@@ -798,7 +881,7 @@ def answer_window(text):
     record["backend_model"] = f"{record['backend']}/{meta.get('model')}"
     record["outcome"] = "done"
     record["duration_ms"] = int((time.monotonic() - started) * 1000)
-    record["reply"] = reply
+    record["reply"] = apply_mission_block(reply, record)
     record_window_run(run_id, record)
     return record
 
@@ -848,11 +931,6 @@ class Handler(BaseHTTPRequestHandler):
             return self.post_summarize(path)
         if path != "/mission":
             return self.send_json(404, {"error": "unknown route"})
-        running = drive_running()
-        if running:
-            return self.send_json(
-                409, {"error": "a mission is already running", "current": running}
-            )
         try:
             length = int(self.headers.get("Content-Length", 0))
             req = json.loads(self.rfile.read(length))
@@ -860,40 +938,8 @@ class Handler(BaseHTTPRequestHandler):
             assert isinstance(mission, str) and mission.strip()
         except Exception:
             return self.send_json(400, {"error": 'body must be {"mission": "..."}'})
-        max_sessions = req.get("max_sessions", 12)
-        if not (isinstance(max_sessions, int) and 1 <= max_sessions <= 50):
-            return self.send_json(400, {"error": "max_sessions must be 1..50"})
-
-        GATEWAY.mkdir(parents=True, exist_ok=True)
-        run = 1
-        while (GATEWAY / f"run-{run:04d}.log").exists():
-            run += 1
-        (STATE / "MISSION.md").write_text(mission)
-        # A previous mission's end-of-mission note must not stop this one.
-        (STATE / "done").unlink(missing_ok=True)
-        log = open(GATEWAY / f"run-{run:04d}.log", "w")
-        exit_file = GATEWAY / f"run-{run:04d}.exit"
-        cmd = f'agent/drive.sh {max_sessions}; echo $? > "{exit_file}"'
-        proc = subprocess.Popen(
-            ["bash", "-c", cmd],
-            cwd=ROOT,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            stdin=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-        log.close()
-        (GATEWAY / "current").write_text(
-            json.dumps(
-                {
-                    "run": run,
-                    "pid": proc.pid,
-                    "max_sessions": max_sessions,
-                    "started": time.time(),
-                }
-            )
-        )
-        self.send_json(202, {"accepted": True, "run": run, "pid": proc.pid})
+        code, doc = start_mission(mission, req.get("max_sessions", 12))
+        self.send_json(code, doc)
 
     def post_window(self):
         try:
