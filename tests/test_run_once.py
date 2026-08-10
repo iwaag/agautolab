@@ -190,3 +190,13 @@ def test_agent_written_notes_are_carried_forward(tmp_path):
     assert run_once(job_dir) == EXIT_CONVERGED
     prompt2 = (job_dir / "evidence" / "iter-0002" / "prompt.txt").read_text()
     assert "appended once; gate wants two lines" in prompt2
+
+
+def test_failing_gate_output_reaches_the_next_prompt(tmp_path):
+    """A failing gate arrives as what it printed, not only as its name."""
+    job_dir = tmp_path / "job"
+    make_job(job_dir, gates=["echo 'SyntaxError: invalid syntax' >&2; false"])
+    assert run_once(job_dir) == EXIT_CONTINUE
+    assert run_once(job_dir) == EXIT_CONTINUE
+    prompt2 = (job_dir / "evidence" / "iter-0002" / "prompt.txt").read_text()
+    assert "SyntaxError: invalid syntax" in prompt2

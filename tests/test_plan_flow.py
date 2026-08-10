@@ -58,6 +58,25 @@ def test_plan_approve_implement_converged(tmp_path):
     assert "test -s progress.log" in prompt
 
 
+def test_plan_prompt_states_that_the_goal_outlives_the_phase(tmp_path):
+    """The goal is phase-independent, and the plan phase is told so.
+
+    A plan-phase instruction written into `goal` ("write no code yet") is read
+    again by the agent implementing; the fact belongs where the plan is
+    written, not in a rule about what a goal may contain.
+    """
+    job_dir = tmp_path / "job"
+    make_job(job_dir)
+    assert run_once(job_dir) == EXIT_AWAITING_APPROVAL
+    plan_prompt = latest_prompt(job_dir)
+    assert "heads every later iteration's prompt unchanged" in plan_prompt
+
+    assert main(["approve", str(job_dir)]) == 0
+    assert run_once(job_dir) == EXIT_CONVERGED
+    # ...and it does: the same goal text opens the implement prompt.
+    assert "Toy goal for tests." in latest_prompt(job_dir)
+
+
 def test_reject_feeds_back_and_replans(tmp_path):
     job_dir = tmp_path / "job"
     make_job(job_dir)

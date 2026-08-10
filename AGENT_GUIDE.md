@@ -12,6 +12,7 @@ Run from this repo (`agautolab/`):
 |---|---|
 | `uv run autolab run-once <job-dir>` | exactly one iteration |
 | `uv run autolab loop <job-dir>` | run-once while it returns 10; `--sleep SECONDS` (default 5) |
+| `--detach` on either | starts it in a session of its own, outliving the caller, and returns with a pid; output appends to `<job-dir>/detached.log`, the verdict is in `status` |
 | `uv run autolab status <job-dir>` | job state; `--json` for structured. Lock-free, safe during a live run |
 | `uv run autolab approve <job-dir>` | accept a plan's gates → implement phase. `--gates FILE`, `--gate CMD` (repeatable), else `target/proposed_gates.yaml` |
 | `uv run autolab reject <job-dir> --feedback <file\|text>` | append feedback to `NOTES.md`; the job replans |
@@ -63,6 +64,10 @@ iteration_timeout_seconds: 900
 gate_timeout_seconds: 300
 push: true                    # push target/ to `origin` after commits and on terminal status
 ```
+
+`goal` heads every iteration's prompt unchanged, in both phases — the client's
+standing request, not one iteration's instruction. A plan-phase sentence left
+in it ("write no code yet") is read again by the agent implementing.
 
 ## Phases
 

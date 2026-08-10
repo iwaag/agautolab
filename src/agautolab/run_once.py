@@ -94,7 +94,8 @@ def _workspace_facts(job_dir: Path, iteration: int) -> list[str]:
         f"- `{job_dir / NOTES_FILE}` — the handoff between iterations. Yours to "
         "write; the next iteration is given whatever is there.",
         f"- `{job_dir / 'evidence'}` — one directory per iteration: the prompt, "
-        "the diff, gate results, cost. `evidence/iter-"
+        "the diff, cost, and `gates.json` (every gate's command, exit code and "
+        "output tail as it actually ran). `evidence/iter-"
         f"{iteration:04d}/` will hold this one when it ends.",
     ]
 
@@ -114,11 +115,41 @@ def build_plan_prompt(job: Job, job_dir: Path, iteration: int, notes: str | None
         "when that file holds a YAML list of shell commands (bare list, or under "
         "a `gates:` key), and takes them on the command line otherwise. A plan "
         f"at `target/{PLAN_FILE}` is what the reviewer reads to judge them.",
+        "",
+        "The goal above comes from `job.yaml` and heads every later iteration's "
+        f"prompt unchanged, implement phase included. `target/{PLAN_FILE}` is the "
+        "document that can speak to one phase only.",
     ]
     parts += _workspace_facts(job_dir, iteration)
     if notes:
         parts += ["", f"# {NOTES_FILE} from the previous iteration", notes.strip()]
     return "\n".join(parts) + "\n"
+
+
+PROMPT_GATE_OUTPUT_CHARS = 2000
+
+
+def load_gate_output(job_dir: Path, iteration: int) -> dict[str, str]:
+    """One iteration's gate output, keyed by command. Empty = nothing readable.
+
+    What a gate printed is the difference between "a command named `pytest -q`
+    failed" and knowing why; the file is on disk either way, this just puts it
+    where the next iteration is already reading.
+    """
+    path = job_dir / "evidence" / f"iter-{iteration:04d}" / "gates.json"
+    if not path.is_file():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(raw, list):
+        return {}
+    return {
+        r["command"]: str(r.get("output_tail") or "")
+        for r in raw
+        if isinstance(r, dict) and isinstance(r.get("command"), str)
+    }
 
 
 def build_implement_prompt(
@@ -129,6 +160,7 @@ def build_implement_prompt(
     state: State,
     notes: str | None,
     plan: str | None,
+    gate_output: dict[str, str] | None = None,
 ) -> str:
     parts = [
         "# Goal",
@@ -142,8 +174,12 @@ def build_implement_prompt(
     if state.last_gate_summary is None:
         parts.append("No gates have been run yet (first iteration).")
     elif state.last_gate_summary.get("failing"):
-        parts.append("Failing:")
-        parts += [f"- `{g}`" for g in state.last_gate_summary["failing"]]
+        parts.append("Failing, with what each one printed:")
+        for g in state.last_gate_summary["failing"]:
+            parts.append(f"- `{g}`")
+            tail = (gate_output or {}).get(g, "").strip()
+            if tail:
+                parts += ["", "```", tail[-PROMPT_GATE_OUTPUT_CHARS:], "```", ""]
     else:
         parts.append("All gates exited 0.")
     parts += _workspace_facts(job_dir, iteration)
@@ -415,7 +451,8 @@ def _run_locked(job_dir: Path) -> int:
         plan_path = target / PLAN_FILE
         plan = plan_path.read_text(encoding="utf-8") if plan_path.is_file() else None
         prompt = build_implement_prompt(
-            job, job_dir, iteration, effective_gates, state, notes, plan
+            job, job_dir, iteration, effective_gates, state, notes, plan,
+            load_gate_output(job_dir, iteration - 1),
         )
 
         adapter_result, adapter_timed_out = _run_adapter_with_timeout(
