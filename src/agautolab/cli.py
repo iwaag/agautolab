@@ -6,6 +6,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from .detach import run_detached
 from .loop import DEFAULT_SLEEP_SECONDS, loop
 from .review import approve, reject
 from .run_once import run_once
@@ -22,6 +23,12 @@ def main(argv: list[str] | None = None) -> int:
         "run-once", help="Run exactly one iteration of a job (1 iteration = 1 process)."
     )
     p_run_once.add_argument("job_dir", type=Path, help="Path to the job directory")
+    p_run_once.add_argument(
+        "--detach",
+        action="store_true",
+        help="Start in a session of its own and return immediately; the run "
+        "outlives this shell. Output goes to <job-dir>/detached.log.",
+    )
 
     p_loop = sub.add_parser(
         "loop", help="Run iterations until the job converges, gets stuck, or errors."
@@ -33,6 +40,12 @@ def main(argv: list[str] | None = None) -> int:
         default=DEFAULT_SLEEP_SECONDS,
         metavar="SECONDS",
         help=f"Sleep between iterations (default {DEFAULT_SLEEP_SECONDS:g})",
+    )
+    p_loop.add_argument(
+        "--detach",
+        action="store_true",
+        help="Start in a session of its own and return immediately; the run "
+        "outlives this shell. Output goes to <job-dir>/detached.log.",
     )
 
     p_status = sub.add_parser(
@@ -74,8 +87,14 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     if args.command == "run-once":
+        if args.detach:
+            return run_detached(args.job_dir, ["run-once", str(args.job_dir)])
         return run_once(args.job_dir)
     if args.command == "loop":
+        if args.detach:
+            return run_detached(
+                args.job_dir, ["loop", str(args.job_dir), "--sleep", str(args.sleep)]
+            )
         return loop(args.job_dir, sleep_seconds=args.sleep)
     if args.command == "status":
         return status(args.job_dir, as_json=args.json)

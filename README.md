@@ -46,8 +46,8 @@ with the terminal code.
 ## Usage
 
 ```bash
-uv run autolab run-once path/to/job
-uv run autolab loop path/to/job
+uv run autolab run-once path/to/job [--detach]   # --detach: new session, returns at once
+uv run autolab loop path/to/job [--detach]
 uv run autolab status path/to/job --json
 uv run autolab approve path/to/job [--gates FILE | --gate CMD]
 uv run autolab reject path/to/job --feedback <file|text>

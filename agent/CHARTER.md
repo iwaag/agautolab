@@ -27,8 +27,10 @@ disk is your memory.
 
 - `uv run autolab status <job-dir> --json` — a job's state, lock-free.
 - `uv run autolab run-once|loop|approve|reject <job-dir>` — see AGENT_GUIDE.md.
-  These run in the foreground of a live session; backgrounded, they die with a
-  headless session.
+  An iteration commonly runs for several minutes, longer than a single command
+  window. `run-once --detach` and `loop --detach` start one in a session of
+  its own, outlive this session, and return at once with a pid and a log path;
+  `status` is where the verdict shows up.
 - `autolab-cagent ask 'message'` — the cluster agent, for cluster facts and
   desired-state changes. It owns registering a finished project as a service.
 
