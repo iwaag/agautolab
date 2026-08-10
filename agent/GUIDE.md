@@ -51,7 +51,8 @@ request/response wait.
 
 ## Project directors
 
-Project workspaces live under `.local/direction/<name>/`;
-`.local/direction/projects.md` lists them, one line each. To consult a
-project's director, run `claude -p --allowedTools Read,Glob,Grep` with the
-request on stdin and that workspace as the working directory.
+Project workspaces live under `.local/projects/<name>/direction/`;
+`.local/projects/projects.md` lists every project, one line each. To consult
+a project's director, run `claude -p --allowedTools Read,Glob,Grep` with the
+request on stdin and that project's `direction/` directory as the working
+directory.

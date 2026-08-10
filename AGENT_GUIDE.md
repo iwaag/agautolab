@@ -97,3 +97,20 @@ Evidence numbering continues from `iteration`.
   `duration_ms`, lately ~$0.13–0.21 and 11–18 s). Its prose is the only
   iteration content that leaves this node.
 - Unattended runs: `devenv/systemd/autolab@.service`, one instance per job.
+
+## Projects
+
+A project is a pair of git repositories under the `autodev` org on this
+node's gitea (`http://agstudio.local:3000`; API token in
+`.local/gitea/autolab-agent.token`; `POST /api/v1/orgs/autodev/repos`
+creates a repo):
+
+- `<name>` — the main repository. Coding agents grow its contents.
+- `<name>-direction` — the director's workspace. The autolab agent creates
+  the pair and plants and maintains the direction files itself: a `GUIDE.md`
+  telling the director its role, a `concept.md` stating the project's theme,
+  and a `.gitignore` containing `.local`.
+
+Locally both are cloned under `.local/projects/<name>/`, as `main/` and
+`direction/`. `.local/projects/projects.md` lists every project, one line
+each.
