@@ -77,5 +77,9 @@ polls every 3 s. Mission, driver state, cumulative cost, the agent's own
 notes, the jobs table, an evidence browser linking every raw artefact, the
 session table, and the drive log tail. `#job=<name>` survives a reload.
 
-Deployment to a job-runner node is owned by the `autolab_node` role in
-clusterintent's `ansible_agdev`.
+Deployment to a job-runner node is owned by
+`ansible_agdev/playbooks/agent/setup_autolab_node.yml` in clusterintent. The
+`autolab_node` placement profile supplies the provider endpoint and role
+profiles; the playbook installs both pinned harness CLIs and generates the
+ignored overlay. Anthropic keys, when used, are copied from a controller-local
+secret file and appear in the overlay only as a `_file` reference.
