@@ -24,4 +24,4 @@ build-backend = "hatchling.build"
 packages = ["src/agautolab"]
 
 [tool.uv.sources]
-pyagag = { path = "../../pyagag", editable = true }
+pyagag = { git = "https://github.com/iwaag/pyagag.git", branch = "main" }

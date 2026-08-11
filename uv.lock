@@ -18,7 +18,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "pyagag", editable = "../../pyagag" },
+    { name = "pyagag", git = "https://github.com/iwaag/pyagag.git?branch=main" },
     { name = "pyyaml", specifier = ">=6.0" },
 ]
 
@@ -64,12 +64,7 @@ wheels = [
 [[package]]
 name = "pyagag"
 version = "0.1.0"
-source = { editable = "../../pyagag" }
-
-[package.metadata]
-
-[package.metadata.requires-dev]
-dev = [{ name = "pytest", specifier = ">=8.0" }]
+source = { git = "https://github.com/iwaag/pyagag.git?branch=main#0c9e3a95c92d1b0bff69193b046142a7c9baeaf0" }
 
 [[package]]
 name = "pygments"
