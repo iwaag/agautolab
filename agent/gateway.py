@@ -10,6 +10,7 @@ Stdlib-only single-file server. Routes:
                   "game" says whether the served build is from this run)
   GET  /log       ?tail=N  tail of the current (or last) drive log
   GET  /jobs      one summary row per .local/jobs/<job>/
+  GET  /projects  project role-profile selections and available profiles
   GET  /jobs/<job>              status document + cost rollup + evidence timeline
   GET  /jobs/<job>/evidence/<iter>/<file>   raw evidence file passthrough
   POST /jobs/<job>/summarize/<iter>  ?force=1  start a one-shot summarizer
@@ -62,7 +63,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-from agag.agent_config import AgentConfigError  # noqa: E402
+from agag.agent_config import AgentConfigError, load_config  # noqa: E402
+from agautolab.agent_settings import AGENTS_CONFIG, AGENTS_LOCAL_CONFIG  # noqa: E402
+from agautolab.project_settings import (  # noqa: E402
+    PROJECTS_ROOT,
+    PROJECT_AGENT_ROLES,
+    ProjectSettingsError,
+    load_project_roles,
+)
 from agautolab.role_run import run_role  # noqa: E402
 STATE = ROOT / ".local" / "agent"
 GATEWAY = STATE / "gateway"
@@ -75,6 +83,7 @@ WINDOW = STATE / "window"
 # Versioned envelope, in the spirit of nctl's `nctl.drift.v1`: scope 3 points
 # agdevworld at this same feed, and the kind is what keeps that cheap.
 KIND = "autolab.monitor.v1"
+PROJECTS_KIND = "autolab.projects.v1"
 
 TERMINAL_STATUSES = {"converged", "stuck", "error"}
 SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -302,7 +311,7 @@ def job_yaml_fields(job_dir):
         pass
     out = {}
     for line in text.splitlines():
-        m = re.match(r"^(profile|adapter|max_iterations|push):\s*(\S+)\s*$", line)
+        m = re.match(r"^(project|profile|adapter|max_iterations|push):\s*(\S+)\s*$", line)
         if m:
             out[m.group(1)] = m.group(2).strip("\"'")
     return _job_fields(out)
@@ -316,6 +325,8 @@ def _job_fields(doc):
         out["adapter"] = doc["adapter"]
     if isinstance(doc.get("profile"), str):
         out["profile"] = doc["profile"]
+    if isinstance(doc.get("project"), str):
+        out["project"] = doc["project"]
     try:
         out["max_iterations"] = int(doc["max_iterations"])
     except (KeyError, TypeError, ValueError):
@@ -324,6 +335,53 @@ def _job_fields(doc):
     if push is not None:
         out["push"] = push if isinstance(push, bool) else str(push).lower() == "true"
     return out
+
+
+def projects_document():
+    """Return every local project with its effective selectable role profiles.
+
+    A broken project file is represented on that project's row. Other project
+    rows remain useful while a human or agent is between valid edits.
+    """
+    config, overlay = load_config(AGENTS_CONFIG, AGENTS_LOCAL_CONFIG)
+    profiles = sorted(config.get("profiles", {}))
+    roles = config.get("roles", {})
+    overlay_roles = overlay.get("roles", {})
+    defaults = {
+        role: overlay_roles.get(role, {}).get("profile", roles.get(role, {}).get("profile"))
+        for role in sorted(PROJECT_AGENT_ROLES)
+    }
+    project_dirs = (
+        sorted(path for path in PROJECTS_ROOT.iterdir() if path.is_dir())
+        if PROJECTS_ROOT.is_dir()
+        else []
+    )
+    projects = []
+    for project_dir in project_dirs:
+        row = {"name": project_dir.name}
+        try:
+            selected = load_project_roles(project_dir.name)
+            row["roles"] = {
+                role: {
+                    "profile": selected.get(role, defaults[role]),
+                    "source": "project" if role in selected else "default",
+                }
+                for role in sorted(PROJECT_AGENT_ROLES)
+            }
+            unknown = sorted(
+                {value["profile"] for value in row["roles"].values()} - set(profiles)
+            )
+            if unknown:
+                row["error"] = f"unknown profile(s): {', '.join(unknown)}"
+        except ProjectSettingsError as error:
+            row["error"] = str(error)
+        projects.append(row)
+    return {
+        "kind": PROJECTS_KIND,
+        "type": "projects",
+        "profiles": profiles,
+        "projects": projects,
+    }
 
 
 def evidence_iters(job_dir):
@@ -717,6 +775,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.get_status()
         if path == "/log":
             return self.get_log()
+        if path == "/projects":
+            return self.send_json(200, projects_document())
         if path == "/jobs" or path.startswith("/jobs/"):
             return self.get_jobs(path)
         self.send_json(404, {"error": "unknown route"})
