@@ -11,8 +11,8 @@
     "read": "allow",
     "glob": "allow",
     "grep": "allow",
-    "edit": "deny",
-    "write": "deny",
+    "edit": "allow",
+    "write": "allow",
     "bash": {
       "*": "deny",
       "uv run python -m agautolab.role_run director *": "allow",

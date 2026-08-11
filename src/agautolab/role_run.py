@@ -18,7 +18,7 @@ from .project_settings import (
 )
 
 ROLE_ALLOWED_TOOLS = {
-    "front": "Read,Glob,Grep,Bash(cd:*),Bash(uv run python -m agautolab.role_run director:*)",
+    "front": "Read,Write,Edit,Glob,Grep,Bash(cd:*),Bash(uv run python -m agautolab.role_run director:*)",
     "director": "Read,Glob,Grep",
     "summarizer": "Read,Glob,Grep",
     "mediator": (

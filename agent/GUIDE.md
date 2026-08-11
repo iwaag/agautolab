@@ -18,7 +18,7 @@ evidence on disk — prompt, diff, gate results, cost.
   spend and capability questions — and starting work. A
   `<<mission>>…<</mission>>` block in the window's reply starts a mission
   (one at a time; a refusal while one runs is recorded).
-- `GET /status`, `/log`, `/jobs`, `/jobs/<job>`,
+- `GET /status`, `/log`, `/jobs`, `/jobs/<job>`, `/projects`,
   `/jobs/<job>/evidence/<iter>/<file>`, `/monitor/`, `/game/...`, `/healthz`.
 - `POST /jobs/<job>/summarize/<iter>` — prose for one iteration's evidence,
   written on this node.
@@ -63,6 +63,13 @@ whose `[roles]` table selects `director` and/or `coding` profiles by name.
 Director runs discover it from the direction workspace; coding jobs name the
 project in `job.yaml`. The ignored file can change independently of project
 source, and a missing file leaves the shared role defaults in effect.
+
+When a user asks to change a project's agent backend, you may edit that
+project's `.local/projects/<name>/agents.toml`. The only valid role keys are
+`coding` and `director`; valid profile names come from the root `agents.toml`.
+`GET /projects` shows the effective selections and their source. Make the
+requested edit directly and explain the resulting selection; do not turn a
+settings change into a mission.
 
 ```bash
 uv run python -m agautolab.role_run director \
