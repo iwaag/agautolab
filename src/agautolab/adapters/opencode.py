@@ -30,11 +30,16 @@ class OpenCodeAdapter:
             raise AdapterError("opencode adapter_config: 'args' must be a list of strings")
         if "--model" in args or "-m" in args:
             raise AdapterError("opencode adapter_config: model selection belongs to profile")
+        if "--dir" in args or any(arg.startswith("--dir=") for arg in args):
+            raise AdapterError("opencode adapter_config: working directory is managed by adapter")
         return cls(agent, list(args))
 
     def run(self, prompt: str, workdir: Path, timeout: int) -> AdapterResult:
+        # Working-directory defense 2/2: pyagag already synchronizes PWD with
+        # subprocess cwd. Pass OpenCode's native --dir too so its project/tool
+        # context stays pinned even if its cwd discovery semantics change.
         result = run_harness(self.agent, prompt, cwd=workdir, timeout=timeout,
-                             extra_args=self.args,
+                             extra_args=[*self.args, "--dir", str(workdir.resolve())],
                              opencode_config=PROJECT_ROOT / "agent" / "opencode-coding.json")
         return AdapterResult(result.output, result.exit_code, result.meta,
                              {OUTPUT_FILENAME: result.raw_output})

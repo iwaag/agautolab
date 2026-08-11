@@ -19,7 +19,10 @@ job's acceptance gates exit 0.
 
 - `fake` — appends a line per run; no credentials, 0 USD, used by the tests.
 - `opencode` — `opencode run --format json` with the profile's full canonical
-  model ID; raw JSONL is retained as `agent_output.jsonl`.
+  model ID; raw JSONL is retained as `agent_output.jsonl`. Working-directory
+  isolation is intentionally doubled: the shared harness synchronizes `PWD`
+  with the subprocess cwd, and this adapter also pins OpenCode with `--dir`.
+  Job-level adapter args cannot override that managed directory.
 - `claude_code` — `claude -p --output-format json` one-shot, `cwd=target/`,
   prompt on stdin. Saves stdout as `agent_output.json` and normalized metadata
   into `adapter_result.json`. `adapter_config`: `args`, `allowed_tools`,
