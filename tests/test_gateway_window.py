@@ -26,7 +26,7 @@ def sandbox(tmp_path, monkeypatch):
 
 def meta(outcome="done"):
     return {
-        "schema": "ag.agent-run.v1", "role": "front", "profile": "local-coder",
+        "schema": "ag.agent-run.v1", "role": "front", "profile": "local",
         "harness": "opencode", "provider": "ollama",
         "model": "ollama/qwen3.6:35b-a3b-coding-nvfp4", "outcome": outcome,
         "duration_ms": 9, "cost_usd": 0.0,
@@ -38,7 +38,7 @@ def test_a_successful_run_records_normalized_fields(sandbox, monkeypatch):
     record = gateway.answer_window("which jobs finished?")
     assert record["id"] == "window/run-0001"
     assert record["role"] == "front"
-    assert record["profile"] == "local-coder"
+    assert record["profile"] == "local"
     assert record["harness"] == "opencode"
     assert record["model"].startswith("ollama/")
     assert "backend" not in record and "backend_model" not in record

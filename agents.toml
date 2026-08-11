@@ -5,11 +5,11 @@ project = "agautolab"
 
 [models."anthropic/claude-sonnet-5"]
 
-[profiles.local-coder]
+[profiles.local]
 harness = "opencode"
 model = "ollama/qwen3.6:35b-a3b-coding-nvfp4"
 
-[profiles.sonnet-coder]
+[profiles.sonnet]
 harness = "claude_code"
 model = "anthropic/claude-sonnet-5"
 
@@ -18,23 +18,23 @@ harness = "fake"
 model = "ollama/qwen3.6:35b-a3b-coding-nvfp4"
 
 [roles.front]
-profile = "local-coder"
+profile = "local"
 requires = ["nested_harness"]
 
 [roles.director]
-profile = "sonnet-coder"
+profile = "sonnet"
 requires = []
 
 [roles.mediator]
-profile = "sonnet-coder"
+profile = "sonnet"
 requires = []
 
 [roles.coding]
-profile = "sonnet-coder"
+profile = "sonnet"
 requires = []
 
 [roles.summarizer]
-profile = "sonnet-coder"
+profile = "sonnet"
 requires = []
 
 [capabilities]

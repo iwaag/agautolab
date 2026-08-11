@@ -41,12 +41,12 @@ def test_every_agautolab_role_resolves_and_overlay_can_override(tmp_path):
     overlay = tmp_path / "agents.local.toml"
     overlay.write_text('''schema = "ag.agent-config.v1"
 [roles.front]
-profile = "sonnet-coder"
+profile = "sonnet"
 ''')
     config, local = load_config(committed, overlay)
     resolved = {role: resolve_role(config, local, role, check_available=False)
                 for role in ("front", "director", "mediator", "coding", "summarizer")}
-    assert resolved["front"].profile == "sonnet-coder"
+    assert resolved["front"].profile == "sonnet"
     assert set(resolved) == {"front", "director", "mediator", "coding", "summarizer"}
 
 

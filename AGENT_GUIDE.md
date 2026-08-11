@@ -51,7 +51,7 @@ forward into the next iteration's prompt as written.
 ```yaml
 goal: |
   The client's request.
-profile: sonnet-coder         # optional; defaults to the coding role profile
+profile: sonnet               # optional; defaults to the coding role profile
 adapter_config:
   allowed_tools: "Write,Edit,Read,Bash(node:*)"  # Claude Code role grant
   add_job_dir: true           # grant the job dir via --add-dir (default true)
@@ -65,8 +65,8 @@ push: true                    # push target/ to `origin` after commits and on te
 
 The profile determines both harness and canonical model. Do not pass model
 flags in `adapter_config`; executable paths and globs are local overlay facts
-in `.local/agents.local.toml`. The shared profiles are `local-coder`
-(OpenCode + Ollama), `sonnet-coder` (Claude Code), and test-only `stub`.
+in `.local/agents.local.toml`. The shared profiles are `local`
+(OpenCode + Ollama), `sonnet` (Claude Code), and test-only `stub`.
 
 `goal` heads every iteration's prompt unchanged, in both phases — the client's
 standing request, not one iteration's instruction. A plan-phase sentence left

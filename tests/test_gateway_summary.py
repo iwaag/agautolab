@@ -32,7 +32,7 @@ def test_done_reads_cached_file_and_normalized_record(tmp_path):
     (job / "summaries").mkdir()
     (job / "summaries" / "iter-0001.md").write_text("it changed one file.\n")
     (job / "summaries" / "iter-0001.cost.json").write_text(json.dumps({
-        "role": "summarizer", "profile": "sonnet-coder", "harness": "claude_code",
+        "role": "summarizer", "profile": "sonnet", "harness": "claude_code",
         "provider": "anthropic", "model": "anthropic/claude-sonnet-5",
         "outcome": "done", "cost_usd": 0.03,
     }))
