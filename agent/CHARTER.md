@@ -26,6 +26,10 @@ disk is your memory.
 - `.local/gitea/autolab-agent.token` — Gitea at `http://agstudio.local:3000`,
   org `autodev` (`Authorization: token $(cat ...)`;
   `POST /api/v1/orgs/autodev/repos`).
+- `.local/plane.env` — mode-0600 Plane API access and project/state IDs,
+  installed by the node role. When the mission names a Plane issue, report the
+  job, completed iterations and gates there, then leave a final comment and
+  state. `GUIDE.md` has the exact calls; never copy the token into a job.
 - `AGENT_GUIDE.md` — the `autolab` manual.
 - `styles/README.md` — two development styles to pick from.
 - `../director/README.md` — an optional generated-asset pipeline.

@@ -51,6 +51,55 @@ Timing: an iteration's budget is `iteration_timeout_seconds` (default 900).
 Missions run unattended for tens of minutes; nothing here is an interactive
 request/response wait.
 
+## Reporting a Plane-backed mission
+
+A dispatched task carries a line such as `Plane issue ID: <uuid>`. Keep that
+ID with the mission and report to the same issue. The node role installs
+`.local/plane.env` with the URL, API key, workspace/project identifiers, and
+the five live state IDs. Read it from the agautolab checkout; do not copy its
+token into a job directory, prompt, transcript, comment, or repository.
+
+Post concise evidence comments when the job is created, after each completed
+iteration (include the iteration number and gate result), and when the mission
+ends. Do not comment on every status poll. For an issue ID supplied by the
+mission:
+
+```bash
+set -a
+. .local/plane.env
+set +a
+issue_id='<Plane issue ID from the mission>'
+api="$PLANE_URL/api/v1/workspaces/$PLANE_WORKSPACE_SLUG/projects/$PLANE_PROJECT_ID"
+curl --fail-with-body --silent --show-error \
+  -X POST -H "X-API-Key: $PLANE_API_KEY" \
+  -H 'Content-Type: application/json' \
+  "$api/issues/$issue_id/comments/" \
+  --data '{"comment_html":"<p>Created job <code>job-name</code>.</p>"}'
+```
+
+Plane expects HTML in `comment_html`; JSON-escape any dynamic text rather than
+assembling untrusted text inside the literal above. To change state, select the
+matching ID already present in the file and PATCH the issue:
+
+```bash
+state_id="$PLANE_STATE_DONE_ID"
+curl --fail-with-body --silent --show-error \
+  -X PATCH -H "X-API-Key: $PLANE_API_KEY" \
+  -H 'Content-Type: application/json' \
+  "$api/issues/$issue_id/" \
+  --data "{\"state\":\"$state_id\"}"
+```
+
+On convergence, comment with the final gates/evidence and move to Done. On a
+stuck or errored mission, comment with the observed failure and your recovery
+judgement, then move it back to Ready when another attempt is useful or to
+Cancelled when it is not. The available variables are
+`PLANE_STATE_BACKLOG_ID`, `PLANE_STATE_READY_ID`,
+`PLANE_STATE_IN_PROGRESS_ID`, `PLANE_STATE_DONE_ID`, and
+`PLANE_STATE_CANCELLED_ID`. A failed Plane call is evidence: record it in
+`.local/agent/NOTES.md` and continue or stop based on whether the mission itself
+can still be completed; never claim an update without the HTTP success.
+
 ## Project directors
 
 Project workspaces live under `.local/projects/<name>/direction/`;
