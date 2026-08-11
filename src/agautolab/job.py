@@ -19,6 +19,7 @@ class JobError(Exception):
 @dataclass
 class Job:
     goal: str
+    project: str | None = None
     profile: str | None = None
     adapter: str | None = None
     # Empty gates = the job starts in the plan phase: the coding agent's first
@@ -46,11 +47,14 @@ class Job:
             raise JobError("job.yaml must be a mapping")
 
         goal = raw.get("goal")
+        project = raw.get("project")
         profile = raw.get("profile")
         adapter = raw.get("adapter")
         gates = raw.get("gates") or []
         if not isinstance(goal, str) or not goal.strip():
             raise JobError("job.yaml: 'goal' must be a non-empty string")
+        if project is not None and (not isinstance(project, str) or not project.strip()):
+            raise JobError("job.yaml: 'project' must be a non-empty string when present")
         if profile is not None and (not isinstance(profile, str) or not profile.strip()):
             raise JobError("job.yaml: 'profile' must be a non-empty string when present")
         if adapter is not None and (not isinstance(adapter, str) or not adapter.strip()):
@@ -76,6 +80,7 @@ class Job:
 
         return cls(
             goal=goal,
+            project=project.strip() if project else None,
             profile=profile.strip() if profile else None,
             adapter=adapter.strip() if adapter else None,
             gates=[g.strip() for g in gates],

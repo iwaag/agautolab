@@ -11,6 +11,11 @@ from agag.agent_config import AgentConfigError
 from agag.harness import run_harness, write_run_record
 
 from .agent_settings import PROJECT_ROOT, resolve_project_role
+from .project_settings import (
+    ProjectSettingsError,
+    load_project_roles,
+    project_name_from_direction,
+)
 
 ROLE_ALLOWED_TOOLS = {
     "front": "Read,Glob,Grep,Bash(cd:*),Bash(uv run python -m agautolab.role_run director:*)",
@@ -37,8 +42,14 @@ def _opencode_config(role: str) -> Path:
 
 def run_role(role: str, prompt: str, *, cwd: Path, timeout: float,
              profile: str | None = None, transcript: Path | None = None,
-             record: Path | None = None) -> tuple[str, dict, int]:
-    agent = resolve_project_role(role, profile_override=profile)
+             record: Path | None = None,
+             project: str | None = None) -> tuple[str, dict, int]:
+    project = project or (project_name_from_direction(cwd) if role == "director" else None)
+    project_roles = load_project_roles(project)
+    profile_override = profile or project_roles.get(role)
+    agent = resolve_project_role(role, profile_override=profile_override, check_available=False)
+    if agent.harness != "fake":
+        agent = resolve_project_role(role, profile_override=profile_override)
     result = run_harness(
         agent,
         prompt,
@@ -48,10 +59,13 @@ def run_role(role: str, prompt: str, *, cwd: Path, timeout: float,
         opencode_config=_opencode_config(role) if agent.harness == "opencode" else None,
         transcript_path=transcript,
     )
+    result.meta["project"] = project
     run_record = {"schema": "ag.agent-run.v1", **result.meta}
     if record:
         write_run_record(record, request_id=record.stem, meta=result.meta)
         run_record = json.loads(record.read_text(encoding="utf-8"))
+        run_record["project"] = project
+        record.write_text(json.dumps(run_record, indent=2) + "\n", encoding="utf-8")
     return result.output, run_record, result.exit_code
 
 
@@ -59,6 +73,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("role", choices=sorted(ROLE_ALLOWED_TOOLS))
     parser.add_argument("--profile")
+    parser.add_argument("--project")
     parser.add_argument("--cwd", type=Path, default=PROJECT_ROOT)
     parser.add_argument("--timeout", type=float, default=300)
     prompt_source = parser.add_mutually_exclusive_group()
@@ -76,8 +91,9 @@ def main() -> None:
     try:
         output, _record, code = run_role(args.role, prompt, cwd=args.cwd,
                                          timeout=args.timeout, profile=args.profile,
-                                         transcript=args.transcript, record=args.record)
-    except AgentConfigError as error:
+                                         transcript=args.transcript, record=args.record,
+                                         project=args.project)
+    except (AgentConfigError, ProjectSettingsError) as error:
         if args.record:
             failed = {"schema": "ag.agent-run.v1", "role": args.role,
                       "outcome": "failed", "failure": str(error)}

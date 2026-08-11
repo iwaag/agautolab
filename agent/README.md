@@ -70,6 +70,12 @@ the ignored local overlay selects per-node profiles and supplies commands and
 provider endpoints. Every new window, session, summary, director, and coding
 record carries role, profile, harness, provider, canonical model, and outcome.
 
+Development projects can additionally select their `coding` and `director`
+profiles in the ignored `.local/projects/<name>/agents.toml` `[roles]` table.
+A coding job links to that selection with `project: <name>`; a director run
+discovers it from `.local/projects/<name>/direction/`. Records retain both the
+project name and the profile that resolved for the run.
+
 ## Monitoring page
 
 `http://<host>:8791/monitor/` — vanilla JS in `monitor/`, no build step,

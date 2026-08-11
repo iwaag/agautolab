@@ -58,6 +58,12 @@ Project workspaces live under `.local/projects/<name>/direction/`;
 a project's director, pass the request to the common runner and name record
 paths so the nested identity is reviewable:
 
+Each project may have a developer-owned `.local/projects/<name>/agents.toml`
+whose `[roles]` table selects `director` and/or `coding` profiles by name.
+Director runs discover it from the direction workspace; coding jobs name the
+project in `job.yaml`. The ignored file can change independently of project
+source, and a missing file leaves the shared role defaults in effect.
+
 ```bash
 uv run python -m agautolab.role_run director \
   --prompt "your question" \

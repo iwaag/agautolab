@@ -37,6 +37,7 @@ from agag.agent_config import AgentConfigError
 from . import adapters, gates as gates_mod
 from .agent_settings import resolve_project_role
 from .job import Job, JobError
+from .project_settings import ProjectSettingsError, load_project_roles
 from .state import (
     AWAITING_APPROVAL,
     CONVERGED,
@@ -270,6 +271,8 @@ def _write_evidence(
     gate_results: list[gates_mod.GateResult],
     diff_text: str,
     started_at: str,
+    project: str | None,
+    resolved_profile: str,
 ) -> None:
     evidence_dir.mkdir(parents=True, exist_ok=True)
     (evidence_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
@@ -282,6 +285,8 @@ def _write_evidence(
                 "started_at": started_at,
                 "finished_at": datetime.now(timezone.utc).isoformat(),
                 **adapter_result.meta,
+                "project": project,
+                "profile": resolved_profile,
             },
             indent=2,
             default=str,
@@ -322,6 +327,8 @@ def _run_plan_iteration(
     iteration: int,
     notes: str | None,
     started_at: str,
+    project: str | None,
+    resolved_profile: str,
 ) -> int:
     prompt = build_plan_prompt(job, job_dir, iteration, notes)
 
@@ -344,7 +351,7 @@ def _run_plan_iteration(
 
     _write_evidence(
         evidence_dir, prompt, adapter_result, adapter_timed_out,
-        [], diff_text, started_at,
+        [], diff_text, started_at, project, resolved_profile,
     )
     if job.push and (
         diff_nonempty
@@ -407,17 +414,19 @@ def _run_locked(job_dir: Path) -> int:
         return EXIT_ERROR
 
     try:
-        agent = resolve_project_role("coding", profile_override=job.profile,
+        project_roles = load_project_roles(job.project)
+        profile_override = job.profile or project_roles.get("coding")
+        agent = resolve_project_role("coding", profile_override=profile_override,
                                      check_available=False)
         if agent.harness != "fake":
-            agent = resolve_project_role("coding", profile_override=job.profile)
+            agent = resolve_project_role("coding", profile_override=profile_override)
         if job.adapter is not None and job.adapter != agent.harness:
             raise adapters.AdapterError(
                 f"job adapter {job.adapter!r} disagrees with profile harness {agent.harness!r}"
             )
         adapter = adapters.create(agent.harness, job.adapter_config,
                                   job_dir=job_dir, agent=agent)
-    except (adapters.AdapterError, AgentConfigError) as exc:
+    except (adapters.AdapterError, AgentConfigError, ProjectSettingsError) as exc:
         print(f"autolab: {exc}", file=sys.stderr)
         state.status = ERROR
         state.error = str(exc)
@@ -456,7 +465,7 @@ def _run_locked(job_dir: Path) -> int:
         if state.phase == PLAN_PHASE:
             return _run_plan_iteration(
                 job_dir, job, state, adapter, target, evidence_dir,
-                iteration, notes, started_at,
+                iteration, notes, started_at, job.project, agent.profile,
             )
 
         plan_path = target / PLAN_FILE
@@ -494,7 +503,7 @@ def _run_locked(job_dir: Path) -> int:
 
         _write_evidence(
             evidence_dir, prompt, adapter_result, adapter_timed_out,
-            gate_results, diff_text, started_at,
+            gate_results, diff_text, started_at, job.project, agent.profile,
         )
         if job.push and (diff_nonempty or state.status in TERMINAL_STATUSES):
             _push_target(target, evidence_dir)

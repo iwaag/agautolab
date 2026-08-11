@@ -31,7 +31,7 @@ job's acceptance gates exit 0.
 
 ```
 <job-dir>/
-  job.yaml        # goal, optional profile override, gates, timeouts, push
+  job.yaml        # goal, optional project/profile, gates, timeouts, push
   state.json      # status, iteration, phase, gate summary, approved gates
   target/         # the repo being developed (auto git-init on first run)
   evidence/iter-NNNN/   # prompt, adapter output, diff, gate results, cost
@@ -60,6 +60,12 @@ uv run pytest -q
 provider endpoints, and per-node role overrides belong only in the ignored
 `.local/agents.local.toml`. Selection failures use `ag.agent-config.v1` error
 codes and never fall back to another harness or model.
+
+A job's optional `project:` links it to the developer-owned
+`.local/projects/<name>/agents.toml`. Its `[roles].coding` selection applies
+unless `job.yaml` has a one-run `profile:` override; otherwise the shared role
+default applies. Director runs launched within that project's `direction/`
+workspace use `[roles].director` from the same file.
 
 ## Around it
 
