@@ -70,6 +70,25 @@ unless `job.yaml` has a one-run `profile:` override; otherwise the shared role
 default applies. Director runs launched within that project's `direction/`
 workspace use `[roles].director` from the same file.
 
+## Gateway project profiles
+
+Start the local gateway through the declared project environment:
+
+```bash
+uv run python agent/gateway.py
+```
+
+`GET /projects` returns an `autolab.projects.v1` envelope containing the
+available profiles and every directory-backed project's effective `coding`
+and `director` profiles. Each role says whether its value comes from the
+project file or the shared default; one malformed project is reported on its
+own row without hiding the other projects. Job list and detail rows expose the
+optional `project` from `job.yaml`.
+
+Profile changes remain conversational: ask `POST /window` to change a named
+project. The front role may edit `.local/projects/<name>/agents.toml`; there is
+no direct settings-write endpoint.
+
 ## Around it
 
 - [AGENT_GUIDE.md](AGENT_GUIDE.md) — the manual for an agent operating autolab.
