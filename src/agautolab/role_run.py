@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 from agag.agent_config import AgentConfigError
-from agag.harness import run_harness
+from agag.harness import run_harness, write_run_record
 
 from .agent_settings import PROJECT_ROOT, resolve_project_role
 
@@ -50,9 +50,8 @@ def run_role(role: str, prompt: str, *, cwd: Path, timeout: float,
     )
     run_record = {"schema": "ag.agent-run.v1", **result.meta}
     if record:
-        record.parent.mkdir(parents=True, exist_ok=True)
-        record.write_text(json.dumps(run_record, ensure_ascii=False, indent=2) + "\n",
-                          encoding="utf-8")
+        write_run_record(record, request_id=record.stem, meta=result.meta)
+        run_record = json.loads(record.read_text(encoding="utf-8"))
     return result.output, run_record, result.exit_code
 
 
