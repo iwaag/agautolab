@@ -32,9 +32,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
+from agag.agent_config import AgentConfigError
 
 from . import adapters, gates as gates_mod
-from .agent_config import AgentConfigError, resolve_project_role
+from .agent_settings import resolve_project_role
 from .job import Job, JobError
 from .state import (
     AWAITING_APPROVAL,

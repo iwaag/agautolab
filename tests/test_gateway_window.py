@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from agautolab.agent_config import AgentConfigError
+from agag.agent_config import AgentConfigError
 
 spec = importlib.util.spec_from_file_location(
     "gateway_window", Path(__file__).resolve().parent.parent / "agent" / "gateway.py"

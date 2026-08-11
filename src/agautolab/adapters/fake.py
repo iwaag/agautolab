@@ -24,8 +24,8 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..agent_config import ResolvedAgent
-from ..harness import identity
+from agag.agent_config import ResolvedAgent
+from agag.harness import identity
 from . import AdapterResult
 
 

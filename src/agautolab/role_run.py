@@ -7,8 +7,10 @@ import json
 import sys
 from pathlib import Path
 
-from .agent_config import AgentConfigError, PROJECT_ROOT, resolve_project_role
-from .harness import run_harness
+from agag.agent_config import AgentConfigError
+from agag.harness import run_harness
+
+from .agent_settings import PROJECT_ROOT, resolve_project_role
 
 ROLE_ALLOWED_TOOLS = {
     "front": "Read,Glob,Grep,Bash(cd:*),Bash(uv run python -m agautolab.role_run director:*)",

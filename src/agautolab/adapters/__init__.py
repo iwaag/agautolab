@@ -16,7 +16,7 @@ from dataclasses import dataclass, field as dataclass_field
 from pathlib import Path
 from typing import Callable, Protocol
 
-from ..agent_config import ResolvedAgent
+from agag.agent_config import ResolvedAgent
 
 
 @dataclass

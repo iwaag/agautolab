@@ -5,8 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..agent_config import ResolvedAgent
-from ..harness import run_harness
+from agag.agent_config import ResolvedAgent
+from agag.harness import run_harness
 from . import AdapterError, AdapterResult
 
 OUTPUT_FILENAME = "agent_output.json"

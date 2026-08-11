@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from agautolab.agent_config import AgentConfigError, load_config, resolve_role
+from agag.agent_config import AgentConfigError, load_config, resolve_role
 from agautolab.run_once import run_once
 
 EXAMPLES = Path(__file__).resolve().parents[3] / "devpolicy" / "contracts" / "agent" / "examples"

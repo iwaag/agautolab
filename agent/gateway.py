@@ -62,7 +62,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-from agautolab.agent_config import AgentConfigError  # noqa: E402
+from agag.agent_config import AgentConfigError  # noqa: E402
 from agautolab.role_run import run_role  # noqa: E402
 STATE = ROOT / ".local" / "agent"
 GATEWAY = STATE / "gateway"
