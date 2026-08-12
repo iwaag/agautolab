@@ -99,6 +99,24 @@ def test_mission_block_is_applied_after_success(sandbox, monkeypatch):
     assert record["mission"]["status"] == 202
 
 
+def test_mangled_mission_tags_still_start_the_mission(sandbox, monkeypatch):
+    # Both shapes were emitted by the live local front and lost real missions:
+    # an opening tag missing its `>>`, and a closing tag one `>` short.
+    for reply in (
+        "<<mission max_sessions=20\nbuild the game\nlast line",
+        "<<mission max_sessions=20>>\nbuild the game\nlast line\n<</mission>",
+    ):
+        monkeypatch.setattr(gateway, "run_role", lambda *a, r=reply, **k: (r, meta(), 0))
+        seen = {}
+        monkeypatch.setattr(gateway, "start_mission", lambda mission, count: (
+            seen.update(mission=mission, count=count) or 202, {"accepted": True}))
+        record = gateway.answer_window("build it")
+        assert seen["count"] == 20
+        assert seen["mission"].startswith("build the game")
+        assert seen["mission"].endswith("last line")
+        assert record["mission"]["status"] == 202
+
+
 def test_a_missing_guide_does_not_break_the_window(sandbox, monkeypatch):
     monkeypatch.setattr(gateway, "GUIDE", sandbox / "absent.md")
     assert "no capability card" in gateway.read_guide()

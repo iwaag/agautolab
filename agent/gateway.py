@@ -643,9 +643,13 @@ both below.
 
 # The window's mission ability (devpolicy: Tool Giving): a structured block in
 # the reply that the gateway executes. Optional max_sessions attribute; the
-# block body is the mission text.
+# block body is the mission text. The tags are parsed tolerantly: live local
+# models have emitted `<<mission max_sessions=20` (no `>>`) and `<</mission>`
+# (one `>` short), losing whole missions to a single character. An unclosed
+# block runs to the end of the reply.
 MISSION_BLOCK = re.compile(
-    r"<<mission(?:\s+max_sessions=(\d+))?>>\s*(.*?)\s*<</mission>>", re.S
+    r"<<mission(?:\s+max_sessions=(\d+))?\s*(?:>>)?\s*(.*?)\s*(?:<</mission>?>?|$)",
+    re.S,
 )
 
 
