@@ -29,6 +29,16 @@ PYTHONPATH="$root/src${PYTHONPATH:+:$PYTHONPATH}" python3 -m agautolab.role_run 
     --record "$stem.run.json"
 rc=$?
 
+# Witness mission consumption from the session's own evidence (S5 ENT): a
+# session whose transcript never carried the mission's content is a failed
+# session, and the record says so before anyone reads the summary.
+PYTHONPATH="$root/src${PYTHONPATH:+:$PYTHONPATH}" python3 -m agautolab.mission_witness \
+    "$state/MISSION.md" "$stem.agent.jsonl" --cwd "$root" --record "$stem.run.json"
+witness_rc=$?
+if ((rc == 0 && witness_rc != 0)); then
+    rc=$witness_rc
+fi
+
 python3 - "$stem.run.json" "$rc" <<'PY' >&2
 import json, sys
 path, rc = sys.argv[1], sys.argv[2]

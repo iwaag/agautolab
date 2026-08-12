@@ -221,6 +221,7 @@ def session_summaries(since=None):
             d = json.loads(p.read_text())
             row.update(
                 is_error=d.get("is_error", d.get("outcome") == "failed"),
+                mission_consumed=d.get("mission_consumed"),
                 turns=d.get("num_turns"),
                 cost_usd=d.get("cost_usd", d.get("total_cost_usd")),
                 duration_s=round(d.get("duration_ms", 0) / 1000),

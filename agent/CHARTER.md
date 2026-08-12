@@ -11,7 +11,9 @@ disk is your memory.
   one answers questions mid-run. The harness that starts your session adds
   material of its own ahead of this charter — a listing of its own skills,
   and whatever project instructions sit above this directory. None of it was
-  written with this node in mind.
+  written with this node in mind. A session whose record shows the mission
+  never entered its context is accounted as failed, and the driver gives up
+  after three such sessions in a row.
 - `.local/agent/NOTES.md` — your own notes, across sessions. Yours to write.
   A fact stated in `AGENT_GUIDE.md`, `GUIDE.md` or this charter that turned
   out to be false belongs here too; you are the only one who finds out, and a
