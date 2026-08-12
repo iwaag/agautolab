@@ -1,21 +1,34 @@
-"""CLI entry point for gateway, director, mediator, and summarizer runs."""
+"""Role resolution for the stubbed node. Resolves; never launches.
+
+This module used to resolve a role to a harness and then run it. The running
+half is gone with the rest of the implementation (see the `discard_garbage`
+episode). What remains is the half the episode keeps:
+
+- the per-role tool grants and OpenCode permission-file mapping below, which
+  are sub-agent configuration, not implementation;
+- real resolution through `ag.agent-config.v1`, so `agents.toml`, the ignored
+  `.local/agents.local.toml` overlay, and a project's own
+  `.local/projects/<name>/agents.toml` are still read on every call and a
+  broken selection still fails loudly.
+
+`run_role` then returns a canned answer and a canonical `ag.agent-run.v1`
+record carrying the identity that *would* have served the run. No subprocess
+is started and nothing is ever charged.
+
+Availability is deliberately not checked (`check_available=False`): a stub
+that never launches a binary must not demand that the binary is installed.
+Unknown roles and unknown profiles still raise `AgentConfigError`.
+"""
 
 from __future__ import annotations
 
-import argparse
 import json
-import sys
 from pathlib import Path
 
-from agag.agent_config import AgentConfigError
-from agag.harness import run_harness, write_run_record
+from agag.harness import identity, write_run_record
 
 from .agent_settings import PROJECT_ROOT, resolve_project_role
-from .project_settings import (
-    ProjectSettingsError,
-    load_project_roles,
-    project_name_from_direction,
-)
+from .project_settings import load_project_roles, project_name_from_direction
 
 ROLE_ALLOWED_TOOLS = {
     "front": "Read,Write,Edit,Glob,Grep,Bash(cd:*),Bash(uv run python -m agautolab.role_run director:*)",
@@ -33,6 +46,14 @@ ROLE_ALLOWED_TOOLS = {
     ),
 }
 
+STUB_REPLY = (
+    "This autolab node is a stub. Its input/output surface and its sub-agent "
+    "configuration are intact, but the implementation behind them has been "
+    "removed, so no agent ran and this answer was not written by a model. "
+    "The run record next to it names the role, profile, harness and model "
+    "that would have served the request."
+)
+
 
 def _opencode_config(role: str) -> Path:
     if role in {"director", "summarizer"}:
@@ -44,66 +65,39 @@ def run_role(role: str, prompt: str, *, cwd: Path, timeout: float,
              profile: str | None = None, transcript: Path | None = None,
              record: Path | None = None,
              project: str | None = None) -> tuple[str, dict, int]:
+    """Resolve `role`, return the canned answer and its run record.
+
+    Signature, exceptions and return shape are the ones the gateway already
+    calls with. `prompt`, `timeout` and `transcript` are accepted and ignored:
+    nothing runs, so there is no transcript to write and no budget to spend.
+    """
     project = project or (project_name_from_direction(cwd) if role == "director" else None)
     project_roles = load_project_roles(project)
     profile_override = profile or project_roles.get(role)
-    agent = resolve_project_role(role, profile_override=profile_override, check_available=False)
-    if agent.harness != "fake":
-        agent = resolve_project_role(role, profile_override=profile_override)
-    result = run_harness(
-        agent,
-        prompt,
-        cwd=cwd,
-        timeout=timeout,
-        allowed_tools=ROLE_ALLOWED_TOOLS.get(role),
-        opencode_config=_opencode_config(role) if agent.harness == "opencode" else None,
-        transcript_path=transcript,
-    )
-    result.meta["project"] = project
-    run_record = {"schema": "ag.agent-run.v1", **result.meta}
+    agent = resolve_project_role(role, profile_override=profile_override,
+                                 check_available=False)
+    meta = {
+        **identity(agent),
+        "outcome": "done",
+        "stub": True,
+        "duration_ms": 0,
+        "cost_usd": 0.0,
+        "num_turns": 0,
+        "project": project,
+    }
+    run_record = {"schema": "ag.agent-run.v1", **meta}
     if record:
-        write_run_record(record, request_id=record.stem, meta=result.meta)
-        run_record = json.loads(record.read_text(encoding="utf-8"))
-        run_record["project"] = project
-        record.write_text(json.dumps(run_record, indent=2) + "\n", encoding="utf-8")
-    return result.output, run_record, result.exit_code
+        write_run_record(record, request_id=record.stem, meta=meta)
+        run_record = _reload_record(record, project)
+    return STUB_REPLY, run_record, 0
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("role", choices=sorted(ROLE_ALLOWED_TOOLS))
-    parser.add_argument("--profile")
-    parser.add_argument("--project")
-    parser.add_argument("--cwd", type=Path, default=PROJECT_ROOT)
-    parser.add_argument("--timeout", type=float, default=300)
-    prompt_source = parser.add_mutually_exclusive_group()
-    prompt_source.add_argument("--prompt")
-    prompt_source.add_argument("--prompt-file", type=Path)
-    parser.add_argument("--transcript", type=Path)
-    parser.add_argument("--record", type=Path)
-    args = parser.parse_args()
-    if args.prompt is not None:
-        prompt = args.prompt
-    elif args.prompt_file:
-        prompt = args.prompt_file.read_text(encoding="utf-8")
-    else:
-        prompt = sys.stdin.read()
-    try:
-        output, _record, code = run_role(args.role, prompt, cwd=args.cwd,
-                                         timeout=args.timeout, profile=args.profile,
-                                         transcript=args.transcript, record=args.record,
-                                         project=args.project)
-    except (AgentConfigError, ProjectSettingsError) as error:
-        if args.record:
-            failed = {"schema": "ag.agent-run.v1", "role": args.role,
-                      "outcome": "failed", "failure": str(error)}
-            args.record.parent.mkdir(parents=True, exist_ok=True)
-            args.record.write_text(json.dumps(failed, indent=2) + "\n", encoding="utf-8")
-        print(str(error), file=sys.stderr)
-        raise SystemExit(1)
-    print(output)
-    raise SystemExit(0 if code == 0 else 1)
-
-
-if __name__ == "__main__":
-    main()
+def _reload_record(record: Path, project: str | None) -> dict:
+    """Re-read what `write_run_record` normalized, then restore the two fields
+    it drops: the project the run belonged to, and the stub marker. A reader
+    of these files must never mistake one for a real run."""
+    document = json.loads(record.read_text(encoding="utf-8"))
+    document["project"] = project
+    document["stub"] = True
+    record.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+    return document
