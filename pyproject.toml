@@ -1,15 +1,11 @@
 [project]
 name = "agautolab"
 version = "0.1.0"
-description = "Headless auto-development loop orchestrator (autolab)"
+description = "Stub of the autolab node surface and its agent configuration"
 requires-python = ">=3.11"
 dependencies = [
     "pyagag",
-    "pyyaml>=6.0",
 ]
-
-[project.scripts]
-autolab = "agautolab.cli:main"
 
 [dependency-groups]
 dev = [
