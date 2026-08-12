@@ -53,23 +53,26 @@ request/response wait.
 
 ## Reporting a Plane-backed mission
 
-A dispatched task carries a line such as `Plane issue ID: <uuid>`. Keep that
-ID with the mission and report to the same issue. The node role installs
-`.local/plane.env` with the URL, API key, workspace/project identifiers, and
-the five live state IDs. Read it from the agautolab checkout; do not copy its
-token into a job directory, prompt, transcript, comment, or repository.
+A dispatched task carries lines such as `Plane project ID: <uuid>` and
+`Plane issue ID: <uuid>`, and the state IDs that belong to that project.
+Keep them with the mission and report to that same project and issue: state
+IDs are per-project in Plane, so the mission's own lines are the only ones
+that are right for it. The node role installs `.local/plane.env` with the
+URL, API key, and workspace — the credentials only; the project travels in
+the mission. Read it from the agautolab checkout; do not copy its token
+into a job directory, prompt, transcript, comment, or repository.
 
 Post concise evidence comments when the job is created, after each completed
 iteration (include the iteration number and gate result), and when the mission
-ends. Do not comment on every status poll. For an issue ID supplied by the
-mission:
+ends. Do not comment on every status poll. For IDs supplied by the mission:
 
 ```bash
 set -a
 . .local/plane.env
 set +a
+project_id='<Plane project ID from the mission>'
 issue_id='<Plane issue ID from the mission>'
-api="$PLANE_URL/api/v1/workspaces/$PLANE_WORKSPACE_SLUG/projects/$PLANE_PROJECT_ID"
+api="$PLANE_URL/api/v1/workspaces/$PLANE_WORKSPACE_SLUG/projects/$project_id"
 curl --fail-with-body --silent --show-error \
   -X POST -H "X-API-Key: $PLANE_API_KEY" \
   -H 'Content-Type: application/json' \
@@ -78,11 +81,11 @@ curl --fail-with-body --silent --show-error \
 ```
 
 Plane expects HTML in `comment_html`; JSON-escape any dynamic text rather than
-assembling untrusted text inside the literal above. To change state, select the
-matching ID already present in the file and PATCH the issue:
+assembling untrusted text inside the literal above. To change state, use the
+matching state ID from the mission text and PATCH the issue:
 
 ```bash
-state_id="$PLANE_STATE_DONE_ID"
+state_id='<the mission-supplied state ID, e.g. its Done id>'
 curl --fail-with-body --silent --show-error \
   -X PATCH -H "X-API-Key: $PLANE_API_KEY" \
   -H 'Content-Type: application/json' \
@@ -92,11 +95,10 @@ curl --fail-with-body --silent --show-error \
 
 On convergence, comment with the final gates/evidence and move to Done. On a
 stuck or errored mission, comment with the observed failure and your recovery
-judgement, then move it back to Ready when another attempt is useful or to
-Cancelled when it is not. The available variables are
-`PLANE_STATE_BACKLOG_ID`, `PLANE_STATE_READY_ID`,
-`PLANE_STATE_IN_PROGRESS_ID`, `PLANE_STATE_DONE_ID`, and
-`PLANE_STATE_CANCELLED_ID`. A failed Plane call is evidence: record it in
+judgement, then move it back to a dispatchable state when another attempt is
+useful or to Cancelled when it is not. If the mission names a state without
+supplying its ID, list the project's states first
+(`GET "$api/states/"`). A failed Plane call is evidence: record it in
 `.local/agent/NOTES.md` and continue or stop based on whether the mission itself
 can still be completed; never claim an update without the HTTP success.
 
