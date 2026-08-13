@@ -30,20 +30,26 @@ from agag.harness import identity, write_run_record
 from .agent_settings import PROJECT_ROOT, resolve_project_role
 from .project_settings import load_project_roles, project_name_from_direction
 
+# The working grant shared by the roles that actually do work. `front` runs
+# `uv run new_mission.py` in its own workspace, so it needs the same shell as
+# `mediator`; keeping one string means a permission fix cannot land on only one
+# of them.
+WORKING_ALLOWED_TOOLS = (
+    "Read,Write,Edit,Glob,Grep,TodoWrite,BashOutput,KillShell,WebFetch,WebSearch,NotebookEdit,"
+    "Bash(git:*),Bash(uv:*),Bash(uvx:*),Bash(curl:*),Bash(wget:*),Bash(node:*),"
+    "Bash(npm:*),Bash(npx:*),Bash(python3:*),Bash(pip:*),Bash(jq:*),Bash(autolab:*),"
+    "Bash(ls:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(wc:*),Bash(sort:*),"
+    "Bash(find:*),Bash(rg:*),Bash(sed:*),Bash(awk:*),Bash(mkdir:*),Bash(cp:*),"
+    "Bash(mv:*),Bash(rm:*),Bash(chmod:*),Bash(touch:*),Bash(date:*),Bash(pwd:*),"
+    "Bash(cd:*),Bash(which:*),Bash(env:*),Bash(sleep:*),Bash(kill:*),Bash(ps:*),"
+    "Bash(open:*),Bash(tar:*),Bash(make:*),Bash(bash:*),Bash(sh:*)"
+)
+
 ROLE_ALLOWED_TOOLS = {
-    "front": "Read,Write,Edit,Glob,Grep,Bash(cd:*),Bash(uv run python -m agautolab.role_run director:*)",
+    "front": WORKING_ALLOWED_TOOLS,
     "director": "Read,Glob,Grep",
     "summarizer": "Read,Glob,Grep",
-    "mediator": (
-        "Read,Write,Edit,Glob,Grep,TodoWrite,BashOutput,KillShell,WebFetch,WebSearch,NotebookEdit,"
-        "Bash(git:*),Bash(uv:*),Bash(uvx:*),Bash(curl:*),Bash(wget:*),Bash(node:*),"
-        "Bash(npm:*),Bash(npx:*),Bash(python3:*),Bash(pip:*),Bash(jq:*),Bash(autolab:*),"
-        "Bash(ls:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(wc:*),Bash(sort:*),"
-        "Bash(find:*),Bash(rg:*),Bash(sed:*),Bash(awk:*),Bash(mkdir:*),Bash(cp:*),"
-        "Bash(mv:*),Bash(rm:*),Bash(chmod:*),Bash(touch:*),Bash(date:*),Bash(pwd:*),"
-        "Bash(cd:*),Bash(which:*),Bash(env:*),Bash(sleep:*),Bash(kill:*),Bash(ps:*),"
-        "Bash(open:*),Bash(tar:*),Bash(make:*),Bash(bash:*),Bash(sh:*)"
-    ),
+    "mediator": WORKING_ALLOWED_TOOLS,
 }
 
 STUB_REPLY = (
