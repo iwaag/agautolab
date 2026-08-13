@@ -195,7 +195,7 @@ def answer_window(text):
     }
     try:
         reply, meta, code = run_role(
-            "front", text, cwd=ROOT, timeout=WINDOW_TIMEOUT_SECONDS,
+            "front", text, cwd=ROOT / "agent" / "front", timeout=WINDOW_TIMEOUT_SECONDS,
         )
     except AgentConfigError as error:
         record["failure"] = str(error)

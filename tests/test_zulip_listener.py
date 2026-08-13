@@ -7,66 +7,55 @@ from agautolab import zulip_listener
 
 BOT_ID = 11
 HUMAN_ID = 8
+CHANNEL = "pj-demo-project"
+TOPIC = "mission-one"
 
 
-def message(channel="pj-demo-project", topic="mission-one", content="Build it"):
+def history_message(sender_id=HUMAN_ID, name="Developer", content="Build it"):
     return {
         "id": 1,
         "type": "stream",
-        "sender_id": HUMAN_ID,
-        "sender_full_name": "Developer",
-        "display_recipient": channel,
-        "subject": topic,
+        "sender_id": sender_id,
+        "sender_full_name": name,
+        "display_recipient": CHANNEL,
+        "subject": TOPIC,
         "content": content,
     }
 
 
-def test_accept_keeps_topic_prefix_rule_channel_independent():
-    assert zulip_listener.accept(message(), BOT_ID)
-    assert zulip_listener.accept(message(channel="another-channel"), BOT_ID)
-    assert not zulip_listener.accept(message(topic="discussion"), BOT_ID)
-    assert not zulip_listener.accept({**message(), "sender_id": BOT_ID}, BOT_ID)
-
-
-DUMP_DIR = ".local/topics/pj-demo-project/mission-one/1"
-DUMP_NOTICE = f"{DUMP_DIR}/chatlog.txt is the log."
-
-
 class Client:
-    def __init__(self, calls):
+    email = "autolab-bot@example.invalid"
+
+    def __init__(self, calls, history=None):
         self.calls = calls
+        self.history = history if history is not None else [history_message()]
+
+    def whoami(self):
+        self.calls.append(("whoami",))
+        return {"user_id": BOT_ID, "full_name": "Autolab"}
 
     def topic_history(self, channel, topic, num_before):
         self.calls.append(("history", channel, topic, num_before))
-        return [message()]
+        return self.history
 
 
-def wire(monkeypatch, tmp_path, calls, *, coding="split into 2 tasks", register="created PD-4"):
-    monkeypatch.setattr(zulip_listener, "FRONT_WORKSPACE", tmp_path)
-    monkeypatch.setattr(
-        zulip_listener,
-        "topic_dump",
-        lambda channel, topic, chatlog, cwd: (
-            calls.append(("dump", channel, topic, chatlog, cwd)) or DUMP_NOTICE
-        ),
-    )
+def wire(monkeypatch, tmp_path, calls, *, plane_files=False, front="front says hi"):
+    monkeypatch.setattr(zulip_listener, "TOPICS_ROOT", tmp_path / "topics")
+    monkeypatch.setattr(zulip_listener, "RECORDS_ROOT", tmp_path / "records")
     monkeypatch.setattr(
         zulip_listener, "init_project", lambda project: calls.append(("init", project)) or "success"
     )
     monkeypatch.setattr(
         zulip_listener,
-        "call_window",
-        lambda prompt: calls.append(("window", prompt)) or "mission.md written",
+        "write_mission_workspace",
+        lambda directory, project, channel, topic: (
+            calls.append(("plane", directory, project, channel, topic)) or plane_files
+        ),
     )
     monkeypatch.setattr(
         zulip_listener,
-        "run_coding",
-        lambda dump_dir: calls.append(("coding", dump_dir)) or coding,
-    )
-    monkeypatch.setattr(
-        zulip_listener,
-        "register_mission",
-        lambda dump_dir: calls.append(("register", dump_dir)) or register,
+        "run_front",
+        lambda prompt, cwd: calls.append(("front", prompt, cwd)) or front,
     )
     monkeypatch.setattr(
         zulip_listener,
@@ -75,81 +64,121 @@ def wire(monkeypatch, tmp_path, calls, *, coding="split into 2 tasks", register=
     )
 
 
-def test_handle_message_runs_the_six_steps_in_order(monkeypatch, tmp_path):
+def front_dir(tmp_path):
+    return tmp_path / "topics" / CHANNEL / TOPIC / "front"
+
+
+def test_handle_topic_acks_then_runs_the_steps_in_order(monkeypatch, tmp_path):
     calls = []
     client = Client(calls)
     wire(monkeypatch, tmp_path, calls)
-    (tmp_path / DUMP_DIR).mkdir(parents=True)
-    (tmp_path / DUMP_DIR / "mission.md").write_text("# Build it\n")
 
-    zulip_listener.handle_message(client, message(), BOT_ID)
+    zulip_listener.handle_topic(client, CHANNEL, TOPIC)
 
     assert [call[0] for call in calls] == [
-        "history", "dump", "init", "window", "coding", "register", "write",
+        "whoami", "write", "history", "init", "plane", "front", "write",
     ]
-    assert calls[1][3] == "[Developer] Build it\n"
-    # The window prompt is the dump sentence plus the guide file, nothing else.
-    guide = zulip_listener.guide("front", "guide_mission_topic.md")
-    assert calls[3][1].endswith(f"\n\n{guide}")
-    # The window sees the chat log as an absolute path; the dump itself stays
-    # front-relative.
-    assert calls[3][1].startswith(str(tmp_path / DUMP_DIR / "chatlog.txt"))
-    assert calls[4][1] == DUMP_DIR
-    assert calls[5][1] == DUMP_DIR
-    assert calls[6][1:3] == ("mission-one", "mission.md written\n\nsplit into 2 tasks\n\ncreated PD-4")
-    assert calls[6][3] == {"channel": "pj-demo-project", "client": client}
+    # The ack is the first post, before any work: it makes the bot the last
+    # poster so a later sweep skips the topic while this run is in flight.
+    assert calls[1][1:3] == (TOPIC, zulip_listener.ACK_TEXT)
+    assert calls[1][3] == {"channel": CHANNEL, "client": client}
+    # The chatlog lands in the stable topic workspace.
+    assert (front_dir(tmp_path) / "chatlog.md").read_text() == "[Developer] Build it\n"
+    assert calls[4][1] == front_dir(tmp_path)
+    # The front runs in the topic workspace with the chatlog-only prompt.
+    assert calls[5][2] == front_dir(tmp_path)
+    assert "mission and tasks" not in calls[5][1]
+    assert calls[6][1:3] == (TOPIC, "front says hi")
 
 
-def test_handle_message_skips_the_split_when_the_front_wrote_no_mission(monkeypatch, tmp_path):
+def test_handle_topic_mentions_plane_files_when_they_were_written(monkeypatch, tmp_path):
     calls = []
-    wire(monkeypatch, tmp_path, calls, register="no mission")
-    (tmp_path / DUMP_DIR).mkdir(parents=True)
+    wire(monkeypatch, tmp_path, calls, plane_files=True)
 
-    zulip_listener.handle_message(Client(calls), message(), BOT_ID)
+    zulip_listener.handle_topic(Client(calls), CHANNEL, TOPIC)
 
-    assert "coding" not in [call[0] for call in calls]
-    assert "no mission.md was written" in calls[-1][2]
-    assert calls[-1][2].endswith("no mission")
+    prompt = next(call[1] for call in calls if call[0] == "front")
+    assert "The current mission and tasks are also placed in the working directory." in prompt
 
 
-def test_handle_message_always_answers_the_topic_with_how_far_it_got(monkeypatch, tmp_path):
+def test_handle_topic_marks_the_bots_own_lines_in_the_chatlog(monkeypatch, tmp_path):
+    calls = []
+    client = Client(
+        calls,
+        history=[
+            history_message(),
+            history_message(sender_id=BOT_ID, name="Autolab", content="ack"),
+        ],
+    )
+    wire(monkeypatch, tmp_path, calls)
+
+    zulip_listener.handle_topic(client, CHANNEL, TOPIC)
+
+    assert (front_dir(tmp_path) / "chatlog.md").read_text() == (
+        "[Developer] Build it\n[Autolab (you)] ack\n"
+    )
+
+
+def test_handle_topic_always_answers_with_how_far_it_got(monkeypatch, tmp_path):
     calls = []
     wire(monkeypatch, tmp_path, calls)
-    (tmp_path / DUMP_DIR).mkdir(parents=True)
-    (tmp_path / DUMP_DIR / "mission.md").write_text("# Build it\n")
 
-    def explode(dump_dir):
+    def explode(prompt, cwd):
         raise zulip_listener.ListenerError("claude_code timed out")
 
-    monkeypatch.setattr(zulip_listener, "run_coding", explode)
+    monkeypatch.setattr(zulip_listener, "run_front", explode)
 
-    zulip_listener.handle_message(Client(calls), message(), BOT_ID)
+    zulip_listener.handle_topic(Client(calls), CHANNEL, TOPIC)
 
-    reply = calls[-1][2]
     assert calls[-1][0] == "write"
-    assert reply.startswith("mission.md written")
-    assert "failed during task split: claude_code timed out" in reply
-    assert "register" not in [call[0] for call in calls]
+    assert "failed during front: claude_code timed out" in calls[-1][2]
 
 
-def test_handle_message_reports_a_channel_that_is_not_a_project(monkeypatch, tmp_path):
+def test_handle_topic_reports_a_channel_that_is_not_a_project(monkeypatch, tmp_path):
     calls = []
     wire(monkeypatch, tmp_path, calls)
-    zulip_listener.handle_message(Client(calls), message(channel="another-channel"), BOT_ID)
-    assert calls[-1][0] == "write"
+    zulip_listener.handle_topic(Client(calls), "another-channel", TOPIC)
+    # The ack still goes out; the failure is reported in the reply.
+    assert [call[0] for call in calls if call[0] == "write"][0:2] == ["write", "write"]
     assert "failed during reading the topic" in calls[-1][2]
 
 
-def test_coding_prompt_is_the_mission_path_plus_the_guide():
-    prompt = zulip_listener.coding_prompt(f"{DUMP_DIR}/mission.md")
-    assert prompt.startswith(f"{DUMP_DIR}/mission.md is the file that describes the mission.")
-    assert prompt.endswith(zulip_listener.guide("coding", "guide_task_split.md"))
+def test_front_prompt_is_the_placement_lines_plus_the_guide(monkeypatch, tmp_path):
+    guide_dir = tmp_path / "mission_front"
+    guide_dir.mkdir(parents=True)
+    (guide_dir / "guide_mission_topic.md").write_text("GUIDE TEXT\n")
+    monkeypatch.setattr(zulip_listener, "GUIDES", tmp_path)
+
+    prompt = zulip_listener.front_prompt("Autolab", plane_files=False)
+    assert prompt == (
+        "The chatlog is placed in the working directory. "
+        "You are 'Autolab' in the chatlog.\n\nGUIDE TEXT"
+    )
+    with_plane = zulip_listener.front_prompt("Autolab", plane_files=True)
+    assert with_plane == (
+        "The chatlog is placed in the working directory. "
+        "You are 'Autolab' in the chatlog.\n"
+        "The current mission and tasks are also placed in the working directory."
+        "\n\nGUIDE TEXT"
+    )
+
+
+def test_topic_workspace_is_stable_and_rejects_traversal(monkeypatch, tmp_path):
+    monkeypatch.setattr(zulip_listener, "TOPICS_ROOT", tmp_path)
+    first = zulip_listener.topic_workspace(CHANNEL, TOPIC)
+    assert first == tmp_path / CHANNEL / TOPIC
+    assert zulip_listener.topic_workspace(CHANNEL, TOPIC) == first  # reused, no <N>
+    for bad in ("../outside", "a/b", ""):
+        with pytest.raises(ValueError):
+            zulip_listener.topic_workspace(bad, TOPIC)
+        with pytest.raises(ValueError):
+            zulip_listener.topic_workspace(CHANNEL, bad)
 
 
 def test_guide_refuses_to_start_without_the_file(monkeypatch, tmp_path):
     monkeypatch.setattr(zulip_listener, "GUIDES", tmp_path)
     with pytest.raises(zulip_listener.ListenerError):
-        zulip_listener.guide("front", "guide_mission_topic.md")
+        zulip_listener.guide("mission_front", "guide_mission_topic.md")
 
 
 def test_next_record_path_numbers_like_the_gateway(tmp_path):

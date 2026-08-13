@@ -1,78 +1,67 @@
-"""Bridge mission topics into idempotent project setup and the front window."""
+"""Pull mission topics from Zulip into topic workspaces and the front agent.
+
+Phase 3 shape: `agag.zulip.sweep_serve` finds every unresolved `mission-*`
+topic whose last poster is not this bot, and `handle_topic` serves each one —
+ack, workspace, chatlog, Plane read-back, one front run, reply. The ack makes
+the bot the last poster, so a topic being worked on is skipped by later
+sweeps; a human posting during the run re-arms it and the post-run sweep
+reprocesses with the fuller chatlog.
+"""
 
 from __future__ import annotations
 
-import json
 import os
-import subprocess
 import threading
 import time
-import urllib.error
-import urllib.request
 from pathlib import Path
 
 from agag.zulip import (
     ZulipClient,
     ZulipError,
-    channel_name,
-    is_channel_message_for_us,
+    _safe_topic_component,
     log,
-    serve,
-    topic_dump,
+    sweep_serve,
     topic_write,
 )
 
+from .mission import write_mission_workspace
 from .project_init import PROJECT_NAME, init_project
 from .role_run import run_role
 
 AGAUTOLAB_ROOT = Path(__file__).resolve().parents[2]
 ZULIP_ENV = AGAUTOLAB_ROOT / ".local" / "zulip.env"
-FRONT_WORKSPACE = AGAUTOLAB_ROOT / "agent" / "front"
+TOPICS_ROOT = AGAUTOLAB_ROOT / ".local" / "topics"
 GUIDES = AGAUTOLAB_ROOT / "agent" / "guides"
-CODING_RECORDS = AGAUTOLAB_ROOT / ".local" / "agent" / "coding"
+RECORDS_ROOT = AGAUTOLAB_ROOT / ".local" / "agent"
 
 MISSION_TOPIC_PREFIX = "mission-"
 PROJECT_CHANNEL_PREFIX = "pj-"
-DEFAULT_NODE_URL = "http://127.0.0.1:8791"
 HISTORY_MESSAGES = 1000
 SUBSCRIBE_INTERVAL_SECONDS = 60
 
-# One message occupies the listener for at most the sum of these; `serve()` is
-# single-threaded, so that sum is also the delay before the next mission topic
-# is looked at. Kept together so the total stays visible.
-WINDOW_TIMEOUT_SECONDS = 360
-CODING_TIMEOUT_SECONDS = 600
-REGISTER_TIMEOUT_SECONDS = 180
+ACK_TEXT = "Message received. Please wait for the reply."
+
+# One topic occupies the listener for at most this long; the sweep loop is
+# single-threaded and serial, so this is also the delay before the next
+# matching topic is looked at (events keep queueing meanwhile).
+FRONT_TIMEOUT_SECONDS = 360
 
 __all__ = [
     "ZULIP_ENV",
-    "absolute_dump_notice",
-    "accept",
-    "coding_prompt",
     "format_chatlog",
+    "front_prompt",
     "guide",
-    "handle_message",
+    "handle_topic",
     "main",
-    "register_mission",
-    "run_coding",
+    "next_record_path",
+    "run_front",
     "subscribe_project_channels",
-    "window_prompt",
+    "topic_workspace",
 ]
 
 
 class ListenerError(RuntimeError):
     """One mission-topic workflow could not complete."""
-
-
-def node_url() -> str:
-    return os.environ.get("AUTOLAB_NODE_URL", DEFAULT_NODE_URL).rstrip("/")
-
-
-def accept(message: dict, self_id: int) -> bool:
-    """Channel messages in a live `mission-*` topic, any subscribed channel."""
-    return is_channel_message_for_us(message, self_id) and str(
-        message.get("subject", "")
-    ).startswith(MISSION_TOPIC_PREFIX)
 
 
 def project_from_channel(channel: str) -> str:
@@ -84,6 +73,19 @@ def project_from_channel(channel: str) -> str:
     return project
 
 
+def topic_workspace(channel: str, topic: str) -> Path:
+    """`.local/topics/<channel>/<topic>/` — stable, reused across runs.
+
+    Leftovers from earlier runs are continuity, not garbage; nothing here is
+    versioned or deleted.
+    """
+    return (
+        TOPICS_ROOT
+        / _safe_topic_component(channel, "channel")
+        / _safe_topic_component(topic, "topic")
+    )
+
+
 def format_chatlog(messages: list[dict], self_id: int) -> str:
     lines = []
     for message in messages:
@@ -92,18 +94,6 @@ def format_chatlog(messages: list[dict], self_id: int) -> str:
             speaker = f"{speaker} (you)"
         lines.append(f"[{speaker}] {str(message.get('content', '')).strip()}")
     return "\n".join(lines) + ("\n" if lines else "")
-
-
-def absolute_dump_notice(notice: str) -> str:
-    """Rewrite `topic_dump`'s front-relative path as an absolute one.
-
-    The dump stays front-relative on disk; only the sentence handed to the
-    window is absolutised. Measured on the local front profile: the relative
-    form is reconstructed against a guessed root (home, or the repository root)
-    and fails most runs, while the absolute form is opened on the first turn.
-    """
-    relative, separator, rest = notice.partition(" ")
-    return f"{FRONT_WORKSPACE / relative}{separator}{rest}"
 
 
 def guide(*parts: str) -> str:
@@ -123,44 +113,13 @@ def guide(*parts: str) -> str:
     return text
 
 
-def window_prompt(dump_notice: str) -> str:
-    return f"{dump_notice}\n\n{guide('front', 'guide_mission_topic.md')}"
-
-
-def coding_prompt(mission_path: str) -> str:
-    return (
-        f"{mission_path} is the file that describes the mission.\n\n"
-        f"{guide('coding', 'guide_task_split.md')}"
-    )
-
-
-def call_window(text: str) -> str:
-    request = urllib.request.Request(
-        f"{node_url()}/window",
-        data=json.dumps({"text": text}).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=WINDOW_TIMEOUT_SECONDS) as response:
-            payload = json.load(response)
-    except urllib.error.HTTPError as error:
-        detail = error.read().decode("utf-8", "replace")[:500]
-        raise ListenerError(f"window returned HTTP {error.code}: {detail}") from error
-    except (OSError, TimeoutError, json.JSONDecodeError) as error:
-        raise ListenerError(f"window call failed: {error}") from error
-    reply = payload.get("reply") if isinstance(payload, dict) else None
-    if not isinstance(reply, str) or not reply.strip():
-        raise ListenerError("window response did not contain a non-empty reply")
-    return reply
-
-
-def dump_directory(dump_notice: str) -> str:
-    """The front-relative `<N>/` directory carried by `topic_dump`'s sentence."""
-    relative = dump_notice.partition(" ")[0]
-    if not relative.endswith("chatlog.txt"):
-        raise ListenerError(f"unexpected dump notice: {dump_notice!r}")
-    return str(Path(relative).parent)
+def front_prompt(bot_name: str, plane_files: bool) -> str:
+    lines = [
+        f"The chatlog is placed in the working directory. You are {bot_name!r} in the chatlog."
+    ]
+    if plane_files:
+        lines.append("The current mission and tasks are also placed in the working directory.")
+    return "\n".join(lines) + f"\n\n{guide('mission_front', 'guide_mission_topic.md')}"
 
 
 def next_record_path(directory: Path) -> Path:
@@ -172,83 +131,61 @@ def next_record_path(directory: Path) -> Path:
     return directory / f"run-{number:04d}.json"
 
 
-def run_coding(dump_dir: str) -> str:
-    """Split the mission into task files, in the front workspace.
-
-    Called directly rather than through the gateway `/window`: that route is
-    the front's single entrance, and giving it a role parameter would end it.
-    """
-    record = next_record_path(CODING_RECORDS)
+def run_front(prompt: str, cwd: Path) -> str:
+    """One front run in the topic workspace, with its `ag.agent-run.v1` record."""
+    record = next_record_path(RECORDS_ROOT / "front")
     output, _, exit_code = run_role(
-        "coding",
-        coding_prompt(f"{dump_dir}/mission.md"),
-        cwd=FRONT_WORKSPACE,
-        timeout=CODING_TIMEOUT_SECONDS,
+        "front",
+        prompt,
+        cwd=cwd,
+        timeout=FRONT_TIMEOUT_SECONDS,
         record=record,
     )
     if exit_code != 0:
-        raise ListenerError(f"coding run exited {exit_code}: {output.strip()[:500]}")
+        raise ListenerError(f"front run exited {exit_code}: {output.strip()[:500]}")
     return output.strip()
 
 
-def register_mission(dump_dir: str) -> str:
-    """Run `new_mission.py` over the dump directory and return what it printed."""
-    try:
-        completed = subprocess.run(
-            ["uv", "run", "new_mission.py", dump_dir],
-            cwd=FRONT_WORKSPACE,
-            capture_output=True,
-            text=True,
-            timeout=REGISTER_TIMEOUT_SECONDS,
-        )
-    except (OSError, subprocess.SubprocessError) as error:
-        raise ListenerError(f"new_mission.py could not be run: {error}") from error
-    if completed.returncode != 0:
-        detail = (completed.stderr or completed.stdout).strip()[:500]
-        raise ListenerError(f"new_mission.py exited {completed.returncode}: {detail}")
-    return completed.stdout.strip()
+def handle_topic(client: ZulipClient, channel: str, topic: str) -> None:
+    """Serve one awaiting mission topic and always answer it.
 
-
-def handle_message(client: ZulipClient, message: dict, self_id: int) -> None:
-    """Run the six mission-topic steps in order and always answer the topic.
-
-    `agag.zulip.serve()` swallows handler exceptions, so a step that raises
-    without this would leave the topic silent and the evidence in a log nobody
-    opens. Every exit path writes back how far the message got.
+    `sweep_serve` logs and survives handler exceptions, but a topic that gets
+    an ack and then silence would stay dormant until a human posts again —
+    so every exit path after the ack writes back how far the topic got.
     """
-    channel = channel_name(message)
-    topic = str(message.get("subject", ""))
-    log(f"mission topic message #{message.get('id')} in {channel!r}/{topic!r}")
+    log(f"mission topic {channel!r}/{topic!r}")
+    self_user = client.whoami()
+    self_id = int(self_user["user_id"])
+    bot_name = str(self_user.get("full_name") or client.email)
+
+    topic_write(topic, ACK_TEXT, channel=channel, client=client)
 
     sections: list[str] = []
     step = "reading the topic"
     try:
         project = project_from_channel(channel)
+        front_dir = topic_workspace(channel, topic) / "front"
+        front_dir.mkdir(parents=True, exist_ok=True)
+
+        step = "chatlog"
         history = client.topic_history(channel, topic, num_before=HISTORY_MESSAGES)
-        dump_notice = topic_dump(
-            channel,
-            topic,
-            format_chatlog(history, self_id),
-            cwd=FRONT_WORKSPACE,
+        (front_dir / "chatlog.md").write_text(
+            format_chatlog(history, self_id), encoding="utf-8"
         )
-        dump_dir = dump_directory(dump_notice)
 
         step = "project setup"
         init_project(project)
 
+        step = "plane read-back"
+        plane_files = write_mission_workspace(front_dir, project, channel, topic)
+
         step = "front"
-        # The front's answer is not inspected: `mission.md` on disk is the
-        # whole decision. It is still relayed verbatim.
-        sections.append(call_window(window_prompt(absolute_dump_notice(dump_notice))))
+        # The front's answer is relayed verbatim; what it wrote in the
+        # workspace (not what it said) drives the follow-up.
+        sections.append(run_front(front_prompt(bot_name, plane_files), front_dir))
 
-        step = "task split"
-        if (FRONT_WORKSPACE / dump_dir / "mission.md").is_file():
-            sections.append(run_coding(dump_dir))
-        else:
-            sections.append("no mission.md was written, so no task split was run.")
-
-        step = "mission registration"
-        sections.append(register_mission(dump_dir))
+        step = "response handling"
+        sections.extend(handle_front_response(front_dir))
     except Exception as error:  # noqa: BLE001 - the topic is the error channel
         log(f"mission topic workflow failed during {step}: {error!r}")
         sections.append(f"failed during {step}: {error}")
@@ -257,12 +194,9 @@ def handle_message(client: ZulipClient, message: dict, self_id: int) -> None:
                 channel=channel, client=client)
 
 
-def observe_message(client: ZulipClient, message: dict, self_id: int) -> None:
-    """Passive handler (`AUTOLAB_ZULIP_LOG_ONLY=1`): log, never mutate."""
-    log(
-        f"observed #{message.get('id')} in {channel_name(message)!r}/"
-        f"{message.get('subject')!r}: {str(message.get('content', ''))[:200]!r}"
-    )
+def handle_front_response(front_dir: Path) -> list[str]:
+    """Act on what the front wrote (`new_mission.md`, flags). Step 3 fills this in."""
+    return []
 
 
 def subscribe_project_channels(client: ZulipClient) -> list[str]:
@@ -271,7 +205,8 @@ def subscribe_project_channels(client: ZulipClient) -> list[str]:
     A project channel is a shared room, not the autolab bot's private inbox:
     all agents participate and each one filters for the topics it owns. This
     also covers a channel a human created by hand, which no agent would
-    otherwise be in — and Zulip delivers no events for an unsubscribed channel.
+    otherwise be in — and Zulip delivers no events for an unsubscribed channel,
+    so the sweep can only see subscribed channels.
     """
     everyone = {
         int(user["user_id"]) for user in client.users() if user.get("is_active", True)
@@ -298,22 +233,29 @@ def subscription_loop(client: ZulipClient) -> None:
             log(f"project channel subscription refresh failed: {error!r}")
 
 
+def observe_topic(channel: str, topic: str) -> None:
+    """Passive handler (`AUTOLAB_ZULIP_LOG_ONLY=1`): log sweep matches, never act."""
+    log(f"observed sweep match {channel!r}/{topic!r}")
+
+
 def main() -> None:
-    handler = handle_message
-    if os.environ.get("AUTOLAB_ZULIP_LOG_ONLY") == "1":
-        handler = observe_message
     client = ZulipClient.from_env(ZULIP_ENV)
+    if os.environ.get("AUTOLAB_ZULIP_LOG_ONLY") == "1":
+        handler = observe_topic
+    else:
+        def handler(channel: str, topic: str) -> None:
+            handle_topic(client, channel, topic)
+
     subscription_client = ZulipClient.from_env(ZULIP_ENV)
     try:
         subscribe_project_channels(subscription_client)
     except ZulipError as error:
         log(f"initial project channel subscription refresh failed: {error!r}")
     threading.Thread(target=subscription_loop, args=(subscription_client,), daemon=True).start()
-    log(
-        f"agautolab zulip listener starting (handler={handler.__name__}, node={node_url()})"
-    )
+    log("agautolab zulip listener starting (pull sweep, prefix "
+        f"{MISSION_TOPIC_PREFIX!r})")
     try:
-        serve(client, handler, accept=accept)
+        sweep_serve(client, handler, topic_filter=MISSION_TOPIC_PREFIX)
     except KeyboardInterrupt:
         log("stopped")
 

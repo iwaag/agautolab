@@ -19,7 +19,7 @@ def resolved(role: str, harness: str = "opencode") -> ResolvedAgent:
     )
 
 
-def test_front_runs_harness_in_its_fixed_workspace(monkeypatch, tmp_path):
+def test_front_runs_harness_in_the_callers_workspace(monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr(role_run, "resolve_project_role", lambda *a, **k: resolved("front"))
     monkeypatch.setattr(role_run, "load_project_roles", lambda project: {})
@@ -35,7 +35,9 @@ def test_front_runs_harness_in_its_fixed_workspace(monkeypatch, tmp_path):
 
     assert (output, code) == ("answer", 0)
     assert record["outcome"] == "done"
-    assert calls[0][2]["cwd"] == role_run.PROJECT_ROOT / "agent" / "front"
+    # No workspace pin for `front`: the listener points it at a topic
+    # workspace and the gateway at its own, so the caller's cwd must win.
+    assert calls[0][2]["cwd"] == tmp_path
     assert calls[0][2]["allowed_tools"] == role_run.ROLE_ALLOWED_TOOLS["front"]
     assert calls[0][2]["opencode_config"] == role_run.PROJECT_ROOT / "agent/opencode-front.json"
     assert calls[0][2]["transcript_path"] == tmp_path / "raw.jsonl"

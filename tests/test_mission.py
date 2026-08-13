@@ -209,3 +209,76 @@ def test_starting_state_uses_live_vocabulary(monkeypatch, states, expected):
     assert mission.starting_state_id(
         mission.PlaneConfig("http://plane", "key", "workspace"), "project-id"
     ) == expected
+
+
+def test_html_to_text_inverts_description_html_and_strips_other_tags():
+    assert mission.html_to_text(mission.description_html("With A & B.\nThen verify.")) == (
+        "With A & B.\nThen verify."
+    )
+    assert mission.html_to_text("<p>one</p><p>two <strong>bold</strong></p>") == "one\n\ntwo bold"
+    assert mission.html_to_text(None) == ""
+
+
+def test_compose_document_inverts_split_document():
+    document = mission.compose_document("Build it", "<p>With A &amp; B.<br>Then verify.</p>")
+    assert document == "# Build it\n\nWith A & B.\nThen verify.\n"
+    assert mission.split_document(document) == ("Build it", "With A & B.\nThen verify.")
+    assert mission.compose_document("Bare", None) == "# Bare\n"
+
+
+def test_sub_works_filters_cancelled_and_sorts_by_sequence():
+    issues = [
+        {"id": "c2", "parent": "p", "state": "live", "sequence_id": 9},
+        {"id": "c1", "parent": "p", "state": "live", "sequence_id": 2},
+        {"id": "dead", "parent": "p", "state": "gone", "sequence_id": 1},
+        {"id": "other", "parent": "q", "state": "live", "sequence_id": 3},
+        {"id": "p", "parent": None, "state": "live", "sequence_id": 1},
+    ]
+    groups = {"live": "unstarted", "gone": "cancelled"}
+    assert [row["id"] for row in mission.sub_works(issues, "p", groups)] == ["c1", "c2"]
+
+
+def workspace_plane(monkeypatch, *, issue, issues, groups):
+    monkeypatch.setattr(mission, "load_plane_config", lambda: mission.PlaneConfig(
+        "http://plane", "key", "workspace"))
+    monkeypatch.setattr(
+        mission, "find_plane_project", lambda config, name: {"id": "p1", "identifier": "PD"}
+    )
+    monkeypatch.setattr(mission, "find_issue_by_external", lambda config, pid, key: issue)
+    monkeypatch.setattr(mission, "list_issues", lambda config, pid: issues)
+    monkeypatch.setattr(mission, "state_groups", lambda config, pid: groups)
+
+
+def test_write_mission_workspace_writes_mission_and_live_tasks(tmp_path, monkeypatch):
+    work = {
+        "id": "w1",
+        "name": "Build it",
+        "description_html": "<p>With A &amp; B.</p>",
+        "sequence_id": 1,
+        "parent": None,
+        "state": "live",
+    }
+    issues = [
+        work,
+        {"id": "c1", "parent": "w1", "state": "live", "sequence_id": 2,
+         "name": "First", "description_html": "<p>do this</p>"},
+        {"id": "c2", "parent": "w1", "state": "gone", "sequence_id": 3,
+         "name": "Old", "description_html": "<p>cancelled</p>"},
+        {"id": "c3", "parent": "w1", "state": "live", "sequence_id": 4,
+         "name": "Second", "description_html": "<p>do that</p>"},
+    ]
+    # The external lookup may return a thin object; the list row must win.
+    workspace_plane(monkeypatch, issue={"id": "w1"}, issues=issues,
+                    groups={"live": "unstarted", "gone": "cancelled"})
+
+    assert mission.write_mission_workspace(tmp_path, "demo", "pj-demo", "mission-x") is True
+    assert (tmp_path / "mission.md").read_text() == "# Build it\n\nWith A & B.\n"
+    assert (tmp_path / "task1.md").read_text() == "# First\n\ndo this\n"
+    assert (tmp_path / "task2.md").read_text() == "# Second\n\ndo that\n"
+    assert not (tmp_path / "task3.md").exists()
+
+
+def test_write_mission_workspace_without_a_work_writes_nothing(tmp_path, monkeypatch):
+    workspace_plane(monkeypatch, issue=None, issues=[], groups={})
+    assert mission.write_mission_workspace(tmp_path, "demo", "pj-demo", "mission-x") is False
+    assert list(tmp_path.iterdir()) == []

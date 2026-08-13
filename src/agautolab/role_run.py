@@ -35,8 +35,9 @@ ROLE_ALLOWED_TOOLS = {
     "coding": WORKING_ALLOWED_TOOLS,
 }
 
+# `front` is deliberately absent: the zulip listener runs it in the topic
+# workspace and the gateway passes its own workspace, so the caller's cwd wins.
 ROLE_WORKSPACES = {
-    "front": PROJECT_ROOT / "agent" / "front",
     "mediator": PROJECT_ROOT / "agent" / "mediator",
 }
 

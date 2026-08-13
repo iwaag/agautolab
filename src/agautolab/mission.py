@@ -259,6 +259,105 @@ def ensure_issue(
     raise MissionError(f"Plane issue create returned HTTP {status}: {payload!r}")
 
 
+def list_issues(config: PlaneConfig, project_id: str) -> list[dict]:
+    """Every issue in the project, following Plane's cursor pagination.
+
+    Plane CE v1.4.1 ignores a `?parent=` filter (it returns the full list)
+    and 404s the `sub-issues` endpoint, so children are found by filtering
+    this list on the `parent` field client-side. List rows carry
+    `description_html`, so no per-issue detail reads are needed.
+    """
+    rows: list[dict] = []
+    cursor: str | None = None
+    while True:
+        query = "per_page=100" + (f"&cursor={urllib.parse.quote(cursor, safe='')}" if cursor else "")
+        status, payload = _request_json(
+            "GET", f"{_project_base(config, project_id)}/issues/?{query}", headers=_headers(config)
+        )
+        if status != 200:
+            raise MissionError(f"Plane issue list returned HTTP {status}: {payload!r}")
+        rows.extend(_rows(payload))
+        if not (isinstance(payload, dict) and payload.get("next_page_results")):
+            return rows
+        cursor = str(payload.get("next_cursor", ""))
+        if not cursor:
+            return rows
+
+
+def state_groups(config: PlaneConfig, project_id: str) -> dict[str, str]:
+    """State id -> state group (`backlog`/`unstarted`/`started`/`completed`/`cancelled`)."""
+    status, payload = _request_json(
+        "GET", f"{_project_base(config, project_id)}/states/", headers=_headers(config), timeout=60
+    )
+    if status != 200:
+        raise MissionError(f"Plane state list returned HTTP {status}: {payload!r}")
+    return {str(row["id"]): str(row.get("group", "")) for row in _rows(payload) if row.get("id")}
+
+
+def html_to_text(value: str | None) -> str:
+    """Recover plain text from `description_html`.
+
+    `description_stripped` is unreliable on this Plane (observed None on
+    issues whose html has content), so this inverts `description_html()` —
+    and strips any other tags a hand-edited issue may carry.
+    """
+    text = re.sub(r"<br\s*/?>", "\n", value or "")
+    text = re.sub(r"</p\s*>", "\n\n", text)
+    text = re.sub(r"<[^>]+>", "", text)
+    return html.unescape(text).strip()
+
+
+def compose_document(name: str, description_html_value: str | None) -> str:
+    """Invert `split_document`: title as `# heading`, then the description."""
+    body = html_to_text(description_html_value)
+    return f"# {name}\n\n{body}\n" if body else f"# {name}\n"
+
+
+def sub_works(issues: list[dict], parent_id: str, groups: dict[str, str]) -> list[dict]:
+    """Non-cancelled children of one issue, in sequence order."""
+    children = [
+        row
+        for row in issues
+        if str(row.get("parent") or "") == parent_id
+        and groups.get(str(row.get("state") or "")) != "cancelled"
+    ]
+    children.sort(key=lambda row: (row.get("sequence_id") or 0, str(row.get("id"))))
+    return children
+
+
+def write_mission_workspace(directory: Path, project: str, channel: str, topic: str) -> bool:
+    """Mirror the topic's Plane Work into `directory` as files.
+
+    Writes `mission.md` (title + description) when a Work keyed
+    `<channel>/<topic>` exists, and its non-cancelled Sub-Works in sequence
+    order as `task1.md`, `task2.md`, …. Returns whether anything was written.
+    """
+    try:
+        config = load_plane_config()
+    except ProjectInitError as error:
+        raise MissionError(str(error)) from error
+    plane_project = find_plane_project(config, project)
+    project_id = str(plane_project["id"])
+    issue = find_issue_by_external(config, project_id, f"{channel}/{topic}")
+    if not issue:
+        return False
+    issues = list_issues(config, project_id)
+    issue = next(
+        (row for row in issues if str(row.get("id")) == str(issue["id"])), issue
+    )
+    (directory / "mission.md").write_text(
+        compose_document(str(issue.get("name", "")), issue.get("description_html")),
+        encoding="utf-8",
+    )
+    groups = state_groups(config, project_id)
+    for number, child in enumerate(sub_works(issues, str(issue["id"]), groups), start=1):
+        (directory / f"task{number}.md").write_text(
+            compose_document(str(child.get("name", "")), child.get("description_html")),
+            encoding="utf-8",
+        )
+    return True
+
+
 def issue_label(plane_project: dict, issue: dict) -> str:
     identifier = str(plane_project.get("identifier", "")).strip()
     sequence = issue.get("sequence_id")
