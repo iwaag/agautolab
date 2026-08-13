@@ -75,21 +75,34 @@ def test_handle_message_runs_four_workflows_in_order(monkeypatch, tmp_path):
     assert calls[4][3] == {"channel": "pj-demo-project", "client": client}
 
 
-def test_subscribe_project_channels_only_adds_missing_pj_channels():
+def test_subscribe_project_channels_puts_every_active_user_in_pj_channels():
     calls = []
 
     class Client:
+        def users(self):
+            return [
+                {"user_id": 7, "is_active": True},
+                {"user_id": 8, "is_active": True},
+                {"user_id": 9, "is_active": False},
+            ]
+
         def channels(self):
-            return [{"name": "general"}, {"name": "pj-one"}, {"name": "pj-two"}]
+            return [
+                {"name": "general", "stream_id": 1},
+                {"name": "pj-one", "stream_id": 2},
+                {"name": "pj-two", "stream_id": 3},
+            ]
 
-        def subscriptions(self):
-            return [{"name": "pj-one"}, {"name": "general"}]
+        def channel_subscribers(self, stream_id):
+            return {2: [7, 8], 3: [7]}[stream_id]
 
-        def subscribe_channels(self, names):
-            calls.append(names)
+        def subscribe_channels(self, names, principals=None):
+            calls.append((names, principals))
 
+    # `general` is left alone, `pj-one` is already complete, and the
+    # deactivated user is never subscribed anywhere.
     assert zulip_listener.subscribe_project_channels(Client()) == ["pj-two"]
-    assert calls == [["pj-two"]]
+    assert calls == [(["pj-two"], [8])]
 
 
 @pytest.mark.parametrize("channel", ["general", "pj-x", "pj-Bad_Name"])

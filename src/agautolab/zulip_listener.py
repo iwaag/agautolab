@@ -152,17 +152,27 @@ def observe_message(client: ZulipClient, message: dict, self_id: int) -> None:
 
 
 def subscribe_project_channels(client: ZulipClient) -> list[str]:
-    available = {
-        str(row.get("name"))
-        for row in client.channels()
-        if str(row.get("name", "")).startswith(PROJECT_CHANNEL_PREFIX)
+    """Put every active realm user in every `pj-*` channel.
+
+    A project channel is a shared room, not the autolab bot's private inbox:
+    all agents participate and each one filters for the topics it owns. This
+    also covers a channel a human created by hand, which no agent would
+    otherwise be in — and Zulip delivers no events for an unsubscribed channel.
+    """
+    everyone = {
+        int(user["user_id"]) for user in client.users() if user.get("is_active", True)
     }
-    subscribed = {str(row.get("name")) for row in client.subscriptions()}
-    missing = sorted(available - subscribed)
-    if missing:
-        client.subscribe_channels(missing)
-        log(f"subscribed to project channels: {', '.join(missing)}")
-    return missing
+    reconciled = []
+    for channel in client.channels():
+        name = str(channel.get("name", ""))
+        if not name.startswith(PROJECT_CHANNEL_PREFIX):
+            continue
+        missing = sorted(everyone - set(client.channel_subscribers(channel["stream_id"])))
+        if missing:
+            client.subscribe_channels([name], principals=missing)
+            reconciled.append(name)
+            log(f"subscribed {len(missing)} user(s) to {name}")
+    return reconciled
 
 
 def subscription_loop(client: ZulipClient) -> None:
