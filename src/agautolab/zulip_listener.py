@@ -1,62 +1,55 @@
-"""agautolab's chat entrance — the stub. `mission-*` topics are still heard.
-
-The standing-channel / disposable-topic pattern (zulip_channel_topic2): each
-autolab project has a `#pj-<name>` channel, each mission is one `mission-*`
-topic there. This listener was a **transport, not an agent**: it forwarded the
-topic's text to a node's `POST /window`, replied in-topic, and followed
-`GET /status` until the mission ended.
-
-The transport half is gone with the implementation behind it (the
-`discard_garbage` episode). What remains is the surface: the acceptance rule
-(topic-prefix-only and channel-agnostic, exactly like agforge's `create-*`
-rule, so a resolved `✔ mission-…` topic stops matching by itself), the
-briefing wrapper that defines what a node would have been sent, and the
-log-only switch. A mission topic now gets one reply saying the node is a stub,
-and nothing is started.
-
-Configuration (environment):
-- ``AUTOLAB_NODE_URL``      — the node gateway (default http://agautolab1.local:8791)
-- ``AUTOLAB_MAX_SESSIONS``  — session budget that would travel with a briefing
-                              (default 20; S5 died on a window-chosen budget of 2)
-- ``AUTOLAB_ZULIP_LOG_ONLY``— "1" observes and never posts
-"""
+"""Bridge mission topics into idempotent project setup and the front window."""
 
 from __future__ import annotations
 
+import json
 import os
+import threading
+import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 from agag.zulip import (
     ZulipClient,
+    ZulipError,
     channel_name,
     is_channel_message_for_us,
     log,
     serve,
+    topic_dump,
+    topic_write,
 )
+
+from .project_init import PROJECT_NAME, init_project
 
 AGAUTOLAB_ROOT = Path(__file__).resolve().parents[2]
 ZULIP_ENV = AGAUTOLAB_ROOT / ".local" / "zulip.env"
+FRONT_WORKSPACE = AGAUTOLAB_ROOT / "agent" / "front"
 
 MISSION_TOPIC_PREFIX = "mission-"
+PROJECT_CHANNEL_PREFIX = "pj-"
+DEFAULT_NODE_URL = "http://127.0.0.1:8791"
+HISTORY_MESSAGES = 1000
+SUBSCRIBE_INTERVAL_SECONDS = 60
 
-DEFAULT_NODE_URL = "http://agautolab1.local:8791"
+__all__ = [
+    "ZULIP_ENV",
+    "accept",
+    "format_chatlog",
+    "handle_message",
+    "main",
+    "subscribe_project_channels",
+    "window_prompt",
+]
 
-STUB_REPLY = (
-    "This briefing was heard but not started: the autolab node is a stub. Its "
-    "entrance and its agent configuration are intact, but the auto-development "
-    "loop behind them has been removed, so no mission runs and no outcome will "
-    "be posted here."
-)
 
-__all__ = ["ZULIP_ENV", "accept", "bridge_briefing", "handle_message", "main"]
+class ListenerError(RuntimeError):
+    """One mission-topic workflow could not complete."""
 
 
 def node_url() -> str:
     return os.environ.get("AUTOLAB_NODE_URL", DEFAULT_NODE_URL).rstrip("/")
-
-
-def max_sessions() -> int:
-    return int(os.environ.get("AUTOLAB_MAX_SESSIONS", "20"))
 
 
 def accept(message: dict, self_id: int) -> bool:
@@ -66,44 +59,103 @@ def accept(message: dict, self_id: int) -> bool:
     ).startswith(MISSION_TOPIC_PREFIX)
 
 
-def bridge_briefing(content: str, budget: int) -> str:
-    """The window text for a mission briefing. The topic text is the whole
-    briefing; this wrapper only adds the start instruction and the budget.
+def project_from_channel(channel: str) -> str:
+    if not channel.startswith(PROJECT_CHANNEL_PREFIX):
+        raise ListenerError(f"mission topic is not in a {PROJECT_CHANNEL_PREFIX} channel: {channel}")
+    project = channel.removeprefix(PROJECT_CHANNEL_PREFIX)
+    if not PROJECT_NAME.fullmatch(project):
+        raise ListenerError(f"channel does not contain a valid project name: {channel}")
+    return project
 
-    Nothing sends this any more. It is kept because it, not the transport, is
-    what defined the contract between a topic and a node.
-    """
+
+def format_chatlog(messages: list[dict], self_id: int) -> str:
+    lines = []
+    for message in messages:
+        speaker = message.get("sender_full_name") or f"user{message.get('sender_id')}"
+        if message.get("sender_id") == self_id:
+            speaker = f"{speaker} (you)"
+        lines.append(f"[{speaker}] {str(message.get('content', '')).strip()}")
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
+def window_prompt(dump_notice: str) -> str:
     return (
-        f"Start a mission with max_sessions={budget} (emit the "
-        f"<<mission max_sessions={budget}>> block around the whole briefing "
-        f"below and close it with <</mission>>).\n\n{content}"
+        f"{dump_notice}\n\n"
+        "Read it. If you determine that the chat requests a mission, run "
+        "`uv run new_mission.py --help` to learn the interface, then add the new mission. "
+        "Report the result when you are finished."
     )
+
+
+def call_window(text: str) -> str:
+    request = urllib.request.Request(
+        f"{node_url()}/window",
+        data=json.dumps({"text": text}).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=360) as response:
+            payload = json.load(response)
+    except urllib.error.HTTPError as error:
+        detail = error.read().decode("utf-8", "replace")[:500]
+        raise ListenerError(f"window returned HTTP {error.code}: {detail}") from error
+    except (OSError, TimeoutError, json.JSONDecodeError) as error:
+        raise ListenerError(f"window call failed: {error}") from error
+    reply = payload.get("reply") if isinstance(payload, dict) else None
+    if not isinstance(reply, str) or not reply.strip():
+        raise ListenerError("window response did not contain a non-empty reply")
+    return reply
 
 
 def handle_message(client: ZulipClient, message: dict, self_id: int) -> None:
-    """Answer one mission-topic message. Bridges nothing, blocks on nothing.
-
-    The old handler polled the node's `/status` until the driver stopped. A
-    stub must not inherit that loop: there is no driver to stop, and the
-    listener serves one message at a time.
-    """
+    """Run the four mission-topic workflows in order."""
     channel = channel_name(message)
     topic = str(message.get("subject", ""))
-    content = str(message.get("content", ""))
+    project = project_from_channel(channel)
     log(f"mission topic message #{message.get('id')} in {channel!r}/{topic!r}")
-    log(
-        f"not bridged to {node_url()}; the briefing would have been: "
-        f"{bridge_briefing(content, max_sessions())[:200]!r}"
+
+    history = client.topic_history(channel, topic, num_before=HISTORY_MESSAGES)
+    dump_notice = topic_dump(
+        channel,
+        topic,
+        format_chatlog(history, self_id),
+        cwd=FRONT_WORKSPACE,
     )
-    client.send_to_channel(channel, topic, STUB_REPLY)
+    init_project(project)
+    reply = call_window(window_prompt(dump_notice))
+    topic_write(topic, reply, channel=channel, client=client)
 
 
 def observe_message(client: ZulipClient, message: dict, self_id: int) -> None:
-    """Passive handler (`AUTOLAB_ZULIP_LOG_ONLY=1`): log, never post."""
+    """Passive handler (`AUTOLAB_ZULIP_LOG_ONLY=1`): log, never mutate."""
     log(
         f"observed #{message.get('id')} in {channel_name(message)!r}/"
         f"{message.get('subject')!r}: {str(message.get('content', ''))[:200]!r}"
     )
+
+
+def subscribe_project_channels(client: ZulipClient) -> list[str]:
+    available = {
+        str(row.get("name"))
+        for row in client.channels()
+        if str(row.get("name", "")).startswith(PROJECT_CHANNEL_PREFIX)
+    }
+    subscribed = {str(row.get("name")) for row in client.subscriptions()}
+    missing = sorted(available - subscribed)
+    if missing:
+        client.subscribe_channels(missing)
+        log(f"subscribed to project channels: {', '.join(missing)}")
+    return missing
+
+
+def subscription_loop(client: ZulipClient) -> None:
+    while True:
+        time.sleep(SUBSCRIBE_INTERVAL_SECONDS)
+        try:
+            subscribe_project_channels(client)
+        except Exception as error:
+            log(f"project channel subscription refresh failed: {error!r}")
 
 
 def main() -> None:
@@ -111,9 +163,14 @@ def main() -> None:
     if os.environ.get("AUTOLAB_ZULIP_LOG_ONLY") == "1":
         handler = observe_message
     client = ZulipClient.from_env(ZULIP_ENV)
+    subscription_client = ZulipClient.from_env(ZULIP_ENV)
+    try:
+        subscribe_project_channels(subscription_client)
+    except ZulipError as error:
+        log(f"initial project channel subscription refresh failed: {error!r}")
+    threading.Thread(target=subscription_loop, args=(subscription_client,), daemon=True).start()
     log(
-        f"agautolab zulip listener starting (stub, handler={handler.__name__}, "
-        f"node={node_url()}, max_sessions={max_sessions()})"
+        f"agautolab zulip listener starting (handler={handler.__name__}, node={node_url()})"
     )
     try:
         serve(client, handler, accept=accept)
