@@ -29,6 +29,10 @@ ROLE_ALLOWED_TOOLS = {
     "director": "Read,Glob,Grep",
     "summarizer": "Read,Glob,Grep",
     "mediator": WORKING_ALLOWED_TOOLS,
+    # `coding` writes task files in whatever workspace its caller points it at.
+    # Without an entry here `build_argv` omits `--allowedTools` entirely and
+    # claude_code waits for an interactive permission answer until the timeout.
+    "coding": WORKING_ALLOWED_TOOLS,
 }
 
 ROLE_WORKSPACES = {

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import threading
 import time
 import urllib.error
@@ -22,10 +23,13 @@ from agag.zulip import (
 )
 
 from .project_init import PROJECT_NAME, init_project
+from .role_run import run_role
 
 AGAUTOLAB_ROOT = Path(__file__).resolve().parents[2]
 ZULIP_ENV = AGAUTOLAB_ROOT / ".local" / "zulip.env"
 FRONT_WORKSPACE = AGAUTOLAB_ROOT / "agent" / "front"
+GUIDES = AGAUTOLAB_ROOT / "agent" / "guides"
+CODING_RECORDS = AGAUTOLAB_ROOT / ".local" / "agent" / "coding"
 
 MISSION_TOPIC_PREFIX = "mission-"
 PROJECT_CHANNEL_PREFIX = "pj-"
@@ -33,13 +37,24 @@ DEFAULT_NODE_URL = "http://127.0.0.1:8791"
 HISTORY_MESSAGES = 1000
 SUBSCRIBE_INTERVAL_SECONDS = 60
 
+# One message occupies the listener for at most the sum of these; `serve()` is
+# single-threaded, so that sum is also the delay before the next mission topic
+# is looked at. Kept together so the total stays visible.
+WINDOW_TIMEOUT_SECONDS = 360
+CODING_TIMEOUT_SECONDS = 600
+REGISTER_TIMEOUT_SECONDS = 180
+
 __all__ = [
     "ZULIP_ENV",
     "absolute_dump_notice",
     "accept",
+    "coding_prompt",
     "format_chatlog",
+    "guide",
     "handle_message",
     "main",
+    "register_mission",
+    "run_coding",
     "subscribe_project_channels",
     "window_prompt",
 ]
@@ -91,15 +106,31 @@ def absolute_dump_notice(notice: str) -> str:
     return f"{FRONT_WORKSPACE / relative}{separator}{rest}"
 
 
+def guide(*parts: str) -> str:
+    """Read one guide file under `agent/guides/`.
+
+    The instruction text belongs to the agents, not to this transport. A
+    missing guide is fatal on purpose: a listener that starts without it would
+    silently send a prompt with no instruction in it.
+    """
+    path = GUIDES.joinpath(*parts)
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except OSError as error:
+        raise ListenerError(f"cannot read guide {path}: {error}") from error
+    if not text:
+        raise ListenerError(f"guide is empty: {path}")
+    return text
+
+
 def window_prompt(dump_notice: str) -> str:
+    return f"{dump_notice}\n\n{guide('front', 'guide_mission_topic.md')}"
+
+
+def coding_prompt(mission_path: str) -> str:
     return (
-        f"{dump_notice}\n\n"
-        "You are already running in the front workspace. The chat-log path above is absolute and "
-        "`new_mission.py` exists beneath your current working directory. Use your tools directly: "
-        "read the chat log, then run `uv run new_mission.py --help` to learn the interface. If "
-        "you determine that the chat requests a mission, add it and report the result. Do not ask "
-        "for path clarification unless you first run `pwd`, inspect both paths, and report the "
-        "exact command error."
+        f"{mission_path} is the file that describes the mission.\n\n"
+        f"{guide('coding', 'guide_task_split.md')}"
     )
 
 
@@ -111,7 +142,7 @@ def call_window(text: str) -> str:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=360) as response:
+        with urllib.request.urlopen(request, timeout=WINDOW_TIMEOUT_SECONDS) as response:
             payload = json.load(response)
     except urllib.error.HTTPError as error:
         detail = error.read().decode("utf-8", "replace")[:500]
@@ -124,23 +155,106 @@ def call_window(text: str) -> str:
     return reply
 
 
+def dump_directory(dump_notice: str) -> str:
+    """The front-relative `<N>/` directory carried by `topic_dump`'s sentence."""
+    relative = dump_notice.partition(" ")[0]
+    if not relative.endswith("chatlog.txt"):
+        raise ListenerError(f"unexpected dump notice: {dump_notice!r}")
+    return str(Path(relative).parent)
+
+
+def next_record_path(directory: Path) -> Path:
+    """`run-NNNN.json`, numbered the same way the gateway numbers window runs."""
+    directory.mkdir(parents=True, exist_ok=True)
+    number = 1
+    while (directory / f"run-{number:04d}.json").exists():
+        number += 1
+    return directory / f"run-{number:04d}.json"
+
+
+def run_coding(dump_dir: str) -> str:
+    """Split the mission into task files, in the front workspace.
+
+    Called directly rather than through the gateway `/window`: that route is
+    the front's single entrance, and giving it a role parameter would end it.
+    """
+    record = next_record_path(CODING_RECORDS)
+    output, _, exit_code = run_role(
+        "coding",
+        coding_prompt(f"{dump_dir}/mission.md"),
+        cwd=FRONT_WORKSPACE,
+        timeout=CODING_TIMEOUT_SECONDS,
+        record=record,
+    )
+    if exit_code != 0:
+        raise ListenerError(f"coding run exited {exit_code}: {output.strip()[:500]}")
+    return output.strip()
+
+
+def register_mission(dump_dir: str) -> str:
+    """Run `new_mission.py` over the dump directory and return what it printed."""
+    try:
+        completed = subprocess.run(
+            ["uv", "run", "new_mission.py", dump_dir],
+            cwd=FRONT_WORKSPACE,
+            capture_output=True,
+            text=True,
+            timeout=REGISTER_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise ListenerError(f"new_mission.py could not be run: {error}") from error
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout).strip()[:500]
+        raise ListenerError(f"new_mission.py exited {completed.returncode}: {detail}")
+    return completed.stdout.strip()
+
+
 def handle_message(client: ZulipClient, message: dict, self_id: int) -> None:
-    """Run the four mission-topic workflows in order."""
+    """Run the six mission-topic steps in order and always answer the topic.
+
+    `agag.zulip.serve()` swallows handler exceptions, so a step that raises
+    without this would leave the topic silent and the evidence in a log nobody
+    opens. Every exit path writes back how far the message got.
+    """
     channel = channel_name(message)
     topic = str(message.get("subject", ""))
-    project = project_from_channel(channel)
     log(f"mission topic message #{message.get('id')} in {channel!r}/{topic!r}")
 
-    history = client.topic_history(channel, topic, num_before=HISTORY_MESSAGES)
-    dump_notice = topic_dump(
-        channel,
-        topic,
-        format_chatlog(history, self_id),
-        cwd=FRONT_WORKSPACE,
-    )
-    init_project(project)
-    reply = call_window(window_prompt(absolute_dump_notice(dump_notice)))
-    topic_write(topic, reply, channel=channel, client=client)
+    sections: list[str] = []
+    step = "reading the topic"
+    try:
+        project = project_from_channel(channel)
+        history = client.topic_history(channel, topic, num_before=HISTORY_MESSAGES)
+        dump_notice = topic_dump(
+            channel,
+            topic,
+            format_chatlog(history, self_id),
+            cwd=FRONT_WORKSPACE,
+        )
+        dump_dir = dump_directory(dump_notice)
+
+        step = "project setup"
+        init_project(project)
+
+        step = "front"
+        # The front's answer is not inspected: `mission.md` on disk is the
+        # whole decision. It is still relayed verbatim.
+        sections.append(call_window(window_prompt(absolute_dump_notice(dump_notice))))
+
+        step = "task split"
+        if (FRONT_WORKSPACE / dump_dir / "mission.md").is_file():
+            sections.append(run_coding(dump_dir))
+        else:
+            sections.append("no mission.md was written, so no task split was run.")
+
+        step = "mission registration"
+        sections.append(register_mission(dump_dir))
+    except Exception as error:  # noqa: BLE001 - the topic is the error channel
+        log(f"mission topic workflow failed during {step}: {error!r}")
+        sections.append(f"failed during {step}: {error}")
+
+    topic_write(topic, "\n\n".join(section for section in sections if section),
+                channel=channel, client=client)
 
 
 def observe_message(client: ZulipClient, message: dict, self_id: int) -> None:

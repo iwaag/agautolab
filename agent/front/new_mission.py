@@ -1,30 +1,33 @@
 #!/usr/bin/env python3
-"""Register a new Plane mission for the current project chat."""
+"""Register one dumped chat topic in Plane: mission.md plus tasks/*.md."""
 
 import argparse
 
-from agautolab.mission import MissionError, new_mission
+from agautolab.mission import MissionError, register_dump
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Create one actionable Plane mission for the project in the latest dumped pj-* "
-            "chat. Run this once after reading that chat log."
+            "Register the mission written in one topic dump directory. "
+            "'mission.md' becomes a Plane task and 'tasks/1.md', '2.md', ... become "
+            "its sub-work. The title of each issue is the file's first heading, the "
+            "rest of the file is its description. Running it again registers nothing "
+            "new: the topic is keyed in Plane itself."
         ),
         epilog=(
-            'Example: uv run new_mission.py "Add health check" '
-            '"Add an HTTP health endpoint and verify a 200 response."'
+            "Example: uv run new_mission.py .local/topics/pj-foo/mission-bar/3\n"
+            "With no argument, the newest dump directory is used."
         ),
     )
-    parser.add_argument("mission_name", help="short, outcome-oriented Plane issue title")
     parser.add_argument(
-        "mission_description",
-        help="complete implementation request; quote it as one shell argument",
+        "dump_directory",
+        nargs="?",
+        help="topic dump directory (.local/topics/<channel>/<topic>/<N>)",
     )
     args = parser.parse_args()
     try:
-        print(new_mission(args.mission_name, args.mission_description))
+        print(register_dump(args.dump_directory))
     except MissionError as error:
         parser.exit(1, f"new_mission: {error}\n")
 
