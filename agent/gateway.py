@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Mission gateway — the stub. Every route answers; almost nothing is real.
+"""Autolab node gateway: a real conversational window over a retained stub surface.
 
 Stdlib-only single-file server. Routes, unchanged from the implementation
 this replaces:
 
-  POST /window    {"text": str}  -> the conversational window (see below)
-  GET  /guide     agent/GUIDE.md, the capability card, as plain text
+  POST /window    {"text": str}  -> the front role
   GET  /status    mission/driver/done/session summary
   GET  /log       ?tail=N  tail of the current (or last) drive log
   GET  /jobs      one summary row per job
@@ -27,20 +26,16 @@ absent keys, so `agdevworld/assistant`, which proxies them at
 `/api/autolab/<node>/…`, keeps working against an empty node instead of a
 broken one. Every stub document carries `"stub": true`.
 
-Two things are still real:
+Two things are real:
 
   GET  /projects  reads agents.toml, the ignored .local/agents.local.toml
                   overlay, and each project's own selection.
-  POST /window    resolves the `front` role for real and records the identity
-                  that would have answered. The answer itself is canned.
-
-Neither starts a process and neither can be charged for.
+  POST /window    runs the `front` role for real and records its answer,
+                  identity, outcome, cost and timing.
 
 POST /window remains this node's single desire-accepting conversational
-entrance (devpolicy/policy.md, Single Entrance), including its
-<<mission>>...<</mission>> block: the block is still parsed and still cut
-from the shown reply, and `start_mission` still validates it and still
-answers 202/400/409 — it simply starts nothing.
+entrance. It passes the caller's text through without a capability card or a
+gateway-owned mission protocol; the front workspace's tools are its evidence.
 
 No route carries authentication: this node serves a single-user experimental
 cluster.
@@ -76,7 +71,6 @@ from agautolab.project_settings import (  # noqa: E402
 from agautolab.role_run import run_role  # noqa: E402
 
 STATE = ROOT / ".local" / "agent"
-GUIDE = Path(__file__).resolve().parent / "GUIDE.md"
 WINDOW = STATE / "window"
 
 # Versioned envelope, in the spirit of nctl's `nctl.drift.v1`: scope 3 points
@@ -163,109 +157,9 @@ def status_document():
     }
 
 
-def start_mission(mission, max_sessions=12):
-    """The one mission-starting seam, kept as a shape and emptied.
-
-    Returns (http-shaped code, document): 202 accepted, 400 bad input. The
-    validation is the real one; nothing is written and nothing is spawned.
-    With the driver gone there is nothing to be concurrent with, so the 409 a
-    live drive used to produce cannot occur — the window's caller contract
-    still documents it, which is why the branch is described here rather than
-    silently dropped.
-    """
-    if not (isinstance(mission, str) and mission.strip()):
-        return 400, {"error": "mission must be a non-empty string"}
-    if not (isinstance(max_sessions, int) and 1 <= max_sessions <= 50):
-        return 400, {"error": "max_sessions must be 1..50"}
-    return 202, {"accepted": True, "run": 0, "pid": None, "stub": True,
-                 "note": "no mission was started: this node is a stub"}
-
-
 # --- the conversational window -------------------------------------------
-#
-# One free-text entrance (devpolicy/policy.md, Single Entrance). The front
-# role is resolved for real and its identity is recorded; the answer is
-# canned. `run_role` accepts the prompt and ignores it.
+# One free-text entrance (devpolicy/policy.md, Single Entrance).
 WINDOW_TIMEOUT_SECONDS = 300
-
-WINDOW_PROMPT = """You are the conversational window of an autolab node: a
-headless auto-development loop that runs coding-agent iterations against jobs,
-leaving evidence (prompt, diff, gate results, cost) on disk per iteration.
-
-You are this node's entrance, and you can start work yourself. When the user
-asks for something to be built, include in your reply a block of the form
-
-<<mission>>
-...the mission text the auto-development loop should pursue...
-<</mission>>
-
-(optionally `<<mission max_sessions=N>>`, 1..50, default 12). The gateway
-executes the block after you answer: it writes MISSION.md and spawns the
-drive loop. One mission runs at a time — while one is alive the start is
-refused and the refusal is recorded next to your answer. Only start a
-mission when the user clearly asks for work, and put everything the loop
-needs to know inside the block: it is the whole briefing. The block itself
-is removed from the reply the user sees; the rest of your reply is shown as
-written.
-
-GUIDE is this node's capability card and JOB STATE is its live job state,
-both below.
-
-=== GUIDE ===
-{guide}
-
-=== JOB STATE (JSON) ===
-{state}
-
-=== USER MESSAGE ===
-{text}
-"""
-
-
-# The window's mission ability (devpolicy: Tool Giving): a structured block in
-# the reply that the gateway executes. Optional max_sessions attribute; the
-# block body is the mission text. The tags are parsed tolerantly: live local
-# models have emitted `<<mission max_sessions=20` (no `>>`) and `<</mission>`
-# (one `>` short), losing whole missions to a single character. An unclosed
-# block runs to the end of the reply.
-MISSION_BLOCK = re.compile(
-    r"<<mission(?:\s+max_sessions=(\d+))?\s*(?:>>)?\s*(.*?)\s*(?:<</mission>?>?|$)",
-    re.S,
-)
-
-
-def apply_mission_block(reply, record):
-    """Execute the reply's mission block, if any. The start's outcome goes on
-    the window record under `mission`; the block is cut from the shown reply."""
-    match = MISSION_BLOCK.search(reply)
-    if not match:
-        return reply
-    max_sessions = int(match.group(1)) if match.group(1) else 12
-    code, doc = start_mission(match.group(2), max_sessions)
-    record["mission"] = {"status": code, **doc}
-    return (reply[: match.start()] + reply[match.end() :]).strip()
-
-
-def read_guide():
-    """Re-read per request (cagent's llms.txt pattern): editing the card is a
-    no-restart change, and a missing card must not break the window."""
-    try:
-        return GUIDE.read_text()
-    except OSError:
-        return "(no capability card is installed on this node)"
-
-
-def window_state():
-    """The context blob the window is handed. Emptied with the jobs."""
-    return {
-        "node_time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "stub": True,
-        "mission": {"text": None, "driver_running": False, "done": None,
-                    "current": None},
-        "cost": {"sessions_usd": 0.0, "current_run_sessions_usd": None},
-        "summarizer_running": None,
-        "jobs": [],
-    }
 
 
 # One answer at a time, as before: the guard is part of the entrance's
@@ -290,7 +184,7 @@ def record_window_run(run_id, record):
 
 
 def answer_window(text):
-    """Resolve the front role, take its canned answer, persist the record."""
+    """Pass text to the front role unchanged and persist its run record."""
     run_id = next_window_id()
     started = time.monotonic()
     record = {
@@ -300,13 +194,8 @@ def answer_window(text):
         "outcome": "failed",
     }
     try:
-        prompt = WINDOW_PROMPT.format(
-            guide=read_guide(),
-            state=json.dumps(window_state(), indent=2, default=str),
-            text=text,
-        )
         reply, meta, code = run_role(
-            "front", prompt, cwd=ROOT, timeout=WINDOW_TIMEOUT_SECONDS,
+            "front", text, cwd=ROOT, timeout=WINDOW_TIMEOUT_SECONDS,
         )
     except AgentConfigError as error:
         record["failure"] = str(error)
@@ -315,7 +204,7 @@ def answer_window(text):
         return record
     record.update(meta)
     if code == 0 and record.get("outcome") == "done":
-        record["reply"] = apply_mission_block(reply, record)
+        record["reply"] = reply
     record_window_run(run_id, record)
     return record
 
@@ -343,8 +232,6 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?")[0]
         if path == "/healthz":
             return self.send_json(200, {"ok": True})
-        if path == "/guide":
-            return self.send_text(200, read_guide())
         if path == "/game" or path.startswith("/game/"):
             return self.send_json(404, {"error": "no game is served by a stub node"})
         if path == "/monitor" or path.startswith("/monitor/"):
@@ -383,8 +270,8 @@ class Handler(BaseHTTPRequestHandler):
             record = answer_window(text.strip())
         finally:
             window_lock.release()
-        # The record is the response: a caller sees which harness would have
-        # answered and what it cost without a second request.
+        # The record is the response: a caller sees which harness answered and
+        # what it cost without a second request.
         body = {"kind": KIND, "type": "window", **record}
         self.send_json(200 if record["outcome"] == "done" else 502, body)
 
@@ -439,7 +326,7 @@ def main():
     WINDOW.mkdir(parents=True, exist_ok=True)
     signal.signal(signal.SIGTERM, lambda *a: sys.exit(0))
     server = ThreadingHTTPServer((host, port), Handler)
-    print(f"autolab-gateway listening on {host}:{port} (stub)", flush=True)
+    print(f"autolab-gateway listening on {host}:{port}", flush=True)
     server.serve_forever()
 
 

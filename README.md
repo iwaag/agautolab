@@ -1,17 +1,17 @@
 # agautolab
 
-A stub. agautolab was a headless auto-development loop orchestrator: it drove
-one-shot coding-agent iterations against a job directory until the job's
-acceptance gates exited 0. That implementation was deleted (`discard_garbage`
-episode, `pj-agdev/devdocs/episodes/`).
+agautolab is being rebuilt as a small chat-driven project and mission
+registration service. The old headless development loop was deleted
+(`discard_garbage` episode, `pj-agdev/devdocs/episodes/`); its empty read-side
+surface remains for existing consumers while the new path is added.
 
 What is kept is what was worth keeping — this node's input/output surface and
 its agent configuration:
 
-- **The gateway's routes** (`agent/gateway.py`, default `:8791`), with their
-  validation, status codes and response envelopes intact. They answer empty
-  documents marked `"stub": true`. `GET /guide` serves `agent/GUIDE.md`, the
-  capability card, which lists them.
+- **The gateway** (`agent/gateway.py`, default `:8791`). `POST /window` runs
+  the real front agent with the request text unchanged. Existing `/status`,
+  `/jobs`, and `/projects` consumers retain their response surfaces; the
+  removed loop's read-side documents remain marked `"stub": true`.
 - **The chat entrance** (`src/agautolab/zulip_listener.py`): `mission-*`
   topics in `#pj-<name>` channels are still heard and answered, and nothing is
   started.
@@ -20,10 +20,10 @@ its agent configuration:
   per-role tool grants in `src/agautolab/role_run.py`, and the OpenCode
   permission files in `agent/opencode-*.json`.
 
-Role resolution is live, not decorative: `GET /projects` and every window
-answer resolve through `ag.agent-config.v1`, so a broken profile or project
-selection still fails loudly. Nothing below that line launches a harness, so
-this node cannot spawn a process or be charged.
+Role resolution and execution are live: `GET /projects` and every window
+answer resolve through `ag.agent-config.v1`, so a broken profile, missing
+harness, or project selection fails loudly. Front and mediator runs use their
+dedicated uv workspace directories.
 
 ```bash
 uv run python agent/gateway.py     # the gateway
