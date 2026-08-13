@@ -111,8 +111,10 @@ def test_handle_topic_acks_then_runs_the_steps_in_order(monkeypatch, tmp_path):
 
     zulip_listener.handle_topic(client, CHANNEL, TOPIC)
 
+    # The trailing history read is the post-run re-check for human messages
+    # that arrived during the run (none here, so the handler leaves).
     assert [call[0] for call in calls] == [
-        "whoami", "write", "history", "init", "plane", "front", "write",
+        "whoami", "write", "history", "init", "plane", "front", "write", "history",
     ]
     # The ack is the first post, before any work: it makes the bot the last
     # poster so a later sweep skips the topic while this run is in flight.
@@ -290,6 +292,33 @@ def test_handle_topic_reports_a_response_handling_failure(monkeypatch, tmp_path)
 
     assert "failed during response handling: plane is down" in calls[-1][2]
     assert not any(call[0] == "resolve" for call in calls)
+
+
+def test_handle_topic_reprocesses_when_a_human_posted_during_the_run(monkeypatch, tmp_path):
+    """The final reply makes the bot the last poster and hides the topic from
+    the sweep, so a mid-run human post must be caught by the handler itself."""
+    calls = []
+    wire(monkeypatch, tmp_path, calls)
+    first = history_message()
+    mid_run = {**history_message(content="one more thing"), "id": 2}
+
+    class ScriptedClient(Client):
+        def __init__(self):
+            super().__init__(calls)
+            # chatlog read, re-check (fresh human post), chatlog read, re-check
+            self.scripts = [[first], [first, mid_run], [first, mid_run], [first, mid_run]]
+
+        def topic_history(self, channel, topic, num_before):
+            calls.append(("history", channel, topic, num_before))
+            return self.scripts.pop(0)
+
+    zulip_listener.handle_topic(ScriptedClient(), CHANNEL, TOPIC)
+
+    assert [call[0] for call in calls].count("front") == 2
+    acks = [call for call in calls if call[0] == "write" and call[2] == zulip_listener.ACK_TEXT]
+    assert len(acks) == 2
+    # The second round's chatlog carries the mid-run post.
+    assert (front_dir(tmp_path) / "chatlog.md").read_text().endswith("one more thing\n")
 
 
 def test_front_prompt_is_the_placement_lines_plus_the_guide(monkeypatch, tmp_path):

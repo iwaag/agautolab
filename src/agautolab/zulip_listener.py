@@ -159,66 +159,91 @@ def run_front(prompt: str, cwd: Path) -> str:
 
 
 def handle_topic(client: ZulipClient, channel: str, topic: str) -> None:
-    """Serve one awaiting mission topic and always answer it.
+    """Serve one awaiting mission topic, and always answer it.
 
     `sweep_serve` logs and survives handler exceptions, but a topic that gets
     an ack and then silence would stay dormant until a human posts again —
     so every exit path after the ack writes back how far the topic got.
+
+    A human posting *during* a run is not lost either: the final reply makes
+    this bot the last poster, which hides the topic from the next sweep, so
+    before leaving this re-checks for human messages newer than the chatlog
+    it processed and serves the topic again with the fuller chatlog.
     """
     log(f"mission topic {channel!r}/{topic!r}")
     self_user = client.whoami()
     self_id = int(self_user["user_id"])
     bot_name = str(self_user.get("full_name") or client.email)
 
-    topic_write(topic, ACK_TEXT, channel=channel, client=client)
+    while True:
+        topic_write(topic, ACK_TEXT, channel=channel, client=client)
 
-    sections: list[str] = []
-    step = "reading the topic"
-    try:
-        project = project_from_channel(channel)
-        front_dir = topic_workspace(channel, topic) / "front"
-        front_dir.mkdir(parents=True, exist_ok=True)
-
-        step = "chatlog"
-        history = client.topic_history(channel, topic, num_before=HISTORY_MESSAGES)
-        (front_dir / "chatlog.md").write_text(
-            format_chatlog(history, self_id), encoding="utf-8"
-        )
-
-        step = "project setup"
-        init_project(project)
-
-        step = "plane read-back"
-        plane_files = write_mission_workspace(front_dir, project, channel, topic)
-
-        step = "front"
-        # The front's answer is relayed verbatim; what it wrote in the
-        # workspace (not what it said) drives the follow-up.
-        sections.append(run_front(front_prompt(bot_name, plane_files), front_dir))
-
-        step = "response handling"
-        response_sections, resolve_after = handle_front_response(
-            channel, topic, project, front_dir
-        )
-        sections.extend(response_sections)
-    except Exception as error:  # noqa: BLE001 - the topic is the error channel
-        log(f"mission topic workflow failed during {step}: {error!r}")
-        sections.append(f"failed during {step}: {error}")
+        sections: list[str] = []
+        processed_up_to = 0
+        completed = False
         resolve_after = False
-
-    topic_write(topic, "\n\n".join(section for section in sections if section),
-                channel=channel, client=client)
-
-    if resolve_after:
-        # After the final reply, so the whole conversation moves under the
-        # ✔ name; a resolved topic stops matching the sweep, which is the
-        # desired end state of a cancelled mission.
+        step = "reading the topic"
         try:
-            history = client.topic_history(channel, topic, num_before=1)
-            if history:
-                client.resolve_topic(int(history[-1]["id"]), topic)
-        except Exception as error:  # noqa: BLE001
-            log(f"could not resolve {channel!r}/{topic!r}: {error!r}")
+            project = project_from_channel(channel)
+            front_dir = topic_workspace(channel, topic) / "front"
+            front_dir.mkdir(parents=True, exist_ok=True)
+
+            step = "chatlog"
+            history = client.topic_history(channel, topic, num_before=HISTORY_MESSAGES)
+            processed_up_to = max((int(m.get("id", 0)) for m in history), default=0)
+            (front_dir / "chatlog.md").write_text(
+                format_chatlog(history, self_id), encoding="utf-8"
+            )
+
+            step = "project setup"
+            init_project(project)
+
+            step = "plane read-back"
+            plane_files = write_mission_workspace(front_dir, project, channel, topic)
+
+            step = "front"
+            # The front's answer is relayed verbatim; what it wrote in the
+            # workspace (not what it said) drives the follow-up.
+            sections.append(run_front(front_prompt(bot_name, plane_files), front_dir))
+
+            step = "response handling"
+            response_sections, resolve_after = handle_front_response(
+                channel, topic, project, front_dir
+            )
+            sections.extend(response_sections)
+            completed = True
+        except Exception as error:  # noqa: BLE001 - the topic is the error channel
+            log(f"mission topic workflow failed during {step}: {error!r}")
+            sections.append(f"failed during {step}: {error}")
+
+        topic_write(topic, "\n\n".join(section for section in sections if section),
+                    channel=channel, client=client)
+
+        if resolve_after:
+            # After the final reply, so the whole conversation moves under
+            # the ✔ name; a resolved topic stops matching the sweep, which
+            # is the desired end state of a cancelled mission.
+            try:
+                history = client.topic_history(channel, topic, num_before=1)
+                if history:
+                    client.resolve_topic(int(history[-1]["id"]), topic)
+            except Exception as error:  # noqa: BLE001
+                log(f"could not resolve {channel!r}/{topic!r}: {error!r}")
+            return
+        if not completed:
+            return  # do not loop on a failing topic; a human post re-arms it
+
+        try:
+            tail = client.topic_history(channel, topic, num_before=HISTORY_MESSAGES)
+        except ZulipError as error:
+            log(f"post-run re-check failed for {channel!r}/{topic!r}: {error!r}")
+            return
+        if not any(
+            m.get("sender_id") != self_id and int(m.get("id", 0)) > processed_up_to
+            for m in tail
+        ):
+            return
+        log(f"reprocessing {channel!r}/{topic!r}: human posts arrived during the run")
 
 
 def generation(topic_dir: Path) -> int:
