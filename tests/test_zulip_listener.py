@@ -65,6 +65,8 @@ def test_handle_message_runs_four_workflows_in_order(monkeypatch, tmp_path):
     assert [call[0] for call in calls] == ["history", "dump", "init", "window", "write"]
     assert calls[1][3] == "[Developer] Build it\n"
     assert "uv run new_mission.py --help" in calls[3][1]
+    assert "already running in the front workspace" in calls[3][1]
+    assert "Do not ask for path clarification" in calls[3][1]
     assert calls[4][1:3] == ("mission-one", "mission added")
     assert calls[4][3] == {"channel": "pj-demo-project", "client": client}
 

@@ -81,9 +81,12 @@ def format_chatlog(messages: list[dict], self_id: int) -> str:
 def window_prompt(dump_notice: str) -> str:
     return (
         f"{dump_notice}\n\n"
-        "Read it. If you determine that the chat requests a mission, run "
-        "`uv run new_mission.py --help` to learn the interface, then add the new mission. "
-        "Report the result when you are finished."
+        "You are already running in the front workspace. The relative chat-log path above and "
+        "`new_mission.py` exist beneath your current working directory. Use your tools directly: "
+        "read the chat log, then run `uv run new_mission.py --help` to learn the interface. If "
+        "you determine that the chat requests a mission, add it and report the result. Do not ask "
+        "for path clarification unless you first run `pwd`, inspect both paths, and report the "
+        "exact command error."
     )
 
 
