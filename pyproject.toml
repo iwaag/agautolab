@@ -21,3 +21,6 @@ packages = ["src/agautolab"]
 
 [tool.uv.sources]
 pyagag = { git = "https://github.com/iwaag/pyagag.git", branch = "main" }
+
+[tool.uv.workspace]
+members = ["agent/front", "agent/mediator"]
