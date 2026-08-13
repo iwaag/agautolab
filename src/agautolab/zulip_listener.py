@@ -24,7 +24,15 @@ from agag.zulip import (
     topic_write,
 )
 
-from .mission import write_mission_workspace
+from .mission import (
+    cancel_sub_works,
+    register_task_files,
+    split_document,
+    task_files,
+    transition_work,
+    upsert_work,
+    write_mission_workspace,
+)
 from .project_init import PROJECT_NAME, init_project
 from .role_run import run_role
 
@@ -41,19 +49,23 @@ SUBSCRIBE_INTERVAL_SECONDS = 60
 
 ACK_TEXT = "Message received. Please wait for the reply."
 
-# One topic occupies the listener for at most this long; the sweep loop is
-# single-threaded and serial, so this is also the delay before the next
-# matching topic is looked at (events keep queueing meanwhile).
+# One topic occupies the listener for at most the sum of these; the sweep
+# loop is single-threaded and serial, so that sum is also the delay before
+# the next matching topic is looked at (events keep queueing meanwhile).
 FRONT_TIMEOUT_SECONDS = 360
+CODING_TIMEOUT_SECONDS = 600
 
 __all__ = [
     "ZULIP_ENV",
     "format_chatlog",
     "front_prompt",
+    "generation",
     "guide",
+    "handle_front_response",
     "handle_topic",
     "main",
     "next_record_path",
+    "run_coding",
     "run_front",
     "subscribe_project_channels",
     "topic_workspace",
@@ -185,18 +197,110 @@ def handle_topic(client: ZulipClient, channel: str, topic: str) -> None:
         sections.append(run_front(front_prompt(bot_name, plane_files), front_dir))
 
         step = "response handling"
-        sections.extend(handle_front_response(front_dir))
+        response_sections, resolve_after = handle_front_response(
+            channel, topic, project, front_dir
+        )
+        sections.extend(response_sections)
     except Exception as error:  # noqa: BLE001 - the topic is the error channel
         log(f"mission topic workflow failed during {step}: {error!r}")
         sections.append(f"failed during {step}: {error}")
+        resolve_after = False
 
     topic_write(topic, "\n\n".join(section for section in sections if section),
                 channel=channel, client=client)
 
+    if resolve_after:
+        # After the final reply, so the whole conversation moves under the
+        # ✔ name; a resolved topic stops matching the sweep, which is the
+        # desired end state of a cancelled mission.
+        try:
+            history = client.topic_history(channel, topic, num_before=1)
+            if history:
+                client.resolve_topic(int(history[-1]["id"]), topic)
+        except Exception as error:  # noqa: BLE001
+            log(f"could not resolve {channel!r}/{topic!r}: {error!r}")
 
-def handle_front_response(front_dir: Path) -> list[str]:
-    """Act on what the front wrote (`new_mission.md`, flags). Step 3 fills this in."""
-    return []
+
+def generation(topic_dir: Path) -> int:
+    """Increment and persist the topic's Sub-Work generation counter.
+
+    Each accepted `new_mission.md` is one generation; the counter keeps new
+    Sub-Work external keys clear of cancelled generations' keys, which live
+    in Plane forever.
+    """
+    path = topic_dir / "generation"
+    try:
+        rev = int(path.read_text(encoding="utf-8").strip()) + 1
+    except (OSError, ValueError):
+        rev = 1
+    path.write_text(f"{rev}\n", encoding="utf-8")
+    return rev
+
+
+def run_coding(coding_dir: Path) -> str:
+    """One task-split run in the topic's coding workspace, with its record."""
+    record = next_record_path(RECORDS_ROOT / "coding")
+    output, _, exit_code = run_role(
+        "coding",
+        guide("mission_coding", "guide_task_split.md"),
+        cwd=coding_dir,
+        timeout=CODING_TIMEOUT_SECONDS,
+        record=record,
+    )
+    if exit_code != 0:
+        raise ListenerError(f"coding run exited {exit_code}: {output.strip()[:500]}")
+    return output.strip()
+
+
+def handle_front_response(
+    channel: str, topic: str, project: str, front_dir: Path
+) -> tuple[list[str], bool]:
+    """Act on what the front wrote: `new_mission.md`, then the flags.
+
+    Returns the report sections and whether the topic should be resolved
+    after the final reply. The command files are consumed once acted on —
+    the workspace is stable and reused, so a leftover command would replay
+    on every later run; the mission's canonical text lives in Plane and
+    comes back as `mission.md` on the next read-back.
+    """
+    sections: list[str] = []
+    resolve_after = False
+
+    new_mission = front_dir / "new_mission.md"
+    if new_mission.is_file():
+        title, description = split_document(new_mission.read_text(encoding="utf-8"))
+        sections.append(upsert_work(project, channel, topic, title, description))
+        cancelled = cancel_sub_works(project, channel, topic)
+        if cancelled:
+            sections.append(f"cancelled {cancelled} existing sub-work(s)")
+        coding_dir = front_dir.parent / "coding"
+        coding_dir.mkdir(parents=True, exist_ok=True)
+        for _, stale in task_files(coding_dir):
+            stale.unlink()  # earlier generations' splits must not re-register
+        (coding_dir / "new_mission.md").write_text(
+            new_mission.read_text(encoding="utf-8"), encoding="utf-8"
+        )
+        sections.append(run_coding(coding_dir))
+        rev = generation(front_dir.parent)
+        sections.extend(register_task_files(project, channel, topic, coding_dir, rev))
+        new_mission.unlink()
+
+    start_flag = front_dir / "start.flag"
+    if start_flag.is_file():
+        label = transition_work(project, channel, topic, "started")
+        sections.append(f"mission {label} is now In Progress")
+        start_flag.unlink()
+
+    cancel_flag = front_dir / "cancel.flag"
+    if cancel_flag.is_file():
+        cancelled = cancel_sub_works(project, channel, topic)
+        label = transition_work(project, channel, topic, "cancelled")
+        suffix = f" along with {cancelled} sub-work(s)" if cancelled else ""
+        sections.append(f"mission {label} is cancelled{suffix}; resolving this topic")
+        cancel_flag.unlink()
+        resolve_after = True
+
+    return sections, resolve_after
 
 
 def subscribe_project_channels(client: ZulipClient) -> list[str]:

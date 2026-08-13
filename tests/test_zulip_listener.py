@@ -38,6 +38,9 @@ class Client:
         self.calls.append(("history", channel, topic, num_before))
         return self.history
 
+    def resolve_topic(self, message_id, topic):
+        self.calls.append(("resolve", message_id, topic))
+
 
 def wire(monkeypatch, tmp_path, calls, *, plane_files=False, front="front says hi"):
     monkeypatch.setattr(zulip_listener, "TOPICS_ROOT", tmp_path / "topics")
@@ -61,6 +64,39 @@ def wire(monkeypatch, tmp_path, calls, *, plane_files=False, front="front says h
         zulip_listener,
         "topic_write",
         lambda topic, text, **kwargs: calls.append(("write", topic, text, kwargs)) or "success",
+    )
+
+
+def wire_response(monkeypatch, calls, *, coding="split done", cancelled=0):
+    monkeypatch.setattr(
+        zulip_listener,
+        "upsert_work",
+        lambda project, channel, topic, title, description: (
+            calls.append(("upsert", project, channel, topic, title, description))
+            or f'updated PD-4 "{title}"'
+        ),
+    )
+    monkeypatch.setattr(
+        zulip_listener,
+        "cancel_sub_works",
+        lambda project, channel, topic: calls.append(("cancel-subs",)) or cancelled,
+    )
+    monkeypatch.setattr(
+        zulip_listener,
+        "run_coding",
+        lambda coding_dir: calls.append(("coding", coding_dir)) or coding,
+    )
+    monkeypatch.setattr(
+        zulip_listener,
+        "register_task_files",
+        lambda project, channel, topic, coding_dir, rev: (
+            calls.append(("register", coding_dir, rev)) or [f"created sub-work rev {rev}"]
+        ),
+    )
+    monkeypatch.setattr(
+        zulip_listener,
+        "transition_work",
+        lambda project, channel, topic, group: calls.append(("transition", group)) or "PD-4",
     )
 
 
@@ -141,6 +177,119 @@ def test_handle_topic_reports_a_channel_that_is_not_a_project(monkeypatch, tmp_p
     # The ack still goes out; the failure is reported in the reply.
     assert [call[0] for call in calls if call[0] == "write"][0:2] == ["write", "write"]
     assert "failed during reading the topic" in calls[-1][2]
+
+
+def test_new_mission_updates_plane_and_reruns_the_split(monkeypatch, tmp_path):
+    calls = []
+    wire_response(monkeypatch, calls, cancelled=2)
+    front = tmp_path / "front"
+    front.mkdir(parents=True)
+    (front / "new_mission.md").write_text("# Build it\n\nThe body.")
+    coding = tmp_path / "coding"
+    coding.mkdir()
+    (coding / "task1.md").write_text("# stale split from an earlier generation")
+
+    sections, resolve_after = zulip_listener.handle_front_response(
+        CHANNEL, TOPIC, "demo-project", front
+    )
+
+    assert [call[0] for call in calls] == ["upsert", "cancel-subs", "coding", "register"]
+    assert calls[0][4:6] == ("Build it", "The body.")
+    assert calls[2][1] == coding
+    # The mission text travels into coding/, the stale split does not survive.
+    assert (coding / "new_mission.md").read_text() == "# Build it\n\nThe body."
+    assert not (coding / "task1.md").exists()
+    # First generation; the counter persists beside front/ and coding/.
+    assert calls[3][2] == 1
+    assert (tmp_path / "generation").read_text() == "1\n"
+    # The command file is consumed so a later run does not replay it.
+    assert not (front / "new_mission.md").exists()
+    assert sections == [
+        'updated PD-4 "Build it"',
+        "cancelled 2 existing sub-work(s)",
+        "split done",
+        "created sub-work rev 1",
+    ]
+    assert resolve_after is False
+
+
+def test_generation_counter_increments_per_accepted_mission(tmp_path):
+    assert zulip_listener.generation(tmp_path) == 1
+    assert zulip_listener.generation(tmp_path) == 2
+    assert zulip_listener.generation(tmp_path) == 3
+
+
+def test_start_flag_moves_the_work_to_in_progress(monkeypatch, tmp_path):
+    calls = []
+    wire_response(monkeypatch, calls)
+    front = tmp_path / "front"
+    front.mkdir(parents=True)
+    (front / "start.flag").touch()
+
+    sections, resolve_after = zulip_listener.handle_front_response(
+        CHANNEL, TOPIC, "demo-project", front
+    )
+
+    assert calls == [("transition", "started")]
+    assert sections == ["mission PD-4 is now In Progress"]
+    assert not (front / "start.flag").exists()
+    assert resolve_after is False
+
+
+def test_cancel_flag_cancels_everything_and_requests_resolution(monkeypatch, tmp_path):
+    calls = []
+    wire_response(monkeypatch, calls, cancelled=3)
+    front = tmp_path / "front"
+    front.mkdir(parents=True)
+    (front / "cancel.flag").touch()
+
+    sections, resolve_after = zulip_listener.handle_front_response(
+        CHANNEL, TOPIC, "demo-project", front
+    )
+
+    assert calls == [("cancel-subs",), ("transition", "cancelled")]
+    assert sections == ["mission PD-4 is cancelled along with 3 sub-work(s); resolving this topic"]
+    assert not (front / "cancel.flag").exists()
+    assert resolve_after is True
+
+
+def test_handle_topic_resolves_the_topic_after_the_final_reply(monkeypatch, tmp_path):
+    calls = []
+    client = Client(calls)
+    wire(monkeypatch, tmp_path, calls)
+    wire_response(monkeypatch, calls)
+    monkeypatch.setattr(
+        zulip_listener,
+        "run_front",
+        lambda prompt, cwd: (front_dir(tmp_path) / "cancel.flag").touch() or "cancelling",
+    )
+
+    zulip_listener.handle_topic(client, CHANNEL, TOPIC)
+
+    # The ✔ rename comes after the final reply so the whole thread moves.
+    assert [call[0] for call in calls][-3:] == ["write", "history", "resolve"]
+    assert calls[-1] == ("resolve", 1, TOPIC)
+
+
+def test_handle_topic_reports_a_response_handling_failure(monkeypatch, tmp_path):
+    calls = []
+    wire(monkeypatch, tmp_path, calls)
+    wire_response(monkeypatch, calls)
+
+    def explode(project, channel, topic, group):
+        raise zulip_listener.ListenerError("plane is down")
+
+    monkeypatch.setattr(zulip_listener, "transition_work", explode)
+    monkeypatch.setattr(
+        zulip_listener,
+        "run_front",
+        lambda prompt, cwd: (front_dir(tmp_path) / "start.flag").touch() or "starting",
+    )
+
+    zulip_listener.handle_topic(Client(calls), CHANNEL, TOPIC)
+
+    assert "failed during response handling: plane is down" in calls[-1][2]
+    assert not any(call[0] == "resolve" for call in calls)
 
 
 def test_front_prompt_is_the_placement_lines_plus_the_guide(monkeypatch, tmp_path):

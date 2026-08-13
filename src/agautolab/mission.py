@@ -1,22 +1,21 @@
-"""Register one dumped chat topic as a Plane task with its sub-work.
+"""Plane mirror of one chat topic: its Work, Sub-Works, and their files.
 
-The unit of registration is a topic dump directory
-(`.local/topics/<channel>/<topic>/<N>/`) written by `agag.zulip.topic_dump`:
+Both directions live here. Reading, a topic's Work becomes `mission.md` and
+its live Sub-Works `task1.md`, `task2.md`, … in the topic's front workspace
+(`write_mission_workspace`). Writing, the front's `new_mission.md` updates or
+creates the Work (`upsert_work`), obsolete Sub-Works are cancelled — never
+deleted (`cancel_sub_works`) — and the coding split's `task[N].md` files are
+registered as a new generation of Sub-Works (`register_task_files`).
 
-    mission.md   -> one Plane issue
-    tasks/1.md   -> sub-work of that issue
-    tasks/2.md   -> sub-work of that issue
-
-Both sides are keyed on Plane's own `external_source`/`external_id` pair, so
-re-running the same topic — including a later dump version of it — adds
-nothing. That key lives in Plane, not on this disk, which is what makes it
-survive a wiped `.local/` and the ever-incrementing dump version number.
+Works are keyed on Plane's own `external_source`/`external_id` pair
+(`<channel>/<topic>`), so the key survives a wiped `.local/`. Sub-Works carry
+a generation marker (`<channel>/<topic>@<rev>#<N>`) because cancelled
+generations keep their keys forever.
 """
 
 from __future__ import annotations
 
 import html
-import os
 import re
 import urllib.parse
 from pathlib import Path
@@ -34,64 +33,11 @@ from .project_init import (
 EXTERNAL_SOURCE = "agautolab"
 TITLE_LIMIT = 255
 HEADING = re.compile(r"^\s{0,3}#{1,6}\s+(?P<title>.+?)\s*#*\s*$")
-TASK_FILE = re.compile(r"^(?P<number>\d+)\.md$")
+TASK_FILE = re.compile(r"^task(?P<number>\d+)\.md$")
 
 
 class MissionError(RuntimeError):
-    """The mission could not be registered."""
-
-
-# --- locating the dump directory -----------------------------------------
-
-
-def latest_dump_directory(cwd: Path | None = None) -> Path:
-    """The newest `<N>/` version directory under `.local/topics/pj-*/`."""
-    root = (cwd or Path.cwd()) / ".local" / "topics"
-    logs = list(root.glob("pj-*/*/*/chatlog.txt"))
-    if not logs:
-        raise MissionError(
-            "no project chat context found; run this from the front workspace after topic_dump"
-        )
-    latest = max(logs, key=lambda path: (path.stat().st_mtime_ns, path.as_posix()))
-    return latest.parent
-
-
-def resolve_dump_directory(directory: Path | str | None, *, cwd: Path | None = None) -> Path:
-    if directory is None:
-        return latest_dump_directory(cwd)
-    path = Path(directory)
-    if not path.is_absolute():
-        path = (cwd or Path.cwd()) / path
-    if not path.is_dir():
-        raise MissionError(f"not a dump directory: {path}")
-    return path
-
-
-def topic_key(directory: Path) -> tuple[str, str]:
-    """Return `(channel, topic)` for `…/topics/<channel>/<topic>/<N>`."""
-    parts = directory.resolve().parts
-    if len(parts) < 3:
-        raise MissionError(f"dump directory has no channel/topic context: {directory}")
-    channel, topic = parts[-3], parts[-2]
-    if not channel.startswith("pj-"):
-        raise MissionError(
-            f"dump directory is not under a pj-* channel directory: {directory}"
-        )
-    return channel, topic
-
-
-def current_project(directory: Path) -> str:
-    """Project name from the `pj-*` segment, or the `AUTOLAB_PROJECT` override."""
-    override = os.environ.get("AUTOLAB_PROJECT", "").strip()
-    if override:
-        if not PROJECT_NAME.fullmatch(override):
-            raise MissionError("AUTOLAB_PROJECT is not a valid project name")
-        return override
-    channel, _ = topic_key(directory)
-    project = channel.removeprefix("pj-")
-    if not PROJECT_NAME.fullmatch(project):
-        raise MissionError(f"chat channel does not name a valid project: {channel}")
-    return project
+    """One Plane mirror operation could not complete."""
 
 
 # --- file to issue --------------------------------------------------------
@@ -121,23 +67,18 @@ def description_html(description: str) -> str:
     return f"<p>{html.escape(description).replace(chr(10), '<br>')}</p>"
 
 
-def task_files(directory: Path) -> tuple[list[tuple[int, Path]], list[str]]:
-    """Numbered task files in numeric order, plus the names that were skipped."""
+def task_files(directory: Path) -> list[tuple[int, Path]]:
+    """`task[N].md` files in numeric order. Anything else in the directory —
+    the copied `new_mission.md` included — is simply not a task."""
     tasks: list[tuple[int, Path]] = []
-    ignored: list[str] = []
     if not directory.is_dir():
-        return tasks, ignored
-    for path in sorted(directory.iterdir()):
-        if path.is_dir():
-            ignored.append(path.name)
-            continue
+        return tasks
+    for path in directory.iterdir():
         match = TASK_FILE.fullmatch(path.name)
-        if match:
+        if match and path.is_file():
             tasks.append((int(match.group("number")), path))
-        else:
-            ignored.append(path.name)
     tasks.sort(key=lambda item: item[0])
-    return tasks, ignored
+    return tasks
 
 
 # --- Plane -----------------------------------------------------------------
@@ -366,46 +307,108 @@ def issue_label(plane_project: dict, issue: dict) -> str:
     return str(issue.get("id", "?"))
 
 
-# --- the whole registration ------------------------------------------------
+# --- writing the front's decisions back to Plane ---------------------------
 
 
-def register_dump(directory: Path | str | None = None, *, cwd: Path | None = None) -> str:
-    """Register `mission.md` and `tasks/*.md` from one dump directory.
-
-    Returns one report line per action. A dump with no `mission.md` is the
-    normal "the chat was not a request" outcome, not an error.
-    """
-    dump = resolve_dump_directory(directory, cwd=cwd)
-    channel, topic = topic_key(dump)
-    project = current_project(dump)
-    mission_file = dump / "mission.md"
-    if not mission_file.is_file():
-        return "no mission"
-
+def _prepare(project: str) -> tuple[PlaneConfig, dict, str]:
     try:
         config = load_plane_config()
     except ProjectInitError as error:
         raise MissionError(str(error)) from error
     plane_project = find_plane_project(config, project)
-    project_id = str(plane_project["id"])
-    state = starting_state_id(config, project_id)
+    return config, plane_project, str(plane_project["id"])
 
-    lines: list[str] = []
-    title, description = split_document(mission_file.read_text(encoding="utf-8"))
-    issue, created = ensure_issue(
+
+def state_id_for_group(config: PlaneConfig, project_id: str, group: str) -> str:
+    """The project's state id for one group (`started`, `cancelled`, …)."""
+    for state_id, state_group in state_groups(config, project_id).items():
+        if state_group == group:
+            return state_id
+    raise MissionError(f"Plane project has no state in group {group!r}")
+
+
+def update_issue(config: PlaneConfig, project_id: str, issue_id: str, body: dict) -> dict:
+    status, payload = _request_json(
+        "PATCH",
+        f"{_project_base(config, project_id)}/issues/{urllib.parse.quote(issue_id, safe='')}/",
+        headers=_headers(config),
+        body=body,
+        timeout=60,
+    )
+    if status != 200 or not isinstance(payload, dict):
+        raise MissionError(f"Plane issue update returned HTTP {status}: {payload!r}")
+    return payload
+
+
+def upsert_work(project: str, channel: str, topic: str, title: str, description: str) -> str:
+    """Update the topic's Work with the new title/description, creating it if
+    this is the topic's first mission. Returns one report line."""
+    config, plane_project, project_id = _prepare(project)
+    existing = find_issue_by_external(config, project_id, f"{channel}/{topic}")
+    if existing:
+        update_issue(
+            config,
+            project_id,
+            str(existing["id"]),
+            {"name": title.strip(), "description_html": description_html(description)},
+        )
+        return f'updated {issue_label(plane_project, existing)} "{title}"'
+    issue, _ = ensure_issue(
         config,
         project_id,
         name=title,
         description=description,
-        state=state,
+        state=starting_state_id(config, project_id),
         external_id=f"{channel}/{topic}",
     )
-    label = issue_label(plane_project, issue)
-    lines.append(f'{"created" if created else "already registered"} {label} "{title}"')
+    return f'created {issue_label(plane_project, issue)} "{title}"'
 
-    tasks, ignored = task_files(dump / "tasks")
-    for name in ignored:
-        lines.append(f"ignored non-task file in tasks/: {name}")
+
+def cancel_sub_works(project: str, channel: str, topic: str) -> int:
+    """Transition every non-cancelled Sub-Work of the topic's Work to
+    Cancelled. Sub-Works are never deleted. Returns how many moved."""
+    config, _, project_id = _prepare(project)
+    issue = find_issue_by_external(config, project_id, f"{channel}/{topic}")
+    if not issue:
+        return 0
+    groups = state_groups(config, project_id)
+    cancelled = state_id_for_group(config, project_id, "cancelled")
+    children = sub_works(list_issues(config, project_id), str(issue["id"]), groups)
+    for child in children:
+        update_issue(config, project_id, str(child["id"]), {"state": cancelled})
+    return len(children)
+
+
+def transition_work(project: str, channel: str, topic: str, group: str) -> str:
+    """Move the topic's Work to the project's state in `group`. Returns the
+    Work's label."""
+    config, plane_project, project_id = _prepare(project)
+    issue = find_issue_by_external(config, project_id, f"{channel}/{topic}")
+    if not issue:
+        raise MissionError(f"no Work is registered for {channel}/{topic}")
+    update_issue(
+        config, project_id, str(issue["id"]),
+        {"state": state_id_for_group(config, project_id, group)},
+    )
+    return issue_label(plane_project, issue)
+
+
+def register_task_files(
+    project: str, channel: str, topic: str, coding_dir: Path, rev: int
+) -> list[str]:
+    """Register every `task[N].md` in `coding_dir` as a Sub-Work of the
+    topic's Work, keyed `<channel>/<topic>@<rev>#<N>`.
+
+    The generation marker keeps the keys clear of earlier, now-cancelled
+    generations, whose external ids live in Plane forever.
+    """
+    config, plane_project, project_id = _prepare(project)
+    issue = find_issue_by_external(config, project_id, f"{channel}/{topic}")
+    if not issue:
+        raise MissionError(f"no Work is registered for {channel}/{topic}")
+    state = starting_state_id(config, project_id)
+    tasks = task_files(coding_dir)
+    lines: list[str] = []
     for number, path in tasks:
         sub_title, sub_description = split_document(path.read_text(encoding="utf-8"))
         sub_issue, sub_created = ensure_issue(
@@ -414,11 +417,11 @@ def register_dump(directory: Path | str | None = None, *, cwd: Path | None = Non
             name=sub_title,
             description=sub_description,
             state=state,
-            external_id=f"{channel}/{topic}#{number}",
+            external_id=f"{channel}/{topic}@{rev}#{number}",
             parent=str(issue["id"]),
         )
         verb = "created sub-work" if sub_created else "already registered sub-work"
         lines.append(f'{verb} {issue_label(plane_project, sub_issue)} "{sub_title}"')
     if not tasks:
-        lines.append("no tasks/ directory content; the mission has no sub-work")
-    return "\n".join(lines)
+        lines.append("the coding run wrote no task files; the mission has no sub-work")
+    return lines
