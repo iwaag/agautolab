@@ -46,6 +46,7 @@
       "touch *": "allow",
       "date*": "allow",
       "pwd": "allow",
+      "echo*": "allow",
       "cd *": "allow",
       "which *": "allow",
       "env*": "allow",

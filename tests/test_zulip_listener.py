@@ -67,6 +67,10 @@ def test_handle_message_runs_four_workflows_in_order(monkeypatch, tmp_path):
     assert "uv run new_mission.py --help" in calls[3][1]
     assert "already running in the front workspace" in calls[3][1]
     assert "Do not ask for path clarification" in calls[3][1]
+    # The window sees the chat log as an absolute path; the dump itself stays
+    # front-relative.
+    assert str(tmp_path / ".local/topics/pj-demo-project/mission-one/1/chatlog.txt") in calls[3][1]
+    assert not calls[3][1].startswith(".local/")
     assert calls[4][1:3] == ("mission-one", "mission added")
     assert calls[4][3] == {"channel": "pj-demo-project", "client": client}
 

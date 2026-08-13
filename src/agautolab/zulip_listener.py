@@ -35,6 +35,7 @@ SUBSCRIBE_INTERVAL_SECONDS = 60
 
 __all__ = [
     "ZULIP_ENV",
+    "absolute_dump_notice",
     "accept",
     "format_chatlog",
     "handle_message",
@@ -78,11 +79,23 @@ def format_chatlog(messages: list[dict], self_id: int) -> str:
     return "\n".join(lines) + ("\n" if lines else "")
 
 
+def absolute_dump_notice(notice: str) -> str:
+    """Rewrite `topic_dump`'s front-relative path as an absolute one.
+
+    The dump stays front-relative on disk; only the sentence handed to the
+    window is absolutised. Measured on the local front profile: the relative
+    form is reconstructed against a guessed root (home, or the repository root)
+    and fails most runs, while the absolute form is opened on the first turn.
+    """
+    relative, separator, rest = notice.partition(" ")
+    return f"{FRONT_WORKSPACE / relative}{separator}{rest}"
+
+
 def window_prompt(dump_notice: str) -> str:
     return (
         f"{dump_notice}\n\n"
-        "You are already running in the front workspace. The relative chat-log path above and "
-        "`new_mission.py` exist beneath your current working directory. Use your tools directly: "
+        "You are already running in the front workspace. The chat-log path above is absolute and "
+        "`new_mission.py` exists beneath your current working directory. Use your tools directly: "
         "read the chat log, then run `uv run new_mission.py --help` to learn the interface. If "
         "you determine that the chat requests a mission, add it and report the result. Do not ask "
         "for path clarification unless you first run `pwd`, inspect both paths, and report the "
@@ -126,7 +139,7 @@ def handle_message(client: ZulipClient, message: dict, self_id: int) -> None:
         cwd=FRONT_WORKSPACE,
     )
     init_project(project)
-    reply = call_window(window_prompt(dump_notice))
+    reply = call_window(window_prompt(absolute_dump_notice(dump_notice)))
     topic_write(topic, reply, channel=channel, client=client)
 
 
