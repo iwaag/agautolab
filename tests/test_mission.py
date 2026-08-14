@@ -96,6 +96,8 @@ class FakePlane:
         self.issues: dict[str, dict] = {}
         self.creates: list[dict] = []
         self.patches: list[tuple[str, dict]] = []
+        self.labels: list[dict] = []
+        self.comments: list[tuple[str, dict]] = []
         self.next_sequence = 4
 
     def add(self, **fields) -> dict:
@@ -113,6 +115,16 @@ class FakePlane:
     def __call__(self, method, url, *, headers, body=None, timeout=30):
         if url.endswith("/states/"):
             return 200, self.STATES
+        if "/labels/" in url:
+            if method == "GET":
+                return 200, {"results": list(self.labels), "next_page_results": False}
+            label = {"id": f"label-{len(self.labels) + 1}", "name": body["name"]}
+            self.labels.append(label)
+            return 201, label
+        if "/comments/" in url:
+            issue_id = url.rstrip("/").rsplit("/", 2)[1]
+            self.comments.append((issue_id, body))
+            return 201, {"id": f"comment-{len(self.comments)}"}
         if method == "GET" and "external_id=" in url:
             external_id = url.split("external_id=")[1].split("&")[0]
             external_id = external_id.replace("%2F", "/").replace("%23", "#").replace("%40", "@")
@@ -135,6 +147,7 @@ class FakePlane:
 @pytest.fixture
 def plane(monkeypatch):
     fake = FakePlane()
+    mission._LABEL_CACHE.clear()  # the cache is process-wide; tests are not
     monkeypatch.setattr(mission, "load_plane_config", lambda: mission.PlaneConfig(
         "http://plane", "key", "workspace"))
     monkeypatch.setattr(
@@ -220,6 +233,125 @@ def test_register_task_files_reports_an_empty_split(plane, tmp_path):
 def test_register_task_files_requires_the_work(plane, tmp_path):
     with pytest.raises(mission.MissionError):
         mission.register_task_files("demo", CHANNEL, TOPIC, tmp_path, rev=1)
+
+
+def test_ensure_label_creates_once_and_is_cached(plane):
+    config = mission.PlaneConfig("http://plane", "key", "workspace")
+    label_id = mission.ensure_label(config, "p1")
+    assert plane.labels == [{"id": label_id, "name": "AUTO"}]
+    assert mission.ensure_label(config, "p1") == label_id
+    assert len(plane.labels) == 1
+
+
+def test_ensure_label_reuses_an_existing_label_case_insensitively(plane):
+    plane.labels.append({"id": "existing", "name": "auto"})
+    assert mission.ensure_label(
+        mission.PlaneConfig("http://plane", "key", "workspace"), "p1"
+    ) == "existing"
+
+
+def test_created_issues_carry_the_auto_label(plane):
+    mission.upsert_work("demo", CHANNEL, TOPIC, "Build it", "Body")
+    assert plane.creates[0]["labels"] == [plane.labels[0]["id"]]
+
+
+def test_add_comment_escapes_like_a_description(plane):
+    mission.add_comment(mission.PlaneConfig("http://plane", "key", "workspace"),
+                        "p1", "issue-1", "A & B\ndone")
+    assert plane.comments == [("issue-1", {"comment_html": "<p>A &amp; B<br>done</p>"})]
+
+
+def test_sub_work_serial_reads_the_generation_tail():
+    assert mission.sub_work_serial("pj-demo/mission-x@2#3") == 3
+    assert mission.sub_work_serial("pj-demo/mission-x") > 1000
+    assert mission.sub_work_serial(None) > 1000
+
+
+def test_eligible_works_filters_label_state_and_parents():
+    groups = {"todo": "unstarted", "doing": "started", "done": "completed"}
+    issues = [
+        {"id": "w", "labels": ["auto-id"], "state": "todo", "created_at": "1",
+         "external_id": "c/t"},                                       # has children
+        {"id": "s1", "parent": "w", "labels": ["auto-id"], "state": "todo",
+         "created_at": "2", "external_id": "c/t@1#1"},                # match
+        {"id": "s2", "parent": "w", "labels": ["auto-id"], "state": "doing",
+         "created_at": "2", "external_id": "c/t@1#2"},                # started
+        {"id": "s3", "parent": "w", "labels": [], "state": "todo",
+         "created_at": "2", "external_id": "c/t@1#3"},                # no AUTO label
+        {"id": "lone", "labels": ["auto-id"], "state": "todo", "created_at": "3",
+         "external_id": None},                                        # match, no serial
+    ]
+    assert [row["id"] for row in mission.eligible_works(issues, groups, "auto-id")] == [
+        "s1", "lone"
+    ]
+
+
+def test_eligible_works_orders_by_creation_then_serial():
+    groups = {"todo": "unstarted"}
+    rows = [
+        {"id": "b2", "labels": ["a"], "state": "todo", "created_at": "2026-01-02",
+         "external_id": "c/t@1#2"},
+        {"id": "b1", "labels": ["a"], "state": "todo", "created_at": "2026-01-02",
+         "external_id": "c/t@1#1"},
+        {"id": "plain", "labels": ["a"], "state": "todo", "created_at": "2026-01-02",
+         "external_id": "c/t"},
+        {"id": "old", "labels": ["a"], "state": "todo", "created_at": "2026-01-01",
+         "external_id": "c/u@1#9"},
+    ]
+    assert [row["id"] for row in mission.eligible_works(rows, groups, "a")] == [
+        "old", "b1", "b2", "plain"
+    ]
+
+
+def next_work_plane(monkeypatch, projects, issues_by_project, labels_by_project=None):
+    monkeypatch.setattr(mission, "load_plane_config", lambda: mission.PlaneConfig(
+        "http://plane", "key", "workspace"))
+    monkeypatch.setattr(mission, "list_plane_projects", lambda config: projects)
+    monkeypatch.setattr(
+        mission, "labels_by_name",
+        lambda config, pid: (labels_by_project or {}).get(pid, {"auto": f"{pid}-auto"}),
+    )
+    monkeypatch.setattr(mission, "list_issues", lambda config, pid: issues_by_project[pid])
+    monkeypatch.setattr(mission, "state_groups", lambda config, pid: {"todo": "unstarted"})
+
+
+def test_next_work_picks_the_oldest_across_auto_projects(monkeypatch):
+    projects = [
+        {"id": "p1", "name": "Demo One", "description": "[AUTO] autolab project: demo-one"},
+        {"id": "p2", "name": "Demo Two", "description": "[AUTO] autolab project: demo-two"},
+        {"id": "p3", "name": "ProjectA", "description": "hand made"},
+    ]
+    issues = {
+        "p1": [
+            {"id": "i1", "name": "Later", "labels": ["p1-auto"], "state": "todo",
+             "created_at": "2026-01-05", "external_id": "c/t@1#1",
+             "description_html": "<p>later</p>"},
+        ],
+        "p2": [
+            {"id": "i2", "name": "Earlier", "labels": ["p2-auto"], "state": "todo",
+             "created_at": "2026-01-02", "external_id": "c/u@1#2",
+             "description_html": "<p>do &amp; verify</p>"},
+        ],
+        "p3": [],
+    }
+    next_work_plane(monkeypatch, projects, issues)
+    assert mission.next_work() == (
+        "demo-two", "Earlier", "do & verify", "p2", "i2"
+    )
+
+
+def test_next_work_is_none_without_an_eligible_issue(monkeypatch):
+    projects = [{"id": "p1", "name": "Demo", "description": "[AUTO] autolab project: demo"}]
+    issues = {"p1": [{"id": "i1", "labels": [], "state": "todo", "created_at": "1"}]}
+    next_work_plane(monkeypatch, projects, issues)
+    assert mission.next_work() is None
+
+
+def test_next_work_skips_a_project_without_the_auto_label(monkeypatch):
+    projects = [{"id": "p1", "name": "Demo", "description": "[AUTO] autolab project: demo"}]
+    issues = {"p1": [{"id": "i1", "labels": ["x"], "state": "todo", "created_at": "1"}]}
+    next_work_plane(monkeypatch, projects, issues, labels_by_project={"p1": {}})
+    assert mission.next_work() is None
 
 
 def workspace_plane(monkeypatch, *, issue, issues, groups):

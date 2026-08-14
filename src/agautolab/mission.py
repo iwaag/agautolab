@@ -28,16 +28,22 @@ from .project_init import (
     _request_json,
     _rows,
     load_plane_config,
+    project_slug,
 )
 
 EXTERNAL_SOURCE = "agautolab"
 TITLE_LIMIT = 255
 HEADING = re.compile(r"^\s{0,3}#{1,6}\s+(?P<title>.+?)\s*#*\s*$")
 TASK_FILE = re.compile(r"^task(?P<number>\d+)\.md$")
+AUTO_LABEL = "AUTO"
+SUB_WORK_SERIAL = re.compile(r"#(?P<number>\d+)\s*$")
 
 
 class MissionError(RuntimeError):
     """One Plane mirror operation could not complete."""
+
+
+_LABEL_CACHE: dict[tuple[str, str], str] = {}
 
 
 # --- file to issue --------------------------------------------------------
@@ -84,7 +90,7 @@ def task_files(directory: Path) -> list[tuple[int, Path]]:
 # --- Plane -----------------------------------------------------------------
 
 
-def find_plane_project(config: PlaneConfig, project: str) -> dict:
+def list_plane_projects(config: PlaneConfig) -> list[dict]:
     base = (
         f"{config.url}/api/v1/workspaces/{urllib.parse.quote(config.workspace, safe='')}"
         "/projects"
@@ -93,9 +99,17 @@ def find_plane_project(config: PlaneConfig, project: str) -> dict:
     status, payload = _request_json("GET", f"{base}/?per_page=100", headers=headers)
     if status != 200:
         raise MissionError(f"Plane project list returned HTTP {status}: {payload!r}")
+    return _rows(payload)
+
+
+def find_plane_project(config: PlaneConfig, project: str) -> dict:
     wanted = _normalized_name(project)
     match = next(
-        (row for row in _rows(payload) if _normalized_name(str(row.get("name", ""))) == wanted),
+        (
+            row
+            for row in list_plane_projects(config)
+            if _normalized_name(str(row.get("name", ""))) == wanted
+        ),
         None,
     )
     if not match or not match.get("id"):
@@ -133,6 +147,64 @@ def starting_state_id(config: PlaneConfig, project_id: str) -> str:
     return str(state["id"])
 
 
+def labels_by_name(config: PlaneConfig, project_id: str) -> dict[str, str]:
+    """Lowercased label name -> label id, for one project."""
+    status, payload = _request_json(
+        "GET", f"{_project_base(config, project_id)}/labels/?per_page=100",
+        headers=_headers(config), timeout=60,
+    )
+    if status != 200:
+        raise MissionError(f"Plane label list returned HTTP {status}: {payload!r}")
+    return {
+        str(row.get("name", "")).lower(): str(row["id"]) for row in _rows(payload) if row.get("id")
+    }
+
+
+def ensure_label(config: PlaneConfig, project_id: str, name: str = AUTO_LABEL) -> str:
+    """The project's label id for `name`, creating the label on first use.
+
+    Cached per (project, name) for the process: labels are created once and
+    never renamed, and this is called for every issue autolab writes.
+    """
+    key = (project_id, name.lower())
+    if key in _LABEL_CACHE:
+        return _LABEL_CACHE[key]
+    existing = labels_by_name(config, project_id)
+    if name.lower() not in existing:
+        status, payload = _request_json(
+            "POST",
+            f"{_project_base(config, project_id)}/labels/",
+            headers=_headers(config),
+            body={"name": name},
+            timeout=60,
+        )
+        if status in {200, 201} and isinstance(payload, dict) and payload.get("id"):
+            _LABEL_CACHE[key] = str(payload["id"])
+            return _LABEL_CACHE[key]
+        if status not in {400, 409, 422}:
+            raise MissionError(f"Plane label create returned HTTP {status}: {payload!r}")
+        existing = labels_by_name(config, project_id)  # lost a race, or name taken
+    if name.lower() not in existing:
+        raise MissionError(f"Plane project has no label {name!r} and it could not be created")
+    _LABEL_CACHE[key] = existing[name.lower()]
+    return _LABEL_CACHE[key]
+
+
+def add_comment(config: PlaneConfig, project_id: str, issue_id: str, text: str) -> dict:
+    """Post one plain-text comment on an issue."""
+    status, payload = _request_json(
+        "POST",
+        f"{_project_base(config, project_id)}/issues/{urllib.parse.quote(issue_id, safe='')}"
+        "/comments/",
+        headers=_headers(config),
+        body={"comment_html": description_html(text)},
+        timeout=60,
+    )
+    if status in {200, 201} and isinstance(payload, dict):
+        return payload
+    raise MissionError(f"Plane comment create returned HTTP {status}: {payload!r}")
+
+
 def find_issue_by_external(config: PlaneConfig, project_id: str, external_id: str) -> dict | None:
     """Look one issue up by the `(external_source, external_id)` pair.
 
@@ -165,7 +237,12 @@ def ensure_issue(
     external_id: str,
     parent: str | None = None,
 ) -> tuple[dict, bool]:
-    """Return `(issue, created)` for one external key, creating at most one."""
+    """Return `(issue, created)` for one external key, creating at most one.
+
+    Every issue autolab creates — the mission Work and its Sub-Works alike —
+    carries the `AUTO` label, which is what makes it eligible for automatic
+    execution later (`next_work`).
+    """
     if not name.strip():
         raise MissionError("issue title must not be empty")
     existing = find_issue_by_external(config, project_id, external_id)
@@ -177,6 +254,7 @@ def ensure_issue(
         "state": state,
         "external_source": EXTERNAL_SOURCE,
         "external_id": external_id,
+        "labels": [ensure_label(config, project_id)],
     }
     if parent:
         body["parent"] = parent
@@ -297,6 +375,89 @@ def write_mission_workspace(directory: Path, project: str, channel: str, topic: 
             encoding="utf-8",
         )
     return True
+
+
+# --- choosing the next work to execute -------------------------------------
+
+
+def sub_work_serial(external_id: str | None) -> int:
+    """The `#<N>` tail of a Sub-Work external id.
+
+    Works and hand-made issues have no serial; they sort last within the same
+    creation timestamp, which is all this number is used for.
+    """
+    match = SUB_WORK_SERIAL.search(str(external_id or ""))
+    return int(match.group("number")) if match else 1 << 30
+
+
+def eligible_works(issues: list[dict], groups: dict[str, str], label_id: str) -> list[dict]:
+    """Issues that may be executed automatically, in execution order.
+
+    Eligible means: carries the `AUTO` label, sits in an `unstarted` state,
+    and has no sub-work at all — a parent is executed through its children,
+    so running it too would do the work twice. Order is creation time first,
+    then the Sub-Work serial number.
+    """
+    parents = {str(row.get("parent") or "") for row in issues} - {""}
+    matches = [
+        row
+        for row in issues
+        if label_id in {str(value) for value in (row.get("labels") or [])}
+        and groups.get(str(row.get("state") or "")) == "unstarted"
+        and str(row.get("id")) not in parents
+    ]
+    matches.sort(key=lambda row: (str(row.get("created_at") or ""),
+                                  sub_work_serial(row.get("external_id")),
+                                  str(row.get("id"))))
+    return matches
+
+
+def next_work() -> tuple[str, str, str, str, str] | None:
+    """The next Work to execute, as
+    `(project_slug, work_name, description, project_id, issue_id)`.
+
+    Scans every `[AUTO]` project in the workspace (see
+    `project_init.project_slug`) and returns the first eligible issue across
+    all of them, ordered as `eligible_works` orders them. `None` when nothing
+    is eligible.
+    """
+    try:
+        config = load_plane_config()
+    except ProjectInitError as error:
+        raise MissionError(str(error)) from error
+    candidates: list[tuple[tuple, str, str, dict]] = []
+    for row in list_plane_projects(config):
+        slug = project_slug(row)
+        if not slug or not row.get("id"):
+            continue
+        project_id = str(row["id"])
+        labels = labels_by_name(config, project_id)
+        label_id = labels.get(AUTO_LABEL.lower())
+        if not label_id:
+            continue  # no AUTO label in this project means no automatic work
+        issues = list_issues(config, project_id)
+        groups = state_groups(config, project_id)
+        for issue in eligible_works(issues, groups, label_id):
+            candidates.append(
+                (
+                    (str(issue.get("created_at") or ""),
+                     sub_work_serial(issue.get("external_id")),
+                     str(issue.get("id"))),
+                    slug,
+                    project_id,
+                    issue,
+                )
+            )
+    if not candidates:
+        return None
+    _, slug, project_id, issue = min(candidates, key=lambda item: item[0])
+    return (
+        slug,
+        str(issue.get("name", "")),
+        html_to_text(issue.get("description_html")),
+        project_id,
+        str(issue["id"]),
+    )
 
 
 def issue_label(plane_project: dict, issue: dict) -> str:
