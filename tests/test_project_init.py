@@ -62,15 +62,64 @@ def test_init_project_runs_every_idempotent_step_in_order(monkeypatch, tmp_path)
         "ensure_clone",
         lambda config, repo, path: calls.append(("clone", repo, path.relative_to(tmp_path))),
     )
+    monkeypatch.setattr(
+        project_init,
+        "ensure_gitignore",
+        lambda config, path: calls.append(("gitignore", path.relative_to(tmp_path))),
+    )
 
     assert project_init.init_project("demo-project") == "success"
     assert calls == [
         ("plane", "demo-project"),
         ("repo", "demo-project"),
-        ("repo", "demo-project-direction"),
         ("clone", "demo-project", Path("demo-project/main")),
+        ("gitignore", Path("demo-project/main")),
+        ("repo", "demo-project-direction"),
         ("clone", "demo-project-direction", Path("demo-project/direction")),
+        ("gitignore", Path("demo-project/direction")),
+        ("repo", "demo-project-devlog"),
+        ("clone", "demo-project-devlog", Path("demo-project/devlog")),
+        ("gitignore", Path("demo-project/devlog")),
     ]
+
+
+def test_ensure_gitignore_seeds_commits_and_is_idempotent(monkeypatch, tmp_path):
+    commands = []
+    monkeypatch.setattr(
+        project_init, "_git", lambda config, *args, cwd=None: commands.append(args) or ""
+    )
+    gitea = project_init.GiteaConfig("http://gitea", "token", "autodev")
+
+    assert project_init.ensure_gitignore(gitea, tmp_path) is True
+    assert (tmp_path / ".gitignore").read_text(encoding="utf-8") == ".local/\n"
+    assert [args[0] for args in commands] == ["add", "-c", "push"]
+    assert commands[-1] == ("push", "origin", "HEAD:main")
+
+    commands.clear()
+    assert project_init.ensure_gitignore(gitea, tmp_path) is False
+    assert commands == []
+
+
+def test_ensure_gitignore_appends_to_an_existing_file(monkeypatch, tmp_path):
+    monkeypatch.setattr(project_init, "_git", lambda config, *args, cwd=None: "")
+    (tmp_path / ".gitignore").write_text("dist/\n", encoding="utf-8")
+
+    assert project_init.ensure_gitignore(
+        project_init.GiteaConfig("http://gitea", "token", "autodev"), tmp_path
+    ) is True
+    assert (tmp_path / ".gitignore").read_text(encoding="utf-8") == "dist/\n.local/\n"
+
+
+def test_auto_description_carries_marker_and_slug():
+    assert project_init.auto_description("whack-a-mole") == "[AUTO] autolab project: whack-a-mole"
+    assert project_init.project_slug({"description": "[AUTO] autolab project: whack-a-mole"}) == (
+        "whack-a-mole"
+    )
+    # Case-insensitive marker, and the prettified name as the fallback source.
+    assert project_init.project_slug(
+        {"description": "[auto]", "name": "Whack A Mole"}
+    ) == "whack-a-mole"
+    assert project_init.project_slug({"description": "hand made", "name": "ProjectA"}) is None
 
 
 @pytest.mark.parametrize("name", ["x", "Bad Name", "../escape", "-leading"])

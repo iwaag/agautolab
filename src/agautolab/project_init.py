@@ -21,6 +21,12 @@ GITEA_TOKEN = PROJECT_ROOT / ".local" / "gitea" / "autolab-agent.token"
 GITEA_ASKPASS = PROJECT_ROOT / ".local" / "gitea" / "askpass.sh"
 PROJECTS_ROOT = PROJECT_ROOT / ".local" / "projects"
 
+AUTO_MARKER = "[AUTO]"
+AUTO_DESCRIPTION_PREFIX = f"{AUTO_MARKER} autolab project: "
+IGNORE_LINE = ".local/"
+GIT_AUTHOR_NAME = "autolab-agent"
+GIT_AUTHOR_EMAIL = "autolab-agent@agautolab.invalid"
+
 
 class ProjectInitError(RuntimeError):
     """One project initialization step failed."""
@@ -89,6 +95,33 @@ def plane_identifier(project: str) -> str:
 def plane_project_name(project: str) -> str:
     """Plane rejects hyphens in names; keep its display form deterministic."""
     return " ".join(part.capitalize() for part in project.split("-"))
+
+
+def auto_description(project: str) -> str:
+    """The description of an autolab-created Plane project.
+
+    It carries two things: the `[AUTO]` marker that makes the project eligible
+    for automatic work execution, and the local slug — Plane stores a
+    prettified display name, but the workspace lives at
+    `PROJECTS_ROOT / <slug> / main`, so the slug has to travel somewhere.
+    """
+    return f"{AUTO_DESCRIPTION_PREFIX}{project}"
+
+
+def project_slug(row: dict) -> str | None:
+    """Recover the local slug of an `[AUTO]` Plane project, or None.
+
+    The description is the primary source; when it carries only the marker
+    (hand-edited, older convention), the prettified name is normalized back —
+    a lossy fallback, correct for every name `plane_project_name` produces.
+    """
+    description = str(row.get("description") or "").strip()
+    if not description.upper().startswith(AUTO_MARKER):
+        return None
+    remainder = description[len(AUTO_MARKER):].strip()
+    _, _, tail = remainder.partition(":")
+    slug = _normalized_name(tail if tail.strip() else str(row.get("name", "")))
+    return slug or None
 
 
 def _normalized_name(value: str) -> str:
@@ -162,7 +195,7 @@ def ensure_plane_project(config: PlaneConfig, project: str) -> dict:
             body={
                 "name": plane_project_name(project),
                 "identifier": identifier,
-                "description": "",
+                "description": auto_description(project),
             },
             timeout=60,
         )
@@ -209,26 +242,75 @@ def ensure_gitea_repo(config: GiteaConfig, name: str) -> dict:
     raise ProjectInitError(f"Gitea repository create returned HTTP {status}: {payload!r}")
 
 
-def ensure_clone(config: GiteaConfig, repo: str, destination: Path) -> None:
-    if destination.exists():
-        return
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    clone_url = f"{config.url}/{urllib.parse.quote(config.org, safe='')}/{urllib.parse.quote(repo, safe='')}.git"
-    environment = {
+def _git_environment(config: GiteaConfig) -> dict[str, str]:
+    return {
         **os.environ,
         "GIT_ASKPASS": str(GITEA_ASKPASS),
         "GIT_TERMINAL_PROMPT": "0",
         "AUTOLAB_GITEA_TOKEN_VALUE": config.token,
     }
+
+
+def _git(config: GiteaConfig, *arguments: str, cwd: Path | None = None) -> str:
     try:
-        subprocess.run(
-            ["git", "clone", clone_url, str(destination)],
+        completed = subprocess.run(
+            ["git", *arguments],
             check=True,
-            env=environment,
+            cwd=str(cwd) if cwd else None,
+            env=_git_environment(config),
             text=True,
+            capture_output=True,
         )
-    except (OSError, subprocess.CalledProcessError) as error:
-        raise ProjectInitError(f"git clone failed for {config.org}/{repo}: {error}") from error
+    except OSError as error:
+        raise ProjectInitError(f"git {arguments[0]} failed: {error}") from error
+    except subprocess.CalledProcessError as error:
+        detail = (error.stderr or error.stdout or "").strip()[:300]
+        raise ProjectInitError(f"git {arguments[0]} failed: {detail}") from error
+    return completed.stdout
+
+
+def ensure_clone(config: GiteaConfig, repo: str, destination: Path) -> None:
+    if destination.exists():
+        return
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    clone_url = f"{config.url}/{urllib.parse.quote(config.org, safe='')}/{urllib.parse.quote(repo, safe='')}.git"
+    _git(config, "clone", clone_url, str(destination))
+
+
+def ensure_gitignore(config: GiteaConfig, workspace: Path) -> bool:
+    """Make sure the clone's `.gitignore` ignores `.local/`, and push it.
+
+    Returns whether a commit was made. Idempotent: a workspace whose
+    `.gitignore` already has the line is left alone, so a second
+    `init_project` adds no second commit. Side benefit: in an otherwise empty
+    repository this first commit is what establishes `main`.
+    """
+    path = workspace / ".gitignore"
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines() if path.is_file() else []
+    except OSError as error:
+        raise ProjectInitError(f"cannot read {path}: {error}") from error
+    if IGNORE_LINE in (line.strip() for line in lines):
+        return False
+    text = "\n".join([*lines, IGNORE_LINE]) + "\n"
+    try:
+        path.write_text(text, encoding="utf-8")
+    except OSError as error:
+        raise ProjectInitError(f"cannot write {path}: {error}") from error
+    _git(config, "add", ".gitignore", cwd=workspace)
+    _git(
+        config,
+        "-c",
+        f"user.name={GIT_AUTHOR_NAME}",
+        "-c",
+        f"user.email={GIT_AUTHOR_EMAIL}",
+        "commit",
+        "-m",
+        f"Ignore {IGNORE_LINE}",
+        cwd=workspace,
+    )
+    _git(config, "push", "origin", "HEAD:main", cwd=workspace)
+    return True
 
 
 def init_project(project: str) -> str:
@@ -240,9 +322,14 @@ def init_project(project: str) -> str:
     plane = load_plane_config()
     gitea = load_gitea_config()
     ensure_plane_project(plane, project)
-    ensure_gitea_repo(gitea, project)
-    ensure_gitea_repo(gitea, f"{project}-direction")
     project_root = PROJECTS_ROOT / project
-    ensure_clone(gitea, project, project_root / "main")
-    ensure_clone(gitea, f"{project}-direction", project_root / "direction")
+    for repo, directory in (
+        (project, "main"),
+        (f"{project}-direction", "direction"),
+        (f"{project}-devlog", "devlog"),
+    ):
+        ensure_gitea_repo(gitea, repo)
+        workspace = project_root / directory
+        ensure_clone(gitea, repo, workspace)
+        ensure_gitignore(gitea, workspace)
     return "success"
