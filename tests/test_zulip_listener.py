@@ -365,6 +365,144 @@ def test_next_record_path_numbers_like_the_gateway(tmp_path):
     assert zulip_listener.next_record_path(tmp_path).name == "run-0002.json"
 
 
+RUN_TOPIC = "run-1"
+
+
+def wire_run(monkeypatch, tmp_path, calls, *, chosen, report=None, success=False,
+             output="work done"):
+    monkeypatch.setattr(zulip_listener, "PROJECTS_ROOT", tmp_path / "projects")
+    monkeypatch.setattr(zulip_listener, "next_work", lambda: chosen)
+    monkeypatch.setattr(
+        zulip_listener,
+        "topic_write",
+        lambda topic, text, **kwargs: calls.append(("write", topic, text)) or "success",
+    )
+
+    def work_run(workspace):
+        calls.append(("run", workspace))
+        work = workspace / ".local" / "work"
+        if report is not None:
+            (work / "report.md").write_text(report)
+        if success:
+            (work / "success.flag").touch()
+        return output
+
+    monkeypatch.setattr(zulip_listener, "run_work", work_run)
+    monkeypatch.setattr(
+        zulip_listener,
+        "report_work",
+        lambda project_id, issue_id, text, ok: (
+            calls.append(("report", project_id, issue_id, text, ok)) or ("PD-7", bool(text), ok)
+        ),
+    )
+
+
+CHOSEN = ("demo-project", "Add the README", "Write it.", "p1", "i1")
+
+
+def test_handle_run_executes_comments_completes_and_cleans_up(monkeypatch, tmp_path):
+    calls = []
+    wire_run(monkeypatch, tmp_path, calls, chosen=CHOSEN, report="all good", success=True)
+
+    zulip_listener.handle_run(Client(calls), "general", RUN_TOPIC)
+
+    workspace = tmp_path / "projects" / "demo-project" / "main"
+    assert [call[0] for call in calls] == ["write", "run", "report", "write"]
+    assert calls[0][2] == zulip_listener.ACK_TEXT
+    assert calls[1][1] == workspace
+    assert calls[2][1:] == ("p1", "i1", "all good", True)
+    outcome = calls[-1][2]
+    assert 'running "Add the README" in demo-project' in outcome
+    assert "work done" in outcome
+    assert "work PD-7: commented yes, Done yes" in outcome
+    # `.local/work/` is gone; the workspace itself stays.
+    assert not (workspace / ".local" / "work").exists()
+    assert workspace.is_dir()
+
+
+def test_handle_run_writes_the_work_file_before_running(monkeypatch, tmp_path):
+    calls = []
+    seen = {}
+    wire_run(monkeypatch, tmp_path, calls, chosen=CHOSEN)
+    real_run = zulip_listener.run_work
+
+    def capture(workspace):
+        seen["work.md"] = (workspace / ".local" / "work" / "work.md").read_text()
+        return real_run(workspace)
+
+    monkeypatch.setattr(zulip_listener, "run_work", capture)
+    zulip_listener.handle_run(Client(calls), "general", RUN_TOPIC)
+    assert seen["work.md"] == "# Add the README\n\nWrite it.\n"
+
+
+def test_handle_run_without_eligible_work_posts_no_work(monkeypatch, tmp_path):
+    calls = []
+    wire_run(monkeypatch, tmp_path, calls, chosen=None)
+    zulip_listener.handle_run(Client(calls), "general", RUN_TOPIC)
+    assert [call[2] for call in calls] == [zulip_listener.ACK_TEXT, "no work"]
+
+
+def test_handle_run_refuses_a_dirty_workspace_and_keeps_it(monkeypatch, tmp_path):
+    calls = []
+    wire_run(monkeypatch, tmp_path, calls, chosen=CHOSEN)
+    leftover = tmp_path / "projects" / "demo-project" / "main" / ".local" / "work"
+    leftover.mkdir(parents=True)
+    (leftover / "work.md").write_text("from a crashed run")
+
+    zulip_listener.handle_run(Client(calls), "general", RUN_TOPIC)
+
+    assert not any(call[0] == "run" for call in calls)
+    assert "work dirty" in calls[-1][2]
+    assert (leftover / "work.md").exists()  # manual cleanup is the recovery
+
+
+def test_handle_run_without_a_report_says_so_and_leaves_the_work_open(monkeypatch, tmp_path):
+    calls = []
+    wire_run(monkeypatch, tmp_path, calls, chosen=CHOSEN)
+    zulip_listener.handle_run(Client(calls), "general", RUN_TOPIC)
+    assert calls[2][1:] == ("p1", "i1", None, False)
+    assert "no report" in calls[-1][2]
+    assert "work PD-7: commented no, Done no" in calls[-1][2]
+
+
+def test_handle_run_reports_a_failure_and_still_cleans_up(monkeypatch, tmp_path):
+    calls = []
+    wire_run(monkeypatch, tmp_path, calls, chosen=CHOSEN)
+
+    def explode(workspace):
+        calls.append(("run", workspace))
+        raise zulip_listener.ListenerError("claude_code timed out")
+
+    monkeypatch.setattr(zulip_listener, "run_work", explode)
+    zulip_listener.handle_run(Client(calls), "general", RUN_TOPIC)
+
+    assert "failed during work run: claude_code timed out" in calls[-1][2]
+    assert not (tmp_path / "projects" / "demo-project" / "main" / ".local" / "work").exists()
+
+
+def test_dispatch_routes_run_topics_anywhere_and_mission_topics_only_in_projects(monkeypatch):
+    routed = []
+    monkeypatch.setattr(
+        zulip_listener, "handle_run",
+        lambda client, channel, topic: routed.append(("run", channel, topic)),
+    )
+    monkeypatch.setattr(
+        zulip_listener, "handle_topic",
+        lambda client, channel, topic: routed.append(("mission", channel, topic)),
+    )
+
+    zulip_listener.dispatch(None, "general", "run-1")
+    zulip_listener.dispatch(None, CHANNEL, "run-2")
+    zulip_listener.dispatch(None, CHANNEL, TOPIC)
+    zulip_listener.dispatch(None, "general", "mission-stray")  # silently ignored
+
+    assert routed == [
+        ("run", "general", "run-1"),
+        ("run", CHANNEL, "run-2"),
+        ("mission", CHANNEL, TOPIC),
+    ]
+
+
 def test_subscribe_project_channels_puts_every_active_user_in_pj_channels():
     calls = []
 
@@ -384,15 +522,16 @@ def test_subscribe_project_channels_puts_every_active_user_in_pj_channels():
             ]
 
         def channel_subscribers(self, stream_id):
-            return {2: [7, 8], 3: [7]}[stream_id]
+            return {1: [7], 2: [7, 8], 3: [7]}[stream_id]
 
         def subscribe_channels(self, names, principals=None):
             calls.append((names, principals))
 
-    # `general` is left alone, `pj-one` is already complete, and the
-    # deactivated user is never subscribed anywhere.
-    assert zulip_listener.subscribe_project_channels(Client()) == ["pj-two"]
-    assert calls == [(["pj-two"], [8])]
+    # `general` is reconciled like a project channel (that is what makes
+    # `run-` topics visible to the sweep), `pj-one` is already complete, and
+    # the deactivated user is never subscribed anywhere.
+    assert zulip_listener.subscribe_project_channels(Client()) == ["general", "pj-two"]
+    assert calls == [(["general"], [8]), (["pj-two"], [8])]
 
 
 @pytest.mark.parametrize("channel", ["general", "pj-x", "pj-Bad_Name"])

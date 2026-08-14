@@ -468,6 +468,38 @@ def issue_label(plane_project: dict, issue: dict) -> str:
     return str(issue.get("id", "?"))
 
 
+def report_work(
+    project_id: str, issue_id: str, report: str | None, success: bool
+) -> tuple[str, bool, bool]:
+    """Write one executed Work's outcome back to Plane.
+
+    Comments `report` on the issue when there is one, and moves the issue to
+    the project's `completed` state when the run reported success. Returns
+    `(work label, commented, completed)` for the chat outcome line.
+    """
+    try:
+        config = load_plane_config()
+    except ProjectInitError as error:
+        raise MissionError(str(error)) from error
+    project_row = next(
+        (row for row in list_plane_projects(config) if str(row.get("id")) == project_id), {}
+    )
+    issue = next(
+        (row for row in list_issues(config, project_id) if str(row.get("id")) == issue_id),
+        {"id": issue_id},
+    )
+    label = issue_label(project_row, issue)
+    commented = bool(report and report.strip())
+    if commented:
+        add_comment(config, project_id, issue_id, report.strip())
+    if success:
+        update_issue(
+            config, project_id, issue_id,
+            {"state": state_id_for_group(config, project_id, "completed")},
+        )
+    return label, commented, success
+
+
 # --- writing the front's decisions back to Plane ---------------------------
 
 
