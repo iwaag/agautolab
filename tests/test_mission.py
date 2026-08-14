@@ -2,6 +2,8 @@ from pathlib import Path
 
 import pytest
 
+from agag import plane as shared_plane
+
 from agautolab import mission
 
 
@@ -76,7 +78,7 @@ def test_sub_works_filters_cancelled_and_sorts_by_sequence():
     ],
 )
 def test_starting_state_uses_live_vocabulary(monkeypatch, states, expected):
-    monkeypatch.setattr(mission, "_request_json", lambda *a, **k: (200, states))
+    monkeypatch.setattr(shared_plane, "_request_json", lambda *a, **k: (200, states))
     assert mission.starting_state_id(
         mission.PlaneConfig("http://plane", "key", "workspace"), "project-id"
     ) == expected
@@ -153,7 +155,7 @@ def plane(monkeypatch):
     monkeypatch.setattr(
         mission, "find_plane_project", lambda config, name: {"id": "p1", "identifier": "PD"}
     )
-    monkeypatch.setattr(mission, "_request_json", fake)
+    monkeypatch.setattr(shared_plane, "_request_json", fake)
     return fake
 
 

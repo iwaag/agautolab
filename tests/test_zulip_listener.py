@@ -2,6 +2,9 @@ from pathlib import Path
 
 import pytest
 
+from agag import topics
+from agag.topics import GuideError
+
 from agautolab import zulip_listener
 
 
@@ -61,10 +64,14 @@ def wire(monkeypatch, tmp_path, calls, *, plane_files=False, front="front says h
         lambda prompt, cwd: calls.append(("front", prompt, cwd)) or front,
     )
     monkeypatch.setattr(
-        zulip_listener,
+        topics,
         "topic_write",
         lambda topic, text, **kwargs: calls.append(("write", topic, text, kwargs)) or "success",
     )
+    guides = tmp_path / "guides"
+    (guides / "mission_front").mkdir(parents=True)
+    (guides / "mission_front" / "guide_mission_topic.md").write_text("GUIDE TEXT")
+    monkeypatch.setattr(zulip_listener, "GUIDES", guides)
 
 
 def wire_response(monkeypatch, calls, *, coding="split done", cancelled=0):
@@ -100,8 +107,13 @@ def wire_response(monkeypatch, calls, *, coding="split done", cancelled=0):
     )
 
 
-def front_dir(tmp_path):
-    return tmp_path / "topics" / CHANNEL / TOPIC / "front"
+def front_dir(tmp_path, number=1):
+    """Each serving works in a fresh generation `<N>/`, not one stable dir."""
+    return tmp_path / "topics" / CHANNEL / TOPIC / str(number) / "front"
+
+
+def coding_dir(tmp_path, number=1):
+    return tmp_path / "topics" / CHANNEL / TOPIC / str(number) / "coding"
 
 
 def test_handle_topic_acks_then_runs_the_steps_in_order(monkeypatch, tmp_path):
@@ -119,14 +131,28 @@ def test_handle_topic_acks_then_runs_the_steps_in_order(monkeypatch, tmp_path):
     # The ack is the first post, before any work: it makes the bot the last
     # poster so a later sweep skips the topic while this run is in flight.
     assert calls[1][1:3] == (TOPIC, zulip_listener.ACK_TEXT)
-    assert calls[1][3] == {"channel": CHANNEL, "client": client}
-    # The chatlog lands in the stable topic workspace.
+    # The chatlog lands in this generation's front workspace.
     assert (front_dir(tmp_path) / "chatlog.md").read_text() == "[Developer] Build it\n"
     assert calls[4][1] == front_dir(tmp_path)
-    # The front runs in the topic workspace with the chatlog-only prompt.
     assert calls[5][2] == front_dir(tmp_path)
     assert "mission and tasks" not in calls[5][1]
     assert calls[6][1:3] == (TOPIC, "front says hi")
+
+
+def test_each_serving_cuts_a_new_generation(monkeypatch, tmp_path):
+    """Before this, one stable `front/` was reused forever, so a continued
+    conversation ran on top of the previous run's leftovers."""
+    calls = []
+    wire(monkeypatch, tmp_path, calls)
+
+    zulip_listener.handle_topic(Client(calls), CHANNEL, TOPIC)
+    zulip_listener.handle_topic(Client(calls), CHANNEL, TOPIC)
+
+    assert front_dir(tmp_path, 1).is_dir()
+    assert front_dir(tmp_path, 2).is_dir()
+    assert [call[2] for call in calls if call[0] == "front"] == [
+        front_dir(tmp_path, 1), front_dir(tmp_path, 2),
+    ]
 
 
 def test_handle_topic_mentions_plane_files_when_they_were_written(monkeypatch, tmp_path):
@@ -137,6 +163,7 @@ def test_handle_topic_mentions_plane_files_when_they_were_written(monkeypatch, t
 
     prompt = next(call[1] for call in calls if call[0] == "front")
     assert "The current mission and tasks are also placed in the working directory." in prompt
+    assert prompt.endswith("GUIDE TEXT")
 
 
 def test_handle_topic_marks_the_bots_own_lines_in_the_chatlog(monkeypatch, tmp_path):
@@ -178,34 +205,39 @@ def test_handle_topic_reports_a_channel_that_is_not_a_project(monkeypatch, tmp_p
     zulip_listener.handle_topic(Client(calls), "another-channel", TOPIC)
     # The ack still goes out; the failure is reported in the reply.
     assert [call[0] for call in calls if call[0] == "write"][0:2] == ["write", "write"]
-    assert "failed during reading the topic" in calls[-1][2]
+    assert "failed during chatlog" in calls[-1][2]
+
+
+def test_an_empty_topic_costs_no_agent_run(monkeypatch, tmp_path):
+    calls = []
+    wire(monkeypatch, tmp_path, calls)
+    zulip_listener.handle_topic(Client(calls, history=[]), CHANNEL, TOPIC)
+    assert not any(call[0] == "front" for call in calls)
+    assert calls[-1][2] == zulip_listener.EMPTY_REPLY
 
 
 def test_new_mission_updates_plane_and_reruns_the_split(monkeypatch, tmp_path):
     calls = []
+    monkeypatch.setattr(zulip_listener, "TOPICS_ROOT", tmp_path / "topics")
     wire_response(monkeypatch, calls, cancelled=2)
-    front = tmp_path / "front"
+    front = front_dir(tmp_path)
     front.mkdir(parents=True)
     (front / "new_mission.md").write_text("# Build it\n\nThe body.")
-    coding = tmp_path / "coding"
-    coding.mkdir()
-    (coding / "task1.md").write_text("# stale split from an earlier generation")
 
     sections, resolve_after = zulip_listener.handle_front_response(
-        CHANNEL, TOPIC, "demo-project", front
+        CHANNEL, TOPIC, "demo-project", front, 1
     )
 
     assert [call[0] for call in calls] == ["upsert", "cancel-subs", "coding", "register"]
     assert calls[0][4:6] == ("Build it", "The body.")
-    assert calls[2][1] == coding
-    # The mission text travels into coding/, the stale split does not survive.
-    assert (coding / "new_mission.md").read_text() == "# Build it\n\nThe body."
-    assert not (coding / "task1.md").exists()
-    # First generation; the counter persists beside front/ and coding/.
+    assert calls[2][1] == coding_dir(tmp_path)
+    # The mission text travels into this generation's coding/.
+    assert (coding_dir(tmp_path) / "new_mission.md").read_text() == "# Build it\n\nThe body."
+    # The Sub-Work generation key is the generation number itself.
     assert calls[3][2] == 1
-    assert (tmp_path / "generation").read_text() == "1\n"
-    # The command file is consumed so a later run does not replay it.
-    assert not (front / "new_mission.md").exists()
+    # Nothing is deleted: the generation number is the guard, and the command
+    # file stays as evidence of what that run was told.
+    assert (front / "new_mission.md").exists()
     assert sections == [
         'updated PD-4 "Build it"',
         "cancelled 2 existing sub-work(s)",
@@ -215,43 +247,51 @@ def test_new_mission_updates_plane_and_reruns_the_split(monkeypatch, tmp_path):
     assert resolve_after is False
 
 
-def test_generation_counter_increments_per_accepted_mission(tmp_path):
-    assert zulip_listener.generation(tmp_path) == 1
-    assert zulip_listener.generation(tmp_path) == 2
-    assert zulip_listener.generation(tmp_path) == 3
+def test_the_sub_work_key_follows_the_generation(monkeypatch, tmp_path):
+    """A later generation's split must not collide with a cancelled one's
+    keys, which live in Plane forever."""
+    calls = []
+    monkeypatch.setattr(zulip_listener, "TOPICS_ROOT", tmp_path / "topics")
+    wire_response(monkeypatch, calls)
+    for number in (1, 4):
+        front = front_dir(tmp_path, number)
+        front.mkdir(parents=True)
+        (front / "new_mission.md").write_text("# Build it\n\nThe body.")
+        zulip_listener.handle_front_response(CHANNEL, TOPIC, "demo-project", front, number)
+    assert [call[2] for call in calls if call[0] == "register"] == [1, 4]
 
 
 def test_start_flag_moves_the_work_to_in_progress(monkeypatch, tmp_path):
     calls = []
+    monkeypatch.setattr(zulip_listener, "TOPICS_ROOT", tmp_path / "topics")
     wire_response(monkeypatch, calls)
-    front = tmp_path / "front"
+    front = front_dir(tmp_path)
     front.mkdir(parents=True)
     (front / "start.flag").touch()
 
     sections, resolve_after = zulip_listener.handle_front_response(
-        CHANNEL, TOPIC, "demo-project", front
+        CHANNEL, TOPIC, "demo-project", front, 1
     )
 
     assert calls == [("transition", "started")]
     assert sections == ["mission PD-4 is now In Progress"]
-    assert not (front / "start.flag").exists()
     assert resolve_after is False
 
 
 def test_cancel_flag_cancels_everything_and_requests_resolution(monkeypatch, tmp_path):
     calls = []
+    monkeypatch.setattr(zulip_listener, "TOPICS_ROOT", tmp_path / "topics")
     wire_response(monkeypatch, calls, cancelled=3)
-    front = tmp_path / "front"
+    front = front_dir(tmp_path)
     front.mkdir(parents=True)
     (front / "cancel.flag").touch()
 
     sections, resolve_after = zulip_listener.handle_front_response(
-        CHANNEL, TOPIC, "demo-project", front
+        CHANNEL, TOPIC, "demo-project", front, 1
     )
 
     assert calls == [("cancel-subs",), ("transition", "cancelled")]
     assert sections == ["mission PD-4 is cancelled along with 3 sub-work(s); resolving this topic"]
-    assert not (front / "cancel.flag").exists()
     assert resolve_after is True
 
 
@@ -263,7 +303,7 @@ def test_handle_topic_resolves_the_topic_after_the_final_reply(monkeypatch, tmp_
     monkeypatch.setattr(
         zulip_listener,
         "run_front",
-        lambda prompt, cwd: (front_dir(tmp_path) / "cancel.flag").touch() or "cancelling",
+        lambda prompt, cwd: (cwd / "cancel.flag").touch() or "cancelling",
     )
 
     zulip_listener.handle_topic(client, CHANNEL, TOPIC)
@@ -285,7 +325,7 @@ def test_handle_topic_reports_a_response_handling_failure(monkeypatch, tmp_path)
     monkeypatch.setattr(
         zulip_listener,
         "run_front",
-        lambda prompt, cwd: (front_dir(tmp_path) / "start.flag").touch() or "starting",
+        lambda prompt, cwd: (cwd / "start.flag").touch() or "starting",
     )
 
     zulip_listener.handle_topic(Client(calls), CHANNEL, TOPIC)
@@ -317,23 +357,21 @@ def test_handle_topic_reprocesses_when_a_human_posted_during_the_run(monkeypatch
     assert [call[0] for call in calls].count("front") == 2
     acks = [call for call in calls if call[0] == "write" and call[2] == zulip_listener.ACK_TEXT]
     assert len(acks) == 2
-    # The second round's chatlog carries the mid-run post.
-    assert (front_dir(tmp_path) / "chatlog.md").read_text().endswith("one more thing\n")
+    # The second round is its own generation, with the fuller chatlog.
+    assert (front_dir(tmp_path, 2) / "chatlog.md").read_text().endswith("one more thing\n")
 
 
-def test_front_prompt_is_the_placement_lines_plus_the_guide(monkeypatch, tmp_path):
+def test_front_prompt_carries_autolabs_own_extra_line(monkeypatch, tmp_path):
     guide_dir = tmp_path / "mission_front"
     guide_dir.mkdir(parents=True)
     (guide_dir / "guide_mission_topic.md").write_text("GUIDE TEXT\n")
     monkeypatch.setattr(zulip_listener, "GUIDES", tmp_path)
 
-    prompt = zulip_listener.front_prompt("Autolab", plane_files=False)
-    assert prompt == (
+    assert zulip_listener.front_prompt("Autolab", plane_files=False) == (
         "The chatlog is placed in the working directory. "
         "You are 'Autolab' in the chatlog.\n\nGUIDE TEXT"
     )
-    with_plane = zulip_listener.front_prompt("Autolab", plane_files=True)
-    assert with_plane == (
+    assert zulip_listener.front_prompt("Autolab", plane_files=True) == (
         "The chatlog is placed in the working directory. "
         "You are 'Autolab' in the chatlog.\n"
         "The current mission and tasks are also placed in the working directory."
@@ -341,28 +379,10 @@ def test_front_prompt_is_the_placement_lines_plus_the_guide(monkeypatch, tmp_pat
     )
 
 
-def test_topic_workspace_is_stable_and_rejects_traversal(monkeypatch, tmp_path):
-    monkeypatch.setattr(zulip_listener, "TOPICS_ROOT", tmp_path)
-    first = zulip_listener.topic_workspace(CHANNEL, TOPIC)
-    assert first == tmp_path / CHANNEL / TOPIC
-    assert zulip_listener.topic_workspace(CHANNEL, TOPIC) == first  # reused, no <N>
-    for bad in ("../outside", "a/b", ""):
-        with pytest.raises(ValueError):
-            zulip_listener.topic_workspace(bad, TOPIC)
-        with pytest.raises(ValueError):
-            zulip_listener.topic_workspace(CHANNEL, bad)
-
-
 def test_guide_refuses_to_start_without_the_file(monkeypatch, tmp_path):
     monkeypatch.setattr(zulip_listener, "GUIDES", tmp_path)
-    with pytest.raises(zulip_listener.ListenerError):
+    with pytest.raises(GuideError):
         zulip_listener.guide("mission_front", "guide_mission_topic.md")
-
-
-def test_next_record_path_numbers_like_the_gateway(tmp_path):
-    assert zulip_listener.next_record_path(tmp_path).name == "run-0001.json"
-    (tmp_path / "run-0001.json").write_text("{}")
-    assert zulip_listener.next_record_path(tmp_path).name == "run-0002.json"
 
 
 RUN_TOPIC = "run-1"

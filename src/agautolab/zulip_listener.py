@@ -1,11 +1,16 @@
 """Pull mission topics from Zulip into topic workspaces and the front agent.
 
-Phase 3 shape: `agag.zulip.sweep_serve` finds every unresolved `mission-*`
-topic whose last poster is not this bot, and `handle_topic` serves each one —
-ack, workspace, chatlog, Plane read-back, one front run, reply. The ack makes
-the bot the last poster, so a topic being worked on is skipped by later
-sweeps; a human posting during the run re-arms it and the post-run sweep
-reprocesses with the fuller chatlog.
+`agag.zulip.sweep_serve` finds every unresolved `mission-*` topic whose last
+poster is not this bot, and `agag.topics.serve_topic` serves each one — the
+skeleton shared with agforge: ack, generation workspace, chatlog, the steps,
+always reply naming the failed step, then re-check for human posts that
+arrived during the run.
+
+Each serving cuts a new generation directory `<N>/`, the way agforge's create
+topics do. Before that, one stable `front/` directory was reused forever, so a
+continued conversation ran on top of the previous run's leftovers and a
+separate `generation` counter file had to keep Sub-Work keys apart. `N` is now
+both the workspace and that key.
 """
 
 from __future__ import annotations
@@ -16,10 +21,21 @@ import threading
 import time
 from pathlib import Path
 
+from agag.topics import (
+    TopicResult,
+    chatlog_placement,
+    chatlog_path,
+    format_chatlog,
+    generation_dir as shared_generation_dir,
+    guide as shared_guide,
+    next_generation,
+    next_record_path as shared_next_record_path,
+    prompt_with_guide,
+    serve_topic,
+    topic_workspace as shared_topic_workspace,
+)
 from agag.zulip import (
     ZulipClient,
-    ZulipError,
-    _safe_topic_component,
     log,
     sweep_serve,
     topic_write,
@@ -33,7 +49,6 @@ from .mission import (
     register_task_files,
     report_work,
     split_document,
-    task_files,
     transition_work,
     upsert_work,
     write_mission_workspace,
@@ -55,6 +70,7 @@ HISTORY_MESSAGES = 1000
 SUBSCRIBE_INTERVAL_SECONDS = 60
 
 ACK_TEXT = "Message received. Please wait for the reply."
+EMPTY_REPLY = "There is nothing in this topic to answer yet."
 
 # One topic occupies the listener for at most the sum of these; the sweep
 # loop is single-threaded and serial, so that sum is also the delay before
@@ -69,7 +85,7 @@ __all__ = [
     "dispatch",
     "format_chatlog",
     "front_prompt",
-    "generation",
+    "generation_dir",
     "guide",
     "handle_front_response",
     "handle_run",
@@ -80,6 +96,7 @@ __all__ = [
     "run_front",
     "run_work",
     "subscribe_project_channels",
+    "serve",
     "topic_workspace",
     "work_directory",
 ]
@@ -99,61 +116,32 @@ def project_from_channel(channel: str) -> str:
 
 
 def topic_workspace(channel: str, topic: str) -> Path:
-    """`.local/topics/<channel>/<topic>/` — stable, reused across runs.
+    """`.local/topics/<channel>/<topic>/` — the topic's own directory."""
+    return shared_topic_workspace(TOPICS_ROOT, channel, topic)
 
-    Leftovers from earlier runs are continuity, not garbage; nothing here is
-    versioned or deleted.
+
+def generation_dir(channel: str, topic: str, number: int, role: str) -> Path:
+    """`.local/topics/<channel>/<topic>/<N>/<role>/`.
+
+    Generations are never deleted. Cutting a new one is what stops a previous
+    generation's `new_mission.md` or task split from being acted on twice.
     """
-    return (
-        TOPICS_ROOT
-        / _safe_topic_component(channel, "channel")
-        / _safe_topic_component(topic, "topic")
-    )
-
-
-def format_chatlog(messages: list[dict], self_id: int) -> str:
-    lines = []
-    for message in messages:
-        speaker = message.get("sender_full_name") or f"user{message.get('sender_id')}"
-        if message.get("sender_id") == self_id:
-            speaker = f"{speaker} (you)"
-        lines.append(f"[{speaker}] {str(message.get('content', '')).strip()}")
-    return "\n".join(lines) + ("\n" if lines else "")
+    return shared_generation_dir(TOPICS_ROOT, channel, topic, number, role)
 
 
 def guide(*parts: str) -> str:
-    """Read one guide file under `agent/guides/`.
-
-    The instruction text belongs to the agents, not to this transport. A
-    missing guide is fatal on purpose: a listener that starts without it would
-    silently send a prompt with no instruction in it.
-    """
-    path = GUIDES.joinpath(*parts)
-    try:
-        text = path.read_text(encoding="utf-8").strip()
-    except OSError as error:
-        raise ListenerError(f"cannot read guide {path}: {error}") from error
-    if not text:
-        raise ListenerError(f"guide is empty: {path}")
-    return text
-
-
-def front_prompt(bot_name: str, plane_files: bool) -> str:
-    lines = [
-        f"The chatlog is placed in the working directory. You are {bot_name!r} in the chatlog."
-    ]
-    if plane_files:
-        lines.append("The current mission and tasks are also placed in the working directory.")
-    return "\n".join(lines) + f"\n\n{guide('mission_front', 'guide_mission_topic.md')}"
+    return shared_guide(GUIDES, *parts)
 
 
 def next_record_path(directory: Path) -> Path:
-    """`run-NNNN.json`, numbered the same way the gateway numbers window runs."""
-    directory.mkdir(parents=True, exist_ok=True)
-    number = 1
-    while (directory / f"run-{number:04d}.json").exists():
-        number += 1
-    return directory / f"run-{number:04d}.json"
+    return shared_next_record_path(directory)
+
+
+def front_prompt(bot_name: str, plane_files: bool) -> str:
+    lines = [chatlog_placement(bot_name)]
+    if plane_files:
+        lines.append("The current mission and tasks are also placed in the working directory.")
+    return prompt_with_guide(lines, guide("mission_front", "guide_mission_topic.md"))
 
 
 def run_front(prompt: str, cwd: Path) -> str:
@@ -171,108 +159,40 @@ def run_front(prompt: str, cwd: Path) -> str:
     return output.strip()
 
 
+def serve(context) -> TopicResult:
+    """agautolab's part of one serving: project setup, Plane read-back, front.
+
+    `handle_front_response` then acts on what the front *wrote* — its answer
+    is relayed verbatim and never parsed.
+    """
+    project = project_from_channel(context.channel)
+    number = next_generation(topic_workspace(context.channel, context.topic))
+    front_dir = generation_dir(context.channel, context.topic, number, "front")
+    chatlog_path(front_dir).write_text(
+        format_chatlog(context.history, context.self_id), encoding="utf-8"
+    )
+
+    context.step = "project setup"
+    init_project(project)
+
+    context.step = "plane read-back"
+    plane_files = write_mission_workspace(front_dir, project, context.channel, context.topic)
+
+    context.step = "front"
+    sections = [run_front(front_prompt(context.bot_name, plane_files), front_dir)]
+
+    context.step = "response handling"
+    response_sections, resolve_after = handle_front_response(
+        context.channel, context.topic, project, front_dir, number
+    )
+    sections.extend(response_sections)
+    return TopicResult(sections, resolve_after=resolve_after)
+
+
 def handle_topic(client: ZulipClient, channel: str, topic: str) -> None:
-    """Serve one awaiting mission topic, and always answer it.
-
-    `sweep_serve` logs and survives handler exceptions, but a topic that gets
-    an ack and then silence would stay dormant until a human posts again —
-    so every exit path after the ack writes back how far the topic got.
-
-    A human posting *during* a run is not lost either: the final reply makes
-    this bot the last poster, which hides the topic from the next sweep, so
-    before leaving this re-checks for human messages newer than the chatlog
-    it processed and serves the topic again with the fuller chatlog.
-    """
+    """Serve one awaiting mission topic through the shared skeleton."""
     log(f"mission topic {channel!r}/{topic!r}")
-    self_user = client.whoami()
-    self_id = int(self_user["user_id"])
-    bot_name = str(self_user.get("full_name") or client.email)
-
-    while True:
-        topic_write(topic, ACK_TEXT, channel=channel, client=client)
-
-        sections: list[str] = []
-        processed_up_to = 0
-        completed = False
-        resolve_after = False
-        step = "reading the topic"
-        try:
-            project = project_from_channel(channel)
-            front_dir = topic_workspace(channel, topic) / "front"
-            front_dir.mkdir(parents=True, exist_ok=True)
-
-            step = "chatlog"
-            history = client.topic_history(channel, topic, num_before=HISTORY_MESSAGES)
-            processed_up_to = max((int(m.get("id", 0)) for m in history), default=0)
-            (front_dir / "chatlog.md").write_text(
-                format_chatlog(history, self_id), encoding="utf-8"
-            )
-
-            step = "project setup"
-            init_project(project)
-
-            step = "plane read-back"
-            plane_files = write_mission_workspace(front_dir, project, channel, topic)
-
-            step = "front"
-            # The front's answer is relayed verbatim; what it wrote in the
-            # workspace (not what it said) drives the follow-up.
-            sections.append(run_front(front_prompt(bot_name, plane_files), front_dir))
-
-            step = "response handling"
-            response_sections, resolve_after = handle_front_response(
-                channel, topic, project, front_dir
-            )
-            sections.extend(response_sections)
-            completed = True
-        except Exception as error:  # noqa: BLE001 - the topic is the error channel
-            log(f"mission topic workflow failed during {step}: {error!r}")
-            sections.append(f"failed during {step}: {error}")
-
-        topic_write(topic, "\n\n".join(section for section in sections if section),
-                    channel=channel, client=client)
-
-        if resolve_after:
-            # After the final reply, so the whole conversation moves under
-            # the ✔ name; a resolved topic stops matching the sweep, which
-            # is the desired end state of a cancelled mission.
-            try:
-                history = client.topic_history(channel, topic, num_before=1)
-                if history:
-                    client.resolve_topic(int(history[-1]["id"]), topic)
-            except Exception as error:  # noqa: BLE001
-                log(f"could not resolve {channel!r}/{topic!r}: {error!r}")
-            return
-        if not completed:
-            return  # do not loop on a failing topic; a human post re-arms it
-
-        try:
-            tail = client.topic_history(channel, topic, num_before=HISTORY_MESSAGES)
-        except ZulipError as error:
-            log(f"post-run re-check failed for {channel!r}/{topic!r}: {error!r}")
-            return
-        if not any(
-            m.get("sender_id") != self_id and int(m.get("id", 0)) > processed_up_to
-            for m in tail
-        ):
-            return
-        log(f"reprocessing {channel!r}/{topic!r}: human posts arrived during the run")
-
-
-def generation(topic_dir: Path) -> int:
-    """Increment and persist the topic's Sub-Work generation counter.
-
-    Each accepted `new_mission.md` is one generation; the counter keeps new
-    Sub-Work external keys clear of cancelled generations' keys, which live
-    in Plane forever.
-    """
-    path = topic_dir / "generation"
-    try:
-        rev = int(path.read_text(encoding="utf-8").strip()) + 1
-    except (OSError, ValueError):
-        rev = 1
-    path.write_text(f"{rev}\n", encoding="utf-8")
-    return rev
+    serve_topic(client, channel, topic, serve, ack_text=ACK_TEXT, empty_reply=EMPTY_REPLY)
 
 
 def run_coding(coding_dir: Path) -> str:
@@ -291,15 +211,19 @@ def run_coding(coding_dir: Path) -> str:
 
 
 def handle_front_response(
-    channel: str, topic: str, project: str, front_dir: Path
+    channel: str, topic: str, project: str, front_dir: Path, number: int
 ) -> tuple[list[str], bool]:
     """Act on what the front wrote: `new_mission.md`, then the flags.
 
     Returns the report sections and whether the topic should be resolved
-    after the final reply. The command files are consumed once acted on —
-    the workspace is stable and reused, so a leftover command would replay
-    on every later run; the mission's canonical text lives in Plane and
-    comes back as `mission.md` on the next read-back.
+    after the final reply.
+
+    No command file is deleted and no split is cleaned up. Each serving works
+    in a fresh generation `<N>/`, so a previous generation's `new_mission.md`
+    or `task[N].md` is simply never looked at again — the generation number is
+    the guard, and the leftovers stay as evidence of what that run was told.
+    `N` is also the Sub-Work generation key, so keys from a cancelled
+    generation (which live in Plane forever) cannot be reused.
     """
     sections: list[str] = []
     resolve_after = False
@@ -311,23 +235,17 @@ def handle_front_response(
         cancelled = cancel_sub_works(project, channel, topic)
         if cancelled:
             sections.append(f"cancelled {cancelled} existing sub-work(s)")
-        coding_dir = front_dir.parent / "coding"
-        coding_dir.mkdir(parents=True, exist_ok=True)
-        for _, stale in task_files(coding_dir):
-            stale.unlink()  # earlier generations' splits must not re-register
+        coding_dir = generation_dir(channel, topic, number, "coding")
         (coding_dir / "new_mission.md").write_text(
             new_mission.read_text(encoding="utf-8"), encoding="utf-8"
         )
         sections.append(run_coding(coding_dir))
-        rev = generation(front_dir.parent)
-        sections.extend(register_task_files(project, channel, topic, coding_dir, rev))
-        new_mission.unlink()
+        sections.extend(register_task_files(project, channel, topic, coding_dir, number))
 
     start_flag = front_dir / "start.flag"
     if start_flag.is_file():
         label = transition_work(project, channel, topic, "started")
         sections.append(f"mission {label} is now In Progress")
-        start_flag.unlink()
 
     cancel_flag = front_dir / "cancel.flag"
     if cancel_flag.is_file():
@@ -335,7 +253,6 @@ def handle_front_response(
         label = transition_work(project, channel, topic, "cancelled")
         suffix = f" along with {cancelled} sub-work(s)" if cancelled else ""
         sections.append(f"mission {label} is cancelled{suffix}; resolving this topic")
-        cancel_flag.unlink()
         resolve_after = True
 
     return sections, resolve_after
