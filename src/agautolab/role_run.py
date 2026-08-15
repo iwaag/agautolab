@@ -42,10 +42,14 @@ ROLE_WORKSPACES = {
 }
 
 
-def _opencode_config(role: str) -> Path:
-    if role in {"director", "summarizer"}:
-        return PROJECT_ROOT / "agent" / "opencode-readonly.json"
-    return PROJECT_ROOT / "agent" / f"opencode-{role}.json"
+# The roles that only read. Under claude_code that is ROLE_ALLOWED_TOOLS above;
+# under agcode it is the offered tool set itself — agcode has no permission
+# engine, so a read-only door is simply handed fewer tools.
+READONLY_ROLES = {"director", "summarizer"}
+
+
+def _agcode_args(role: str) -> list[str]:
+    return ["--tools", "read-only"] if role in READONLY_ROLES else []
 
 
 def run_role(role: str, prompt: str, *, cwd: Path, timeout: float,
@@ -64,7 +68,7 @@ def run_role(role: str, prompt: str, *, cwd: Path, timeout: float,
         cwd=run_cwd,
         timeout=timeout,
         allowed_tools=ROLE_ALLOWED_TOOLS.get(role),
-        opencode_config=_opencode_config(role) if agent.harness == "opencode" else None,
+        extra_args=_agcode_args(role) if agent.harness == "agcode" else None,
         transcript_path=transcript,
     )
     result.meta["project"] = project

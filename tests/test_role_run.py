@@ -6,7 +6,7 @@ from agag.harness import HarnessResult
 from agautolab import role_run
 
 
-def resolved(role: str, harness: str = "opencode") -> ResolvedAgent:
+def resolved(role: str, harness: str = "agcode") -> ResolvedAgent:
     return ResolvedAgent(
         role=role,
         profile="test",
@@ -39,7 +39,8 @@ def test_front_runs_harness_in_the_callers_workspace(monkeypatch, tmp_path):
     # workspace and the gateway at its own, so the caller's cwd must win.
     assert calls[0][2]["cwd"] == tmp_path
     assert calls[0][2]["allowed_tools"] == role_run.ROLE_ALLOWED_TOOLS["front"]
-    assert calls[0][2]["opencode_config"] == role_run.PROJECT_ROOT / "agent/opencode-front.json"
+    # `front` works, so it gets agcode's full tool set: no preset flag.
+    assert calls[0][2]["extra_args"] == []
     assert calls[0][2]["transcript_path"] == tmp_path / "raw.jsonl"
 
 
@@ -58,7 +59,27 @@ def test_mediator_runs_in_its_fixed_workspace(monkeypatch, tmp_path):
     role_run.run_role("mediator", "work", cwd=tmp_path, timeout=5)
 
     assert calls[0]["cwd"] == role_run.PROJECT_ROOT / "agent" / "mediator"
-    assert calls[0]["opencode_config"] is None
+    # claude_code gets no agcode preset flag; its grant is allowed_tools.
+    assert calls[0]["extra_args"] is None
+
+
+def test_readonly_role_on_agcode_is_handed_fewer_tools(monkeypatch, tmp_path):
+    """Under agcode the tool set *is* the permission: `summarizer` is offered
+    read/list and nothing else, rather than being denied a tool it was shown."""
+    calls = []
+    monkeypatch.setattr(role_run, "resolve_project_role", lambda *a, **k: resolved("summarizer"))
+    monkeypatch.setattr(role_run, "load_project_roles", lambda project: {})
+    monkeypatch.setattr(
+        role_run,
+        "run_harness",
+        lambda agent, prompt, **kwargs: (
+            calls.append(kwargs) or HarnessResult("done", 0, {"outcome": "done"})
+        ),
+    )
+
+    role_run.run_role("summarizer", "summarize", cwd=tmp_path, timeout=5)
+
+    assert calls[0]["extra_args"] == ["--tools", "read-only"]
 
 
 def test_resolution_checks_harness_availability(monkeypatch, tmp_path):

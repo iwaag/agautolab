@@ -17,8 +17,10 @@ its agent configuration:
   started.
 - **The agent configuration**: `agents.toml` (five roles, three profiles, the
   models behind them), the ignored `.local/agents.local.toml` overlay, the
-  per-role tool grants in `src/agautolab/role_run.py`, and the OpenCode
-  permission files in `agent/opencode-*.json`.
+  per-role tool grants in `src/agautolab/role_run.py`. Those grants are
+  spelled twice, once per harness: `ROLE_ALLOWED_TOOLS` for `claude_code`, and
+  the offered agcode tool set for the `local` profile — `director` and
+  `summarizer` get `--tools read-only`, everyone else the full four.
 
 Role resolution and execution are live: `GET /projects` and every window
 answer resolve through `ag.agent-config.v1`, so a broken profile, missing
