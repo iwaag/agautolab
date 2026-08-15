@@ -22,5 +22,4 @@ def resolve_project_role(
         role,
         profile_override=profile_override,
         check_available=check_available,
-        project_name="agautolab",
     )
