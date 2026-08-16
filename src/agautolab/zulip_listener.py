@@ -141,7 +141,7 @@ def front_prompt(bot_name: str, plane_files: bool) -> str:
     lines = [chatlog_placement(bot_name)]
     if plane_files:
         lines.append("The current mission and tasks are also placed in the working directory.")
-    return prompt_with_guide(lines, guide("mission_front", "guide_mission_topic.md"))
+    return prompt_with_guide(lines, guide("mission_front", "guide.md"))
 
 
 def run_front(prompt: str, cwd: Path) -> str:
@@ -200,7 +200,7 @@ def run_coding(coding_dir: Path) -> str:
     record = next_record_path(RECORDS_ROOT / "coding")
     output, _, exit_code = run_role(
         "coding",
-        guide("mission_coding", "guide_task_split.md"),
+        guide("mission_superdirector", "guide.md"),
         cwd=coding_dir,
         timeout=CODING_TIMEOUT_SECONDS,
         record=record,
@@ -272,7 +272,7 @@ def run_work(workspace: Path) -> str:
     record = next_record_path(RECORDS_ROOT / "run")
     output, _, exit_code = run_role(
         "coding",
-        guide("run_coding", "guide_run_coding.md"),
+        guide("run_coding", "guide.md"),
         cwd=workspace,
         timeout=WORK_TIMEOUT_SECONDS,
         record=record,

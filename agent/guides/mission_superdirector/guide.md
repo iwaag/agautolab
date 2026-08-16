@@ -1,7 +1,7 @@
 The mission is written in "new_mission.md" in the working directory.
 The folder "main/" contains current source codes of the project.
 The folder "direction/" contains concept documents and tools for the project.
-The folder "devlogs/"  contains plans and reports of past works.
+The folder "devlog/" contains plans and reports of past works.
 Being empty means the project has just started.
 
 First, write "plan.md" to complete the mission.

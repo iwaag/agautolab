@@ -70,7 +70,7 @@ def wire(monkeypatch, tmp_path, calls, *, plane_files=False, front="front says h
     )
     guides = tmp_path / "guides"
     (guides / "mission_front").mkdir(parents=True)
-    (guides / "mission_front" / "guide_mission_topic.md").write_text("GUIDE TEXT")
+    (guides / "mission_front" / "guide.md").write_text("GUIDE TEXT")
     monkeypatch.setattr(zulip_listener, "GUIDES", guides)
 
 
@@ -364,7 +364,7 @@ def test_handle_topic_reprocesses_when_a_human_posted_during_the_run(monkeypatch
 def test_front_prompt_carries_autolabs_own_extra_line(monkeypatch, tmp_path):
     guide_dir = tmp_path / "mission_front"
     guide_dir.mkdir(parents=True)
-    (guide_dir / "guide_mission_topic.md").write_text("GUIDE TEXT\n")
+    (guide_dir / "guide.md").write_text("GUIDE TEXT\n")
     monkeypatch.setattr(zulip_listener, "GUIDES", tmp_path)
 
     assert zulip_listener.front_prompt("Autolab", plane_files=False) == (
@@ -382,7 +382,7 @@ def test_front_prompt_carries_autolabs_own_extra_line(monkeypatch, tmp_path):
 def test_guide_refuses_to_start_without_the_file(monkeypatch, tmp_path):
     monkeypatch.setattr(zulip_listener, "GUIDES", tmp_path)
     with pytest.raises(GuideError):
-        zulip_listener.guide("mission_front", "guide_mission_topic.md")
+        zulip_listener.guide("mission_front", "guide.md")
 
 
 RUN_TOPIC = "run-1"
