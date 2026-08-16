@@ -373,9 +373,41 @@ def test_next_work_picks_the_oldest_across_auto_projects(monkeypatch):
         "p3": [],
     }
     next_work_plane(monkeypatch, projects, issues)
-    assert mission.next_work() == (
-        "demo-two", "Earlier", "do & verify", "p2", "i2"
+    assert mission.next_work() == mission.Work(
+        "demo-two", "Earlier", "do & verify", "p2", "i2", is_asset=False
     )
+
+
+def test_next_work_reads_the_asset_label_off_the_issue(monkeypatch):
+    """The `task[N].md` that carried `[Asset]` was deleted the moment Plane
+    accepted it, so the label is the only surviving record."""
+    projects = [{"id": "p1", "name": "Demo", "description": "[AUTO] autolab project: demo"}]
+    issues = {
+        "p1": [
+            {"id": "i1", "name": "Sprite sheet", "labels": ["p1-auto", "p1-asset"],
+             "state": "todo", "created_at": "2026-01-01", "external_id": "c/t@1#1",
+             "description_html": "<p>a hero</p>"},
+        ]
+    }
+    next_work_plane(
+        monkeypatch, projects, issues,
+        labels_by_project={"p1": {"auto": "p1-auto", "asset": "p1-asset"}},
+    )
+    assert mission.next_work().is_asset is True
+
+
+def test_a_project_without_an_asset_label_yields_plain_works(monkeypatch):
+    """No `asset` label in the project means no issue can carry it — and the
+    lookup must not mistake a missing id for a match."""
+    projects = [{"id": "p1", "name": "Demo", "description": "[AUTO] autolab project: demo"}]
+    issues = {
+        "p1": [
+            {"id": "i1", "name": "Plain", "labels": ["p1-auto"], "state": "todo",
+             "created_at": "2026-01-01", "external_id": "c/t@1#1"},
+        ]
+    }
+    next_work_plane(monkeypatch, projects, issues, labels_by_project={"p1": {"auto": "p1-auto"}})
+    assert mission.next_work().is_asset is False
 
 
 def test_next_work_is_none_without_an_eligible_issue(monkeypatch):
@@ -390,6 +422,54 @@ def test_next_work_skips_a_project_without_the_auto_label(monkeypatch):
     issues = {"p1": [{"id": "i1", "labels": ["x"], "state": "todo", "created_at": "1"}]}
     next_work_plane(monkeypatch, projects, issues, labels_by_project={"p1": {}})
     assert mission.next_work() is None
+
+
+def test_asset_topic_and_key_name_one_topic_per_asset_work():
+    """One topic per asset work is load-bearing: agforge keys one Work per
+    `<channel>/<topic>`, so reuse would overwrite the ledger entry."""
+    assert mission.asset_topic("i9") == "create-asset_i9"
+    assert mission.asset_order_key("pj-demo", "i9") == "pj-demo/create-asset_i9"
+    # agforge's listener matches only the `create-` prefix, and the
+    # underscore keeps this clear of its own `create-<stamp>-<id>` names.
+    assert mission.asset_topic("i9").startswith("create-")
+
+
+def asset_plane(monkeypatch, *, issue, issues=(), groups=None):
+    monkeypatch.setattr(mission, "load_plane_config", lambda: mission.PlaneConfig(
+        "http://plane", "key", "workspace"))
+    seen = []
+    monkeypatch.setattr(
+        mission, "shared_find_issue_by_external",
+        lambda config, pid, source, key: seen.append((source, key)) or issue,
+    )
+    monkeypatch.setattr(mission, "list_issues", lambda config, pid: list(issues))
+    monkeypatch.setattr(
+        mission, "state_groups",
+        lambda config, pid: groups or {"todo": "unstarted", "done-id": "completed"},
+    )
+    return seen
+
+
+def test_asset_order_is_absent_until_agforge_has_a_work(monkeypatch):
+    seen = asset_plane(monkeypatch, issue=None)
+    assert mission.asset_order("p1", "pj-demo", "i9") == ("absent", None)
+    # Keyed under agforge's source, never autolab's.
+    assert seen == [("agforge", "pj-demo/create-asset_i9")]
+
+
+def test_asset_order_is_working_while_agforge_has_not_finished(monkeypatch):
+    row = {"id": "f1", "state": "todo"}
+    asset_plane(monkeypatch, issue={"id": "f1"}, issues=[row])
+    state, issue = mission.asset_order("p1", "pj-demo", "i9")
+    assert (state, issue) == ("working", row)
+
+
+def test_asset_order_is_done_when_agforge_completed_it(monkeypatch):
+    """The external lookup may answer with a thin object carrying no state;
+    the list row is what decides."""
+    row = {"id": "f1", "state": "done-id"}
+    asset_plane(monkeypatch, issue={"id": "f1"}, issues=[row])
+    assert mission.asset_order("p1", "pj-demo", "i9")[0] == "done"
 
 
 def workspace_plane(monkeypatch, *, issue, issues, groups):

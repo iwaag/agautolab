@@ -24,6 +24,7 @@ survives a wiped `.local/`.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 from agag.plane import (
@@ -60,20 +61,39 @@ AUTO_LABEL = "AUTO"
 # is the ledger from registration onwards.
 ASSET_LABEL = "asset"
 ASSET_MARKER = "[Asset]"
+
+# agforge's side of the asset ledger. Its Works are keyed on the requesting
+# `<channel>/<topic>` under its own external source, so one lookup answers
+# "has this asset been ordered, and is it finished" without any local state.
+#
+# One topic per asset work is load-bearing: agforge keys one Plane Work per
+# `<channel>/<topic>`, so reusing a topic would overwrite the ledger entry and
+# mix two specs into one chatlog. The underscore keeps the name clear of
+# agforge's own `create-YYYYMMDD-HHMMSS-<id>` hyphenation, and agforge's
+# listener matches only the `create-` prefix — the rest is free.
+AGFORGE_SOURCE = "agforge"
+ASSET_TOPIC_PREFIX = "create-asset_"
+
 TASK_FILE = re.compile(r"^task(?P<number>\d+)\.md$")
 SUB_WORK_SERIAL = re.compile(r"#(?P<number>\d+)\s*$")
 
 _LABEL_CACHE: dict[tuple[str, str], str] = {}
 
 __all__ = [
+    "AGFORGE_SOURCE",
     "ASSET_LABEL",
     "ASSET_MARKER",
+    "ASSET_TOPIC_PREFIX",
     "AUTO_LABEL",
     "EXTERNAL_SOURCE",
     "TITLE_LIMIT",
     "MissionError",
     "PlaneConfig",
+    "Work",
     "add_comment",
+    "asset_order",
+    "asset_order_key",
+    "asset_topic",
     "cancel_sub_works",
     "compose_document",
     "description_html",
@@ -329,23 +349,41 @@ def eligible_works(issues: list[dict], groups: dict[str, str], label_id: str) ->
     return matches
 
 
-def next_work() -> tuple[str, str, str, str, str] | None:
-    """The next Work to execute, as
-    `(project_slug, work_name, description, project_id, issue_id)`.
+@dataclass(frozen=True)
+class Work:
+    """One chosen Work, with everything a `run-` serving needs of it.
+
+    `is_asset` is read off the issue's labels, not off any file: the
+    `task[N].md` that carried the `[Asset]` marker was deleted the moment
+    Plane accepted it (Step 2), so the label is the only surviving record.
+    """
+
+    slug: str
+    name: str
+    description: str
+    project_id: str
+    issue_id: str
+    is_asset: bool = False
+
+
+def next_work() -> Work | None:
+    """The next Work to execute.
 
     Scans every `[AUTO]` project in the workspace and returns the first
     eligible issue across all of them. `None` when nothing is eligible.
     """
     config = load_plane_config()
-    candidates: list[tuple[tuple, str, str, dict]] = []
+    candidates: list[tuple[tuple, str, str, str, dict]] = []
     for row in list_plane_projects(config):
         slug = project_slug(row)
         if not slug or not row.get("id"):
             continue
         project_id = str(row["id"])
-        label_id = labels_by_name(config, project_id).get(AUTO_LABEL.lower())
+        labels = labels_by_name(config, project_id)
+        label_id = labels.get(AUTO_LABEL.lower())
         if not label_id:
             continue  # no AUTO label in this project means no automatic work
+        asset_id = labels.get(ASSET_LABEL.lower())
         issues = list_issues(config, project_id)
         groups = state_groups(config, project_id)
         for issue in eligible_works(issues, groups, label_id):
@@ -356,19 +394,56 @@ def next_work() -> tuple[str, str, str, str, str] | None:
                      str(issue.get("id"))),
                     slug,
                     project_id,
+                    asset_id,
                     issue,
                 )
             )
     if not candidates:
         return None
-    _, slug, project_id, issue = min(candidates, key=lambda item: item[0])
-    return (
+    _, slug, project_id, asset_id, issue = min(candidates, key=lambda item: item[0])
+    return Work(
         slug,
         str(issue.get("name", "")),
         html_to_text(issue.get("description_html")),
         project_id,
         str(issue["id"]),
+        bool(asset_id) and asset_id in {str(value) for value in (issue.get("labels") or [])},
     )
+
+
+# --- the asset ledger, which is agforge's Work -----------------------------
+
+
+def asset_topic(issue_id: str) -> str:
+    """The `create-` topic one asset Work is ordered and answered in."""
+    return f"{ASSET_TOPIC_PREFIX}{issue_id}"
+
+
+def asset_order_key(channel: str, issue_id: str) -> str:
+    """agforge keys its Work on the requesting `<channel>/<topic>`."""
+    return f"{channel}/{asset_topic(issue_id)}"
+
+
+def asset_order(project_id: str, channel: str, issue_id: str) -> tuple[str, dict | None]:
+    """Where one asset order stands, as `(state, agforge issue)`.
+
+    `"absent"` — never ordered; `"working"` — ordered, not finished;
+    `"done"` — agforge moved its Work to a `completed` state. There is no
+    local marker file anywhere in this: Plane is the ledger, so a wiped
+    `.local/` cannot make autolab order the same asset twice.
+    """
+    config = load_plane_config()
+    key = asset_order_key(channel, issue_id)
+    issue = shared_find_issue_by_external(config, project_id, AGFORGE_SOURCE, key)
+    if not issue:
+        return "absent", None
+    # The external lookup may answer with a thin object; the list row wins,
+    # the same rule `write_mission_workspace` follows.
+    issues = list_issues(config, project_id)
+    issue = next((row for row in issues if str(row.get("id")) == str(issue["id"])), issue)
+    groups = state_groups(config, project_id)
+    state = groups.get(str(issue.get("state") or ""))
+    return ("done" if state == "completed" else "working"), issue
 
 
 def report_work(

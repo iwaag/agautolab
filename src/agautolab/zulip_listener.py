@@ -15,10 +15,14 @@ both the workspace and that key.
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import shutil
 import threading
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 from agag.topics import (
@@ -43,6 +47,9 @@ from agag.zulip import (
 )
 
 from .mission import (
+    Work,
+    asset_order,
+    asset_topic,
     cancel_sub_works,
     compose_document,
     description_html,
@@ -78,6 +85,31 @@ EMPTY_REPLY = "There is nothing in this topic to answer yet."
 MISSION_FILE = "new_mission.md"
 PLAN_FILE = "plan.md"
 
+# --- the asset route -------------------------------------------------------
+#
+# agforge's request service, and the footer it puts on every delivery. A
+# presigned download URL lives 60 minutes; the object behind it does not
+# expire, so autolab keeps the *key* and asks for a fresh URL immediately
+# before it launches a run that may take 1200 s. That ordering is the whole
+# point — a URL recovered any earlier could die mid-run.
+AGFORGE_URL = os.environ.get("AGFORGE_URL", "http://localhost:8092").rstrip("/")
+S3_KEY_MARKER = "[S3KEY]"
+S3_KEY_LINE = re.compile(rf"^\s*{re.escape(S3_KEY_MARKER)}\s+(?P<key>\S+)\s*$", re.MULTILINE)
+RESIGN_TIMEOUT_SECONDS = 30
+
+# The project's art direction, quoted into every asset order.
+AESTHETICS_FILE = "aesthetics.md"
+
+# Appended to the run guide when the work needs an asset. The director check
+# that would normally weigh the delivered asset against the spec is
+# deliberately skipped this episode, so the judgement is handed to the coding
+# run itself, in the prompt.
+ASSET_PROMPT_NOTE = (
+    "\n\nNote: the asset required by this work can be downloaded from the URL "
+    "below. If the asset does not match the spec, try to compromise; only if "
+    "truly unacceptable, treat the work as failed:\n"
+)
+
 # One topic occupies the listener for at most the sum of these; the sweep
 # loop is single-threaded and serial, so that sum is also the delay before
 # the next matching topic is looked at (events keep queueing meanwhile).
@@ -92,7 +124,11 @@ SUPERDIRECTOR_TIMEOUT_SECONDS = WORK_TIMEOUT_SECONDS
 
 __all__ = [
     "ZULIP_ENV",
+    "aesthetics_text",
+    "asset_gate",
+    "asset_order_text",
     "dispatch",
+    "find_asset_key",
     "format_chatlog",
     "front_prompt",
     "generation_dir",
@@ -102,7 +138,9 @@ __all__ = [
     "handle_topic",
     "main",
     "next_record_path",
+    "project_channel",
     "project_directory",
+    "resign",
     "run_front",
     "run_superdirector",
     "run_work",
@@ -110,6 +148,7 @@ __all__ = [
     "serve",
     "topic_workspace",
     "work_directory",
+    "work_prompt",
 ]
 
 
@@ -324,12 +363,18 @@ def work_directory(slug: str) -> Path:
     return PROJECTS_ROOT / slug / "main" / ".local" / "work"
 
 
-def run_work(workspace: Path) -> str:
+def work_prompt(asset_url: str | None) -> str:
+    """The run guide, plus the asset note when there is an asset to fetch."""
+    prompt = guide("run_coding", "guide.md")
+    return f"{prompt}{ASSET_PROMPT_NOTE}{asset_url}" if asset_url else prompt
+
+
+def run_work(workspace: Path, asset_url: str | None = None) -> str:
     """One work run in a project's `main` clone, with its `ag.agent-run.v1` record."""
     record = next_record_path(RECORDS_ROOT / "run")
     output, _, exit_code = run_role(
         "coding",
-        guide("run_coding", "guide.md"),
+        work_prompt(asset_url),
         cwd=workspace,
         timeout=WORK_TIMEOUT_SECONDS,
         record=record,
@@ -337,6 +382,98 @@ def run_work(workspace: Path) -> str:
     if exit_code != 0:
         raise ListenerError(f"work run exited {exit_code}: {output.strip()[:500]}")
     return output.strip()
+
+
+# --- the asset state machine -----------------------------------------------
+
+
+def project_channel(slug: str) -> str:
+    return f"{PROJECT_CHANNEL_PREFIX}{slug}"
+
+
+def aesthetics_text(slug: str) -> str:
+    """The project's art direction, or empty when it has none yet."""
+    path = PROJECTS_ROOT / slug / "direction" / AESTHETICS_FILE
+    return path.read_text(encoding="utf-8").strip() if path.is_file() else ""
+
+
+def asset_order_text(work: Work) -> str:
+    """The order agforge reads.
+
+    Written to stand alone: agforge's front reads the whole topic chatlog and
+    its generator plans from that, so everything the asset has to satisfy —
+    what it is, what it is for, and the project's house style — has to be in
+    this one post. Nothing here points at a file agforge cannot open.
+    """
+    parts = [f"# {work.name}", work.description.strip()]
+    if aesthetics := aesthetics_text(work.slug):
+        parts.append(f"Art direction for this project:\n{aesthetics}")
+    return "\n\n".join(part for part in parts if part)
+
+
+def find_asset_key(client: ZulipClient, channel: str, topic: str) -> str | None:
+    """The newest `[S3KEY] <key>` footer in the asset topic, or None.
+
+    agforge puts that footer on the delivery post (Step 4). Reading it back
+    out of the topic needs no new Plane API and no shared code between the two
+    agents — only the marker, which is documented on both sides.
+    """
+    for message in reversed(client.topic_history(channel, topic, num_before=HISTORY_MESSAGES)):
+        if match := S3_KEY_LINE.search(str(message.get("content", ""))):
+            return match.group("key")
+    return None
+
+
+def resign(key: str) -> str:
+    """A fresh download URL for `key`, from agforge's `POST /api/resign`."""
+    request = urllib.request.Request(
+        f"{AGFORGE_URL}/api/resign",
+        data=json.dumps({"key": key}).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=RESIGN_TIMEOUT_SECONDS) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (OSError, ValueError) as error:
+        raise ListenerError(f"could not re-sign {key}: {error}") from error
+    url = payload.get("url") if isinstance(payload, dict) else None
+    if not url:
+        raise ListenerError(f"re-signing {key} returned no url: {payload!r}")
+    return str(url)
+
+
+def asset_gate(client: ZulipClient, work: Work) -> tuple[list[str], str | None]:
+    """What an `asset`-labelled Work needs before it can be coded.
+
+    Returns `(report sections, download url)`. A `None` url means the serving
+    finishes here — the order was just placed, or agforge is still on it. The
+    autolab Work is deliberately left `unstarted` in both cases, so
+    `next_work` keeps choosing it and everything behind it waits for the
+    asset. Blocking the queue is accepted for this episode.
+
+    Plane is the ledger for all three states; no local file records that an
+    order was placed.
+    """
+    channel = project_channel(work.slug)
+    topic = asset_topic(work.issue_id)
+    state, _ = asset_order(work.project_id, channel, work.issue_id)
+
+    if state == "absent":
+        topic_write(topic, asset_order_text(work), channel=channel, client=client)
+        return [f"asset ordered in {channel}/{topic}"], None
+    if state != "done":
+        # No `runcreate-` post is emitted: the Omni Agent fires that by hand
+        # this episode (Deus Ex Machina, recorded in the episode doc).
+        return [f"asset in progress in {channel}/{topic}"], None
+
+    key = find_asset_key(client, channel, topic)
+    if not key:
+        raise ListenerError(
+            f"the asset work for {channel}/{topic} is completed but the topic "
+            f"carries no {S3_KEY_MARKER} footer"
+        )
+    return [f"asset ready ({key})"], resign(key)
 
 
 def remove_work_directory(work_dir: Path) -> None:
@@ -351,6 +488,9 @@ def handle_run(client: ZulipClient, channel: str, topic: str) -> None:
     (`next_work`), executed in its project's `main` clone, and reported back
     to both Plane and the topic. Every exit path after the ack posts
     something, the same discipline `handle_topic` follows.
+
+    A Work carrying the `asset` label goes through `asset_gate` first, and
+    two of its three outcomes end the serving before any coding run.
     """
     log(f"run topic {channel!r}/{topic!r}")
     topic_write(topic, ACK_TEXT, channel=channel, client=client)
@@ -363,30 +503,42 @@ def handle_run(client: ZulipClient, channel: str, topic: str) -> None:
         if chosen is None:
             topic_write(topic, "no work", channel=channel, client=client)
             return
-        slug, name, description, project_id, issue_id = chosen
-        workspace = PROJECTS_ROOT / slug / "main"
-        candidate = work_directory(slug)
+        workspace = PROJECTS_ROOT / chosen.slug / "main"
+        candidate = work_directory(chosen.slug)
         if candidate.is_dir() and any(candidate.iterdir()):
             topic_write(
                 topic,
-                f"work dirty: {slug}/main has a leftover .local/work/; "
+                f"work dirty: {chosen.slug}/main has a leftover .local/work/; "
                 "remove it by hand and trigger again",
                 channel=channel,
                 client=client,
             )
             return
-        sections.append(f'running "{name}" in {slug}')
+
+        asset_url: str | None = None
+        if chosen.is_asset:
+            step = "asset check"
+            asset_sections, asset_url = asset_gate(client, chosen)
+            sections.append(f'asset work "{chosen.name}" in {chosen.slug}')
+            sections.extend(asset_sections)
+            if asset_url is None:
+                # The Work stays unstarted; the next trigger looks again.
+                topic_write(topic, "\n\n".join(sections), channel=channel, client=client)
+                return
+
+        sections.append(f'running "{chosen.name}" in {chosen.slug}')
 
         step = "writing the work"
         # Only now does the directory become this run's to delete.
         work_dir = candidate
         work_dir.mkdir(parents=True, exist_ok=True)
         (work_dir / "work.md").write_text(
-            compose_document(name, description_html(description)), encoding="utf-8"
+            compose_document(chosen.name, description_html(chosen.description)),
+            encoding="utf-8",
         )
 
         step = "work run"
-        sections.append(run_work(workspace))
+        sections.append(run_work(workspace, asset_url))
 
         step = "reporting to plane"
         report_path = work_dir / "report.md"
@@ -394,7 +546,9 @@ def handle_run(client: ZulipClient, channel: str, topic: str) -> None:
         success = (work_dir / "success.flag").exists()
         if report is None:
             sections.append("no report")
-        work_label, commented, completed = report_work(project_id, issue_id, report, success)
+        work_label, commented, completed = report_work(
+            chosen.project_id, chosen.issue_id, report, success
+        )
         sections.append(
             f"work {work_label}: commented {'yes' if commented else 'no'}, "
             f"Done {'yes' if completed else 'no'}"

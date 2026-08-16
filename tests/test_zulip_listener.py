@@ -482,8 +482,8 @@ def wire_run(monkeypatch, tmp_path, calls, *, chosen, report=None, success=False
         lambda topic, text, **kwargs: calls.append(("write", topic, text)) or "success",
     )
 
-    def work_run(workspace):
-        calls.append(("run", workspace))
+    def work_run(workspace, asset_url=None):
+        calls.append(("run", workspace, asset_url))
         work = workspace / ".local" / "work"
         if report is not None:
             (work / "report.md").write_text(report)
@@ -501,7 +501,12 @@ def wire_run(monkeypatch, tmp_path, calls, *, chosen, report=None, success=False
     )
 
 
-CHOSEN = ("demo-project", "Add the README", "Write it.", "p1", "i1")
+CHOSEN = zulip_listener.Work("demo-project", "Add the README", "Write it.", "p1", "i1")
+ASSET_WORK = zulip_listener.Work(
+    "demo-project", "Sprite sheet", "A 32x32 hero.", "p1", "i9", is_asset=True
+)
+ASSET_CHANNEL = "pj-demo-project"
+ASSET_TOPIC = "create-asset_i9"
 
 
 def test_handle_run_executes_comments_completes_and_cleans_up(monkeypatch, tmp_path):
@@ -513,7 +518,7 @@ def test_handle_run_executes_comments_completes_and_cleans_up(monkeypatch, tmp_p
     workspace = tmp_path / "projects" / "demo-project" / "main"
     assert [call[0] for call in calls] == ["write", "run", "report", "write"]
     assert calls[0][2] == zulip_listener.ACK_TEXT
-    assert calls[1][1] == workspace
+    assert calls[1][1:] == (workspace, None)
     assert calls[2][1:] == ("p1", "i1", "all good", True)
     outcome = calls[-1][2]
     assert 'running "Add the README" in demo-project' in outcome
@@ -530,9 +535,9 @@ def test_handle_run_writes_the_work_file_before_running(monkeypatch, tmp_path):
     wire_run(monkeypatch, tmp_path, calls, chosen=CHOSEN)
     real_run = zulip_listener.run_work
 
-    def capture(workspace):
+    def capture(workspace, asset_url=None):
         seen["work.md"] = (workspace / ".local" / "work" / "work.md").read_text()
-        return real_run(workspace)
+        return real_run(workspace, asset_url)
 
     monkeypatch.setattr(zulip_listener, "run_work", capture)
     zulip_listener.handle_run(Client(calls), "general", RUN_TOPIC)
@@ -573,8 +578,8 @@ def test_handle_run_reports_a_failure_and_still_cleans_up(monkeypatch, tmp_path)
     calls = []
     wire_run(monkeypatch, tmp_path, calls, chosen=CHOSEN)
 
-    def explode(workspace):
-        calls.append(("run", workspace))
+    def explode(workspace, asset_url=None):
+        calls.append(("run", workspace, asset_url))
         raise zulip_listener.ListenerError("claude_code timed out")
 
     monkeypatch.setattr(zulip_listener, "run_work", explode)
@@ -582,6 +587,147 @@ def test_handle_run_reports_a_failure_and_still_cleans_up(monkeypatch, tmp_path)
 
     assert "failed during work run: claude_code timed out" in calls[-1][2]
     assert not (tmp_path / "projects" / "demo-project" / "main" / ".local" / "work").exists()
+
+
+# --- the asset state machine -----------------------------------------------
+#
+# The autolab Work stays `unstarted` through states 1-2, so `next_work()`
+# keeps choosing it and everything behind it waits for the asset. Accepted
+# for this episode.
+
+
+def wire_asset(monkeypatch, tmp_path, calls, *, state, key=None, url="http://minio/fresh"):
+    monkeypatch.setattr(
+        zulip_listener, "asset_order",
+        lambda project_id, channel, issue_id: (
+            calls.append(("order-state", project_id, channel, issue_id)) or (state, None)
+        ),
+    )
+    monkeypatch.setattr(
+        zulip_listener, "find_asset_key",
+        lambda client, channel, topic: calls.append(("find-key", channel, topic)) or key,
+    )
+    monkeypatch.setattr(
+        zulip_listener, "resign", lambda k: calls.append(("resign", k)) or url
+    )
+
+
+def test_an_unordered_asset_is_ordered_and_the_serving_ends(monkeypatch, tmp_path):
+    calls = []
+    wire_run(monkeypatch, tmp_path, calls, chosen=ASSET_WORK)
+    wire_asset(monkeypatch, tmp_path, calls, state="absent")
+    direction = tmp_path / "projects" / "demo-project" / "direction"
+    direction.mkdir(parents=True)
+    (direction / "aesthetics.md").write_text("2D retro digital game art style\n")
+
+    zulip_listener.handle_run(Client(calls), "general", RUN_TOPIC)
+
+    # No coding run, and Plane is not written: the Work stays unstarted.
+    assert [call[0] for call in calls] == ["write", "order-state", "write", "write"]
+    order = calls[2]
+    assert order[1] == ASSET_TOPIC
+    # Self-contained: agforge's front reads the whole topic chatlog and its
+    # generator plans from that, so the order carries everything.
+    assert order[2] == (
+        "# Sprite sheet\n\nA 32x32 hero.\n\n"
+        "Art direction for this project:\n2D retro digital game art style"
+    )
+    assert f"asset ordered in {ASSET_CHANNEL}/{ASSET_TOPIC}" in calls[-1][2]
+
+
+def test_an_order_without_aesthetics_still_stands_alone(monkeypatch, tmp_path):
+    calls = []
+    wire_run(monkeypatch, tmp_path, calls, chosen=ASSET_WORK)
+    wire_asset(monkeypatch, tmp_path, calls, state="absent")
+    zulip_listener.handle_run(Client(calls), "general", RUN_TOPIC)
+    assert calls[2][2] == "# Sprite sheet\n\nA 32x32 hero."
+
+
+def test_an_asset_in_progress_reports_and_fires_no_runcreate(monkeypatch, tmp_path):
+    """The Omni Agent triggers `runcreate-` by hand this episode; autolab must
+    never emit one."""
+    calls = []
+    wire_run(monkeypatch, tmp_path, calls, chosen=ASSET_WORK)
+    wire_asset(monkeypatch, tmp_path, calls, state="working")
+
+    zulip_listener.handle_run(Client(calls), "general", RUN_TOPIC)
+
+    assert [call[0] for call in calls] == ["write", "order-state", "write"]
+    assert f"asset in progress in {ASSET_CHANNEL}/{ASSET_TOPIC}" in calls[-1][2]
+    assert not any("runcreate" in str(call) for call in calls)
+    assert not any(call[0] in {"run", "report"} for call in calls)
+
+
+def test_a_completed_asset_is_resigned_and_the_url_reaches_the_run(monkeypatch, tmp_path):
+    calls = []
+    wire_run(monkeypatch, tmp_path, calls, chosen=ASSET_WORK, report="done", success=True)
+    wire_asset(monkeypatch, tmp_path, calls, state="done", key="files/2026-08-16/abc.zip")
+
+    zulip_listener.handle_run(Client(calls), "general", RUN_TOPIC)
+
+    assert [call[0] for call in calls] == [
+        "write", "order-state", "find-key", "resign", "run", "report", "write",
+    ]
+    # Re-signed immediately before the run, so a 1200 s run cannot outlive
+    # the 60-minute URL it was handed.
+    assert calls[3][1] == "files/2026-08-16/abc.zip"
+    assert calls[4][2] == "http://minio/fresh"
+    assert "asset ready (files/2026-08-16/abc.zip)" in calls[-1][2]
+
+
+def test_a_completed_asset_without_a_key_footer_is_a_failure(monkeypatch, tmp_path):
+    calls = []
+    wire_run(monkeypatch, tmp_path, calls, chosen=ASSET_WORK)
+    wire_asset(monkeypatch, tmp_path, calls, state="done", key=None)
+
+    zulip_listener.handle_run(Client(calls), "general", RUN_TOPIC)
+
+    assert "failed during asset check" in calls[-1][2]
+    assert zulip_listener.S3_KEY_MARKER in calls[-1][2]
+    assert not any(call[0] == "run" for call in calls)
+
+
+def test_a_plain_work_never_touches_the_asset_route(monkeypatch, tmp_path):
+    calls = []
+    wire_run(monkeypatch, tmp_path, calls, chosen=CHOSEN)
+    wire_asset(monkeypatch, tmp_path, calls, state="absent")
+    zulip_listener.handle_run(Client(calls), "general", RUN_TOPIC)
+    assert not any(call[0] in {"order-state", "find-key", "resign"} for call in calls)
+
+
+def test_the_asset_note_is_appended_to_the_run_guide(monkeypatch, tmp_path):
+    guides = tmp_path / "guides"
+    (guides / "run_coding").mkdir(parents=True)
+    (guides / "run_coding" / "guide.md").write_text("RUN GUIDE")
+    monkeypatch.setattr(zulip_listener, "GUIDES", guides)
+
+    assert zulip_listener.work_prompt(None) == "RUN GUIDE"
+    prompt = zulip_listener.work_prompt("http://minio/x.zip")
+    assert prompt.startswith("RUN GUIDE\n\nNote: the asset required by this work")
+    assert "try to compromise" in prompt
+    assert prompt.endswith("\nhttp://minio/x.zip")
+
+
+def test_find_asset_key_takes_the_newest_footer(monkeypatch):
+    class Topic:
+        def topic_history(self, channel, topic, num_before):
+            return [
+                {"content": "result of x: http://old\n[S3KEY] files/old.zip"},
+                {"content": "chatter with no footer"},
+                {"content": "result of y: http://new\n[S3KEY] files/new.zip"},
+            ]
+
+    assert zulip_listener.find_asset_key(Topic(), ASSET_CHANNEL, ASSET_TOPIC) == (
+        "files/new.zip"
+    )
+
+
+def test_find_asset_key_is_none_without_a_footer():
+    class Topic:
+        def topic_history(self, channel, topic, num_before):
+            return [{"content": "no key here, just words about [S3KEY] in passing"}]
+
+    assert zulip_listener.find_asset_key(Topic(), ASSET_CHANNEL, ASSET_TOPIC) is None
 
 
 def test_dispatch_routes_run_topics_anywhere_and_mission_topics_only_in_projects(monkeypatch):
