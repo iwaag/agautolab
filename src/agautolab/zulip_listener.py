@@ -47,7 +47,9 @@ from agag.zulip import (
 )
 
 from .mission import (
+    ASSET_TOPIC_PREFIX,
     Work,
+    asset_answer_context,
     asset_order,
     asset_topic,
     cancel_sub_works,
@@ -73,6 +75,7 @@ RECORDS_ROOT = AGAUTOLAB_ROOT / ".local" / "agent"
 
 MISSION_TOPIC_PREFIX = "mission-"
 RUN_TOPIC_PREFIX = "run-"
+CREATE_TOPIC_PREFIX = "create-"
 PROJECT_CHANNEL_PREFIX = "pj-"
 GENERAL_CHANNEL = "general"
 HISTORY_MESSAGES = 1000
@@ -100,6 +103,17 @@ RESIGN_TIMEOUT_SECONDS = 30
 # The project's art direction, quoted into every asset order.
 AESTHETICS_FILE = "aesthetics.md"
 
+# --- answering agforge on a create- topic ----------------------------------
+#
+# The mention gate is the loop breaker between the two bots. agforge reacts to
+# any `create-` post that is not its own; autolab reacts only when the last
+# message mentions it by name. Without that asymmetry the two would answer
+# each other forever, one paid agent run per lap.
+CHATLOG_FILE = "chatlog.md"
+TASK_FILE = "task.md"
+ANSWER_FILE = "answer.md"
+ANSWER_ROLE = "answer"
+
 # Appended to the run guide when the work needs an asset. The director check
 # that would normally weigh the delivered asset against the spec is
 # deliberately skipped this episode, so the judgement is handed to the coding
@@ -125,6 +139,7 @@ SUPERDIRECTOR_TIMEOUT_SECONDS = WORK_TIMEOUT_SECONDS
 __all__ = [
     "ZULIP_ENV",
     "aesthetics_text",
+    "answer_prompt",
     "asset_gate",
     "asset_order_text",
     "dispatch",
@@ -133,11 +148,14 @@ __all__ = [
     "front_prompt",
     "generation_dir",
     "guide",
+    "handle_create",
     "handle_front_response",
     "handle_run",
     "handle_topic",
     "main",
+    "mentions_us",
     "next_record_path",
+    "run_answer",
     "project_channel",
     "project_directory",
     "resign",
@@ -564,6 +582,105 @@ def handle_run(client: ZulipClient, channel: str, topic: str) -> None:
                 channel=channel, client=client)
 
 
+# --- answering agforge's questions on create- topics -----------------------
+
+
+def mentions_us(content: str, bot_name: str, self_id: int) -> bool:
+    """Whether a message mentions this bot.
+
+    Zulip writes a mention as `@**Name**`, silences it as `@_**Name**`, and
+    disambiguates duplicate names as `@**Name|<id>**`. All three are the same
+    intent, so all three open the gate; `apply_markdown: false` means the raw
+    syntax is what arrives.
+    """
+    pattern = rf"@_?\*\*{re.escape(bot_name)}(\|{self_id})?\*\*"
+    return re.search(pattern, content) is not None
+
+
+def answer_prompt(answer_dir: Path) -> str:
+    """The placement lines, then the answer guide."""
+    return prompt_with_guide(
+        [
+            f'The conversation with the asset creator ("{CHATLOG_FILE}"), the plan '
+            f'it belongs to ("{PLAN_FILE}") and the task it is for ("{TASK_FILE}") '
+            f'are placed in "{answer_dir}".',
+            f'Write your answer to "{answer_dir / ANSWER_FILE}".',
+            "Your working directory is the project itself.",
+        ],
+        guide("create_answer_superdirector", "guide.md"),
+    )
+
+
+def run_answer(answer_dir: Path, project_dir: Path) -> str:
+    """One answer run: reads from `answer_dir`, but works in the project."""
+    record = next_record_path(RECORDS_ROOT / ANSWER_ROLE)
+    output, _, exit_code = run_role(
+        "superdirector",
+        answer_prompt(answer_dir),
+        cwd=project_dir,
+        timeout=SUPERDIRECTOR_TIMEOUT_SECONDS,
+        record=record,
+    )
+    if exit_code != 0:
+        raise ListenerError(f"answer run exited {exit_code}: {output.strip()[:500]}")
+    return output.strip()
+
+
+def handle_create(client: ZulipClient, channel: str, topic: str) -> None:
+    """Answer agforge's question on one `create-asset_<work_id>` topic.
+
+    Deliberately not `serve_topic`-shaped: there is no ack. An ack would make
+    autolab the topic's last poster, and agforge's sweep would resume the
+    conversation on it — before the answer exists. The single post at the end
+    is both the answer and the hand-back.
+
+    Two gates come before any cost is incurred. The topic name must be an
+    asset topic, and the last message must mention this bot. Failing either,
+    the handler returns without posting: it is then still not the last poster,
+    so the sweep will look again next time, at the price of one history read.
+    """
+    log(f"create topic {channel!r}/{topic!r}")
+    if not topic.startswith(ASSET_TOPIC_PREFIX):
+        log(f"ignoring {topic!r}: not an asset topic")
+        return
+
+    self_user = client.whoami()
+    self_id = int(self_user["user_id"])
+    bot_name = str(self_user.get("full_name") or client.email)
+
+    history = client.topic_history(channel, topic, num_before=HISTORY_MESSAGES)
+    if not history:
+        return
+    last = history[-1]
+    if last.get("sender_id") == self_id:
+        return
+    if not mentions_us(str(last.get("content", "")), bot_name, self_id):
+        log(f"ignoring {channel!r}/{topic!r}: the last message does not mention {bot_name!r}")
+        return
+
+    project = project_from_channel(channel)
+    work_id = topic.removeprefix(ASSET_TOPIC_PREFIX)
+    plan, task = asset_answer_context(project, work_id)
+
+    number = next_generation(topic_workspace(channel, topic))
+    answer_dir = generation_dir(channel, topic, number, ANSWER_ROLE)
+    chatlog_path(answer_dir).write_text(
+        format_chatlog(history, self_id), encoding="utf-8"
+    )
+    (answer_dir / PLAN_FILE).write_text(plan, encoding="utf-8")
+    (answer_dir / TASK_FILE).write_text(task, encoding="utf-8")
+
+    run_answer(answer_dir, project_directory(project))
+
+    answer = answer_dir / ANSWER_FILE
+    if not answer.is_file():
+        raise ListenerError(f"the answer run wrote no {ANSWER_FILE} in {answer_dir}")
+    # Posting it makes autolab the last non-forge poster, which is exactly
+    # what lets agforge's sweep pick the conversation back up.
+    topic_write(topic, answer.read_text(encoding="utf-8").strip(),
+                channel=channel, client=client)
+
+
 def subscribe_project_channels(client: ZulipClient) -> list[str]:
     """Put every active realm user in every `pj-*` channel and in `#general`.
 
@@ -608,16 +725,20 @@ def dispatch(client: ZulipClient, channel: str, topic: str) -> None:
     """Route one swept topic to its handler.
 
     `run-` topics work in any channel — they carry no project of their own,
-    the project comes from the chosen Work. `mission-` topics still need a
-    `pj-*` channel and are silently ignored elsewhere: with `#general` now
-    swept, a stray `mission-` topic there would otherwise get an error posted
-    into it on every sweep.
+    the project comes from the chosen Work. `mission-` and `create-` topics
+    still need a `pj-*` channel and are silently ignored elsewhere: with
+    `#general` now swept, a stray `mission-` topic there would otherwise get
+    an error posted into it on every sweep, and agforge's own `create-` topics
+    in `#FreeForge` are none of autolab's business.
     """
     if topic.startswith(RUN_TOPIC_PREFIX):
         handle_run(client, channel, topic)
         return
     if not channel.startswith(PROJECT_CHANNEL_PREFIX):
         log(f"ignoring {topic!r}: {channel!r} is not a project channel")
+        return
+    if topic.startswith(CREATE_TOPIC_PREFIX):
+        handle_create(client, channel, topic)
         return
     handle_topic(client, channel, topic)
 
@@ -636,7 +757,7 @@ def main() -> None:
     except ZulipError as error:
         log(f"initial project channel subscription refresh failed: {error!r}")
     threading.Thread(target=subscription_loop, args=(subscription_client,), daemon=True).start()
-    prefixes = (MISSION_TOPIC_PREFIX, RUN_TOPIC_PREFIX)
+    prefixes = (MISSION_TOPIC_PREFIX, RUN_TOPIC_PREFIX, CREATE_TOPIC_PREFIX)
     log(f"agautolab zulip listener starting (pull sweep, prefixes {prefixes})")
     try:
         sweep_serve(client, handler, topic_filter=prefixes)

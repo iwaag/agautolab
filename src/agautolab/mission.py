@@ -91,6 +91,7 @@ __all__ = [
     "PlaneConfig",
     "Work",
     "add_comment",
+    "asset_answer_context",
     "asset_order",
     "asset_order_key",
     "asset_topic",
@@ -444,6 +445,34 @@ def asset_order(project_id: str, channel: str, issue_id: str) -> tuple[str, dict
     groups = state_groups(config, project_id)
     state = groups.get(str(issue.get("state") or ""))
     return ("done" if state == "completed" else "working"), issue
+
+
+def asset_answer_context(project: str, work_id: str) -> tuple[str, str]:
+    """`(plan.md text, task.md text)` for one asset Sub-Work, read from Plane.
+
+    Plane is the only source. Step 2 deletes `plan.md` and `task[N].md` from
+    the project folder as soon as Plane accepts them, precisely so that there
+    is one canonical copy and it is this one.
+
+    The parent Work's description *is* `plan.md` — the whole file, heading
+    included — so it is recovered verbatim rather than recomposed. The
+    Sub-Work is recomposed into a document, which gives back the `task[N].md`
+    the superdirector wrote minus the `[Asset]` marker that was addressed to
+    the registration.
+    """
+    config, _, project_id = _prepare(project)
+    issues = list_issues(config, project_id)
+    task = next((row for row in issues if str(row.get("id")) == str(work_id)), None)
+    if not task:
+        raise MissionError(f"no Work {work_id!r} in project {project!r}")
+    parent_id = str(task.get("parent") or "")
+    parent = next((row for row in issues if str(row.get("id")) == parent_id), None)
+    if not parent:
+        raise MissionError(f"Work {work_id!r} has no parent to read the plan from")
+    return (
+        html_to_text(parent.get("description_html")),
+        compose_document(str(task.get("name", "")), task.get("description_html")),
+    )
 
 
 def report_work(

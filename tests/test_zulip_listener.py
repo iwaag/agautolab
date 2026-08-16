@@ -730,6 +730,167 @@ def test_find_asset_key_is_none_without_a_footer():
     assert zulip_listener.find_asset_key(Topic(), ASSET_CHANNEL, ASSET_TOPIC) is None
 
 
+# --- answering agforge on a create- topic ----------------------------------
+#
+# The mention gate is the loop breaker: agforge reacts to any create- post
+# that is not its own, so without the asymmetry the two bots would answer
+# each other forever, one paid run per lap.
+
+
+FORGE_ID = 13
+
+
+def create_message(sender_id=FORGE_ID, name="Forge", content="@**Autolab** what size?", id=5):
+    return {
+        "id": id,
+        "type": "stream",
+        "sender_id": sender_id,
+        "sender_full_name": name,
+        "display_recipient": ASSET_CHANNEL,
+        "subject": ASSET_TOPIC,
+        "content": content,
+    }
+
+
+def wire_create(monkeypatch, tmp_path, calls, *, answer="64x64."):
+    monkeypatch.setattr(zulip_listener, "TOPICS_ROOT", tmp_path / "topics")
+    monkeypatch.setattr(zulip_listener, "RECORDS_ROOT", tmp_path / "records")
+    monkeypatch.setattr(zulip_listener, "PROJECTS_ROOT", tmp_path / "projects")
+    monkeypatch.setattr(
+        zulip_listener,
+        "topic_write",
+        lambda topic, text, **kwargs: calls.append(("write", topic, text)) or "success",
+    )
+    monkeypatch.setattr(
+        zulip_listener,
+        "asset_answer_context",
+        lambda project, work_id: (
+            calls.append(("context", project, work_id)) or ("# The plan\n\nBody.", "# Sprite\n\nA hero.\n")
+        ),
+    )
+
+    def answer_run(answer_dir, project_dir):
+        calls.append(("answer-run", answer_dir, project_dir))
+        if answer is not None:
+            (answer_dir / "answer.md").write_text(answer)
+        return "wrote it"
+
+    monkeypatch.setattr(zulip_listener, "run_answer", answer_run)
+
+
+class CreateClient(Client):
+    def __init__(self, calls, history=None):
+        super().__init__(calls, history=history or [create_message()])
+
+
+def answer_dir(tmp_path, number=1):
+    return tmp_path / "topics" / ASSET_CHANNEL / ASSET_TOPIC / str(number) / "answer"
+
+
+def test_a_mentioned_question_is_answered_from_plane_and_posted(monkeypatch, tmp_path):
+    calls = []
+    wire_create(monkeypatch, tmp_path, calls)
+
+    zulip_listener.handle_create(CreateClient(calls), ASSET_CHANNEL, ASSET_TOPIC)
+
+    assert [call[0] for call in calls] == [
+        "whoami", "history", "context", "answer-run", "write",
+    ]
+    # The work id is the topic name's tail.
+    assert calls[2][1:] == ("demo-project", "i9")
+    # Read from the answer generation, but run in the project folder.
+    assert calls[3][1:] == (answer_dir(tmp_path), tmp_path / "projects" / "demo-project")
+    assert (answer_dir(tmp_path) / "chatlog.md").read_text() == "[Forge] @**Autolab** what size?\n"
+    assert (answer_dir(tmp_path) / "plan.md").read_text() == "# The plan\n\nBody."
+    assert (answer_dir(tmp_path) / "task.md").read_text() == "# Sprite\n\nA hero.\n"
+    # Posting it makes autolab the last non-forge poster, which is what lets
+    # agforge's sweep pick the conversation back up.
+    assert calls[-1][1:] == (ASSET_TOPIC, "64x64.")
+
+
+def test_a_post_without_a_mention_costs_nothing(monkeypatch, tmp_path):
+    """agforge posts plan registrations and deliveries with no mention. If
+    autolab answered those, the two bots would ping-pong forever."""
+    calls = []
+    wire_create(monkeypatch, tmp_path, calls)
+    client = CreateClient(
+        calls, history=[create_message(content="registered PA-1 in Demo Project")]
+    )
+
+    zulip_listener.handle_create(client, ASSET_CHANNEL, ASSET_TOPIC)
+
+    assert [call[0] for call in calls] == ["whoami", "history"]
+
+
+@pytest.mark.parametrize("content", [
+    "@**Autolab** what size?",
+    "@_**Autolab** silent but still a mention",
+    "@**Autolab|11** disambiguated",
+])
+def test_every_zulip_mention_form_opens_the_gate(content):
+    assert zulip_listener.mentions_us(content, "Autolab", 11)
+
+
+@pytest.mark.parametrize("content", [
+    "registered PA-1",
+    "@**Forge** not us",
+    "Autolab, informally",
+    "@**Autolab Two** a different bot",
+])
+def test_a_non_mention_keeps_the_gate_shut(content):
+    assert zulip_listener.mentions_us(content, "Autolab", 11) is False
+
+
+def test_our_own_last_post_is_never_answered(monkeypatch, tmp_path):
+    calls = []
+    history = [create_message(sender_id=BOT_ID, name="Autolab", content="@**Autolab** self")]
+    wire_create(monkeypatch, tmp_path, calls)
+    client = CreateClient(calls)
+    client.history = history
+
+    zulip_listener.handle_create(client, ASSET_CHANNEL, ASSET_TOPIC)
+    assert [call[0] for call in calls] == ["whoami", "history"]
+
+
+def test_a_non_asset_create_topic_is_ignored_before_any_lookup(monkeypatch, tmp_path):
+    """agforge's own `create-<stamp>-<id>` topics are none of autolab's
+    business, and the check costs not even a history read."""
+    calls = []
+    wire_create(monkeypatch, tmp_path, calls)
+    zulip_listener.handle_create(CreateClient(calls), ASSET_CHANNEL, "create-20260816-1200-ab")
+    assert calls == []
+
+
+def test_an_answer_run_that_wrote_nothing_posts_nothing(monkeypatch, tmp_path):
+    calls = []
+    wire_create(monkeypatch, tmp_path, calls, answer=None)
+    with pytest.raises(zulip_listener.ListenerError):
+        zulip_listener.handle_create(CreateClient(calls), ASSET_CHANNEL, ASSET_TOPIC)
+    assert not any(call[0] == "write" for call in calls)
+
+
+def test_each_answer_cuts_a_new_generation(monkeypatch, tmp_path):
+    calls = []
+    wire_create(monkeypatch, tmp_path, calls)
+    zulip_listener.handle_create(CreateClient(calls), ASSET_CHANNEL, ASSET_TOPIC)
+    zulip_listener.handle_create(CreateClient(calls), ASSET_CHANNEL, ASSET_TOPIC)
+    assert answer_dir(tmp_path, 1).is_dir()
+    assert answer_dir(tmp_path, 2).is_dir()
+
+
+def test_the_answer_prompt_points_at_the_three_files(monkeypatch, tmp_path):
+    guides = tmp_path / "guides"
+    (guides / "create_answer_superdirector").mkdir(parents=True)
+    (guides / "create_answer_superdirector" / "guide.md").write_text("ANSWER GUIDE")
+    monkeypatch.setattr(zulip_listener, "GUIDES", guides)
+
+    prompt = zulip_listener.answer_prompt(tmp_path / "answer")
+    for name in ("chatlog.md", "plan.md", "task.md", "answer.md"):
+        assert name in prompt
+    assert str(tmp_path / "answer") in prompt
+    assert prompt.endswith("ANSWER GUIDE")
+
+
 def test_dispatch_routes_run_topics_anywhere_and_mission_topics_only_in_projects(monkeypatch):
     routed = []
     monkeypatch.setattr(
