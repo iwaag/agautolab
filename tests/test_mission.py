@@ -229,7 +229,43 @@ def test_register_task_files_keys_sub_works_with_the_generation(plane, tmp_path)
 def test_register_task_files_reports_an_empty_split(plane, tmp_path):
     plane.add(name="Work", external_id=WORK_KEY)
     lines = mission.register_task_files("demo", CHANNEL, TOPIC, tmp_path, rev=1)
-    assert lines == ["the coding run wrote no task files; the mission has no sub-work"]
+    assert lines == ["the superdirector wrote no task files; the mission has no sub-work"]
+
+
+@pytest.mark.parametrize(
+    "text,stripped,is_asset",
+    [
+        ("# Art\nA sprite sheet.\n\n[Asset]\n", "# Art\nA sprite sheet.\n", True),
+        ("# Art\nA sprite sheet. [Asset]", "# Art\nA sprite sheet.\n", True),
+        ("# Art\nA sprite sheet.\n[asset]", "# Art\nA sprite sheet.\n", True),
+        ("# Code\nWrite it.\n", "# Code\nWrite it.\n", False),
+        # Only the *end* of the file is the marker; a mention is prose.
+        ("# Code\n[Asset] is a marker.\n", "# Code\n[Asset] is a marker.\n", False),
+    ],
+)
+def test_strip_asset_marker_only_matches_the_tail(text, stripped, is_asset):
+    assert mission.strip_asset_marker(text) == (stripped, is_asset)
+
+
+def test_register_task_files_labels_an_asset_sub_work(plane, tmp_path):
+    """The marker never reaches Plane; the label does, and that label is what
+    `handle_run` dispatches on."""
+    plane.add(name="Work", external_id=WORK_KEY)
+    (tmp_path / "task1.md").write_text("# Sprite sheet\nA 32x32 hero.\n\n[Asset]\n")
+    (tmp_path / "task2.md").write_text("# Movement\nWire the input.\n")
+
+    lines = mission.register_task_files("demo", CHANNEL, TOPIC, tmp_path, rev=1)
+
+    assert lines == [
+        'created sub-work PD-5 "Sprite sheet" [asset]',
+        'created sub-work PD-6 "Movement"',
+    ]
+    asset, plain = plane.creates
+    by_id = {row["id"]: row["name"] for row in plane.labels}
+    assert [by_id[label] for label in asset["labels"]] == ["AUTO", "asset"]
+    assert [by_id[label] for label in plain["labels"]] == ["AUTO"]
+    assert "[Asset]" not in asset["description_html"]
+    assert asset["description_html"] == "<p>A 32x32 hero.</p>"
 
 
 def test_register_task_files_requires_the_work(plane, tmp_path):

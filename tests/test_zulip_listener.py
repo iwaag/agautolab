@@ -74,7 +74,27 @@ def wire(monkeypatch, tmp_path, calls, *, plane_files=False, front="front says h
     monkeypatch.setattr(zulip_listener, "GUIDES", guides)
 
 
-def wire_response(monkeypatch, calls, *, coding="split done", cancelled=0):
+PROJECT = "demo-project"
+PLAN_TEXT = "# The plan\n\nStep one, step two."
+
+
+def wire_response(
+    monkeypatch,
+    tmp_path,
+    calls,
+    *,
+    superdirector="planning done",
+    plan=PLAN_TEXT,
+    tasks=("# First\ndo this",),
+    cancelled=0,
+):
+    """Stub everything `handle_front_response` reaches outside the filesystem.
+
+    The superdirector stub writes what a real run would leave behind in the
+    project folder — `plan.md` and the task split — because the cleanup and
+    the parent-work description are read off those files.
+    """
+    monkeypatch.setattr(zulip_listener, "PROJECTS_ROOT", tmp_path / "projects")
     monkeypatch.setattr(
         zulip_listener,
         "upsert_work",
@@ -88,16 +108,21 @@ def wire_response(monkeypatch, calls, *, coding="split done", cancelled=0):
         "cancel_sub_works",
         lambda project, channel, topic: calls.append(("cancel-subs",)) or cancelled,
     )
-    monkeypatch.setattr(
-        zulip_listener,
-        "run_coding",
-        lambda coding_dir: calls.append(("coding", coding_dir)) or coding,
-    )
+
+    def superdirector_run(project_dir):
+        calls.append(("superdirector", project_dir))
+        if plan is not None:
+            (project_dir / "plan.md").write_text(plan)
+        for number, text in enumerate(tasks, start=1):
+            (project_dir / f"task{number}.md").write_text(text)
+        return superdirector
+
+    monkeypatch.setattr(zulip_listener, "run_superdirector", superdirector_run)
     monkeypatch.setattr(
         zulip_listener,
         "register_task_files",
-        lambda project, channel, topic, coding_dir, rev: (
-            calls.append(("register", coding_dir, rev)) or [f"created sub-work rev {rev}"]
+        lambda project, channel, topic, plan_dir, rev: (
+            calls.append(("register", plan_dir, rev)) or [f"created sub-work rev {rev}"]
         ),
     )
     monkeypatch.setattr(
@@ -112,8 +137,10 @@ def front_dir(tmp_path, number=1):
     return tmp_path / "topics" / CHANNEL / TOPIC / str(number) / "front"
 
 
-def coding_dir(tmp_path, number=1):
-    return tmp_path / "topics" / CHANNEL / TOPIC / str(number) / "coding"
+def project_dir(tmp_path, project=PROJECT):
+    """The persistent project folder — `main/`, `direction/`, `devlog/` and,
+    for the length of one planning round, the planning files."""
+    return tmp_path / "projects" / project
 
 
 def test_handle_topic_acks_then_runs_the_steps_in_order(monkeypatch, tmp_path):
@@ -216,35 +243,92 @@ def test_an_empty_topic_costs_no_agent_run(monkeypatch, tmp_path):
     assert calls[-1][2] == zulip_listener.EMPTY_REPLY
 
 
-def test_new_mission_updates_plane_and_reruns_the_split(monkeypatch, tmp_path):
+def test_new_mission_plans_in_the_project_folder_and_registers_the_plan(monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr(zulip_listener, "TOPICS_ROOT", tmp_path / "topics")
-    wire_response(monkeypatch, calls, cancelled=2)
+    wire_response(monkeypatch, tmp_path, calls, cancelled=2)
     front = front_dir(tmp_path)
     front.mkdir(parents=True)
     (front / "new_mission.md").write_text("# Build it\n\nThe body.")
 
     sections, resolve_after = zulip_listener.handle_front_response(
-        CHANNEL, TOPIC, "demo-project", front, 1
+        CHANNEL, TOPIC, PROJECT, front, 1
     )
 
-    assert [call[0] for call in calls] == ["upsert", "cancel-subs", "coding", "register"]
-    assert calls[0][4:6] == ("Build it", "The body.")
-    assert calls[2][1] == coding_dir(tmp_path)
-    # The mission text travels into this generation's coding/.
-    assert (coding_dir(tmp_path) / "new_mission.md").read_text() == "# Build it\n\nThe body."
+    # The superdirector runs first now: the parent Work's description is what
+    # it decided, which does not exist until it has run.
+    assert [call[0] for call in calls] == [
+        "superdirector", "upsert", "cancel-subs", "register",
+    ]
+    assert calls[0][1] == project_dir(tmp_path)
+    # Title from the mission, description from the plan — the whole file,
+    # heading included, because Step 6 reads it back as `plan.md`.
+    assert calls[1][4:6] == ("Build it", PLAN_TEXT)
+    assert calls[3][1] == project_dir(tmp_path)
     # The Sub-Work generation key is the generation number itself.
     assert calls[3][2] == 1
-    # Nothing is deleted: the generation number is the guard, and the command
-    # file stays as evidence of what that run was told.
-    assert (front / "new_mission.md").exists()
     assert sections == [
+        "planning done",
         'updated PD-4 "Build it"',
         "cancelled 2 existing sub-work(s)",
-        "split done",
         "created sub-work rev 1",
     ]
     assert resolve_after is False
+
+
+def test_the_planning_files_are_cleared_once_plane_has_them(monkeypatch, tmp_path):
+    """The project folder is persistent — no generation number separates one
+    round from the next — so a registered round leaves nothing behind."""
+    calls = []
+    monkeypatch.setattr(zulip_listener, "TOPICS_ROOT", tmp_path / "topics")
+    wire_response(monkeypatch, tmp_path, calls, tasks=("# First\na", "# Second\nb"))
+    front = front_dir(tmp_path)
+    front.mkdir(parents=True)
+    (front / "new_mission.md").write_text("# Build it\n\nThe body.")
+    (project_dir(tmp_path) / "main").mkdir(parents=True)
+
+    zulip_listener.handle_front_response(CHANNEL, TOPIC, PROJECT, front, 1)
+
+    remaining = sorted(path.name for path in project_dir(tmp_path).iterdir())
+    assert remaining == ["main"]
+    # The front's own generation keeps its evidence.
+    assert (front / "new_mission.md").exists()
+
+
+def test_a_failed_registration_leaves_the_plan_for_a_retry(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(zulip_listener, "TOPICS_ROOT", tmp_path / "topics")
+    wire_response(monkeypatch, tmp_path, calls)
+
+    def explode(project, channel, topic, plan_dir, rev):
+        raise zulip_listener.ListenerError("plane is down")
+
+    monkeypatch.setattr(zulip_listener, "register_task_files", explode)
+    front = front_dir(tmp_path)
+    front.mkdir(parents=True)
+    (front / "new_mission.md").write_text("# Build it\n\nThe body.")
+
+    with pytest.raises(zulip_listener.ListenerError):
+        zulip_listener.handle_front_response(CHANNEL, TOPIC, PROJECT, front, 1)
+
+    # Paying sonnet twice for the same plan is the thing being avoided.
+    assert sorted(path.name for path in project_dir(tmp_path).iterdir()) == [
+        "new_mission.md", "plan.md", "task1.md",
+    ]
+
+
+def test_a_superdirector_that_wrote_no_plan_is_a_failure(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(zulip_listener, "TOPICS_ROOT", tmp_path / "topics")
+    wire_response(monkeypatch, tmp_path, calls, plan=None, tasks=())
+    front = front_dir(tmp_path)
+    front.mkdir(parents=True)
+    (front / "new_mission.md").write_text("# Build it\n\nThe body.")
+
+    with pytest.raises(zulip_listener.ListenerError):
+        zulip_listener.handle_front_response(CHANNEL, TOPIC, PROJECT, front, 1)
+    # Nothing reached Plane, so nothing may be reported as if it had.
+    assert [call[0] for call in calls] == ["superdirector"]
 
 
 def test_the_sub_work_key_follows_the_generation(monkeypatch, tmp_path):
@@ -252,25 +336,25 @@ def test_the_sub_work_key_follows_the_generation(monkeypatch, tmp_path):
     keys, which live in Plane forever."""
     calls = []
     monkeypatch.setattr(zulip_listener, "TOPICS_ROOT", tmp_path / "topics")
-    wire_response(monkeypatch, calls)
+    wire_response(monkeypatch, tmp_path, calls)
     for number in (1, 4):
         front = front_dir(tmp_path, number)
         front.mkdir(parents=True)
         (front / "new_mission.md").write_text("# Build it\n\nThe body.")
-        zulip_listener.handle_front_response(CHANNEL, TOPIC, "demo-project", front, number)
+        zulip_listener.handle_front_response(CHANNEL, TOPIC, PROJECT, front, number)
     assert [call[2] for call in calls if call[0] == "register"] == [1, 4]
 
 
 def test_start_flag_moves_the_work_to_in_progress(monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr(zulip_listener, "TOPICS_ROOT", tmp_path / "topics")
-    wire_response(monkeypatch, calls)
+    wire_response(monkeypatch, tmp_path, calls)
     front = front_dir(tmp_path)
     front.mkdir(parents=True)
     (front / "start.flag").touch()
 
     sections, resolve_after = zulip_listener.handle_front_response(
-        CHANNEL, TOPIC, "demo-project", front, 1
+        CHANNEL, TOPIC, PROJECT, front, 1
     )
 
     assert calls == [("transition", "started")]
@@ -281,13 +365,13 @@ def test_start_flag_moves_the_work_to_in_progress(monkeypatch, tmp_path):
 def test_cancel_flag_cancels_everything_and_requests_resolution(monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr(zulip_listener, "TOPICS_ROOT", tmp_path / "topics")
-    wire_response(monkeypatch, calls, cancelled=3)
+    wire_response(monkeypatch, tmp_path, calls, cancelled=3)
     front = front_dir(tmp_path)
     front.mkdir(parents=True)
     (front / "cancel.flag").touch()
 
     sections, resolve_after = zulip_listener.handle_front_response(
-        CHANNEL, TOPIC, "demo-project", front, 1
+        CHANNEL, TOPIC, PROJECT, front, 1
     )
 
     assert calls == [("cancel-subs",), ("transition", "cancelled")]
@@ -299,7 +383,7 @@ def test_handle_topic_resolves_the_topic_after_the_final_reply(monkeypatch, tmp_
     calls = []
     client = Client(calls)
     wire(monkeypatch, tmp_path, calls)
-    wire_response(monkeypatch, calls)
+    wire_response(monkeypatch, tmp_path, calls)
     monkeypatch.setattr(
         zulip_listener,
         "run_front",
@@ -316,7 +400,7 @@ def test_handle_topic_resolves_the_topic_after_the_final_reply(monkeypatch, tmp_
 def test_handle_topic_reports_a_response_handling_failure(monkeypatch, tmp_path):
     calls = []
     wire(monkeypatch, tmp_path, calls)
-    wire_response(monkeypatch, calls)
+    wire_response(monkeypatch, tmp_path, calls)
 
     def explode(project, channel, topic, group):
         raise zulip_listener.ListenerError("plane is down")

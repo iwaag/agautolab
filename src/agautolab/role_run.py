@@ -33,6 +33,10 @@ ROLE_ALLOWED_TOOLS = {
     # Without an entry here `build_argv` omits `--allowedTools` entirely and
     # claude_code waits for an interactive permission answer until the timeout.
     "coding": WORKING_ALLOWED_TOOLS,
+    # `superdirector` writes `plan.md` and the task split into the project
+    # folder, and answers agforge's questions from it. It writes files, so it
+    # gets the writable set rather than `director`'s read-only one.
+    "superdirector": WORKING_ALLOWED_TOOLS,
 }
 
 # `front` is deliberately absent: the zulip listener runs it in the topic

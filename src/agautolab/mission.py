@@ -54,12 +54,20 @@ from .project_init import AUTO_MARKER, PLANE_ENV, PROJECT_NAME  # noqa: F401
 
 EXTERNAL_SOURCE = "agautolab"
 AUTO_LABEL = "AUTO"
+# A Sub-Work that needs a media asset before it can be coded. The marker is
+# the superdirector's, written at the very end of a `task[N].md`; the label is
+# what `handle_run` reads back off the issue, because Plane — not the file —
+# is the ledger from registration onwards.
+ASSET_LABEL = "asset"
+ASSET_MARKER = "[Asset]"
 TASK_FILE = re.compile(r"^task(?P<number>\d+)\.md$")
 SUB_WORK_SERIAL = re.compile(r"#(?P<number>\d+)\s*$")
 
 _LABEL_CACHE: dict[tuple[str, str], str] = {}
 
 __all__ = [
+    "ASSET_LABEL",
+    "ASSET_MARKER",
     "AUTO_LABEL",
     "EXTERNAL_SOURCE",
     "TITLE_LIMIT",
@@ -86,6 +94,7 @@ __all__ = [
     "starting_state_id",
     "state_groups",
     "state_id_for_group",
+    "strip_asset_marker",
     "sub_work_serial",
     "sub_works",
     "task_files",
@@ -123,13 +132,20 @@ def ensure_issue(
     state: str,
     external_id: str,
     parent: str | None = None,
+    labels: list[str] | None = None,
 ) -> tuple[dict, bool]:
     """Create at most one issue for `external_id`, carrying the `AUTO` label.
 
     Every issue autolab creates — the mission Work and its Sub-Works alike —
     carries that label, which is what makes it eligible for automatic
     execution later (`next_work`).
+
+    `labels` names further labels to attach, `AUTO` first and always. Names,
+    not ids: creating them on first use is `ensure_label`'s job, and the
+    caller that knows a Sub-Work is an asset should not have to know how a
+    Plane label comes into being.
     """
+    names = [AUTO_LABEL, *(label for label in (labels or []) if label != AUTO_LABEL)]
     return shared_ensure_issue(
         config,
         project_id,
@@ -139,7 +155,7 @@ def ensure_issue(
         external_source=EXTERNAL_SOURCE,
         external_id=external_id,
         parent=parent,
-        labels=[ensure_label(config, project_id)],
+        labels=[ensure_label(config, project_id, label) for label in names],
     )
 
 
@@ -158,6 +174,20 @@ def task_files(directory: Path) -> list[tuple[int, Path]]:
             tasks.append((int(match.group("number")), path))
     tasks.sort(key=lambda item: item[0])
     return tasks
+
+
+def strip_asset_marker(text: str) -> tuple[str, bool]:
+    """`(text without a trailing `[Asset]` marker, whether it carried one)`.
+
+    The marker is a signal to this registration, not part of the task the
+    coding run will read, so it never reaches Plane. Matched
+    case-insensitively and only at the very end of the file, which is where
+    the superdirector guide puts it.
+    """
+    body = text.rstrip()
+    if not body.upper().endswith(ASSET_MARKER.upper()):
+        return text, False
+    return body[: -len(ASSET_MARKER)].rstrip() + "\n", True
 
 
 # --- projects --------------------------------------------------------------
@@ -433,19 +463,25 @@ def transition_work(project: str, channel: str, topic: str, group: str) -> str:
 
 
 def register_task_files(
-    project: str, channel: str, topic: str, coding_dir: Path, rev: int
+    project: str, channel: str, topic: str, plan_dir: Path, rev: int
 ) -> list[str]:
-    """Register every `task[N].md` in `coding_dir` as a Sub-Work of the
-    topic's Work, keyed `<channel>/<topic>@<rev>#<N>`."""
+    """Register every `task[N].md` in `plan_dir` as a Sub-Work of the topic's
+    Work, keyed `<channel>/<topic>@<rev>#<N>`.
+
+    A task file ending in `[Asset]` needs a media asset before it can be
+    coded. The marker is stripped from the description and becomes the
+    `asset` label on the issue, which is what `handle_run` dispatches on.
+    """
     config, plane_project, project_id = _prepare(project)
     issue = find_issue_by_external(config, project_id, work_key(channel, topic))
     if not issue:
         raise MissionError(f"no Work is registered for {channel}/{topic}")
     state = starting_state_id(config, project_id)
-    tasks = task_files(coding_dir)
+    tasks = task_files(plan_dir)
     lines: list[str] = []
     for number, path in tasks:
-        sub_title, sub_description = split_document(path.read_text(encoding="utf-8"))
+        text, is_asset = strip_asset_marker(path.read_text(encoding="utf-8"))
+        sub_title, sub_description = split_document(text)
         sub_issue, sub_created = ensure_issue(
             config,
             project_id,
@@ -454,9 +490,11 @@ def register_task_files(
             state=state,
             external_id=sub_work_key(channel, topic, rev, number),
             parent=str(issue["id"]),
+            labels=[ASSET_LABEL] if is_asset else None,
         )
         verb = "created sub-work" if sub_created else "already registered sub-work"
-        lines.append(f'{verb} {issue_label(plane_project, sub_issue)} "{sub_title}"')
+        suffix = " [asset]" if is_asset else ""
+        lines.append(f'{verb} {issue_label(plane_project, sub_issue)} "{sub_title}"{suffix}')
     if not tasks:
-        lines.append("the coding run wrote no task files; the mission has no sub-work")
+        lines.append("the superdirector wrote no task files; the mission has no sub-work")
     return lines

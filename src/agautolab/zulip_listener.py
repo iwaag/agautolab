@@ -36,6 +36,7 @@ from agag.topics import (
 )
 from agag.zulip import (
     ZulipClient,
+    ZulipError,
     log,
     sweep_serve,
     topic_write,
@@ -49,6 +50,7 @@ from .mission import (
     register_task_files,
     report_work,
     split_document,
+    task_files,
     transition_work,
     upsert_work,
     write_mission_workspace,
@@ -72,13 +74,21 @@ SUBSCRIBE_INTERVAL_SECONDS = 60
 ACK_TEXT = "Message received. Please wait for the reply."
 EMPTY_REPLY = "There is nothing in this topic to answer yet."
 
+# The planning round's files, all of them in the persistent project folder.
+MISSION_FILE = "new_mission.md"
+PLAN_FILE = "plan.md"
+
 # One topic occupies the listener for at most the sum of these; the sweep
 # loop is single-threaded and serial, so that sum is also the delay before
 # the next matching topic is looked at (events keep queueing meanwhile).
 FRONT_TIMEOUT_SECONDS = 360
-CODING_TIMEOUT_SECONDS = 600
 # Real work, not a task split: an order of magnitude more room.
 WORK_TIMEOUT_SECONDS = 1200
+# The superdirector reads the whole project before it plans. The disposable
+# coding split it replaced ran on 600 s while seeing only `new_mission.md`;
+# this one sees `main/`, `direction/` and `devlog/`, so it gets the work
+# timeout rather than the split's.
+SUPERDIRECTOR_TIMEOUT_SECONDS = WORK_TIMEOUT_SECONDS
 
 __all__ = [
     "ZULIP_ENV",
@@ -92,8 +102,9 @@ __all__ = [
     "handle_topic",
     "main",
     "next_record_path",
-    "run_coding",
+    "project_directory",
     "run_front",
+    "run_superdirector",
     "run_work",
     "subscribe_project_channels",
     "serve",
@@ -195,19 +206,47 @@ def handle_topic(client: ZulipClient, channel: str, topic: str) -> None:
     serve_topic(client, channel, topic, serve, ack_text=ACK_TEXT, empty_reply=EMPTY_REPLY)
 
 
-def run_coding(coding_dir: Path) -> str:
-    """One task-split run in the topic's coding workspace, with its record."""
-    record = next_record_path(RECORDS_ROOT / "coding")
+def project_directory(project: str) -> Path:
+    """`.local/projects/<slug>/` — the folder holding `main/`, `direction/`
+    and `devlog/`, which `init_project` clones and every later serving reuses."""
+    return PROJECTS_ROOT / project
+
+
+def run_superdirector(project_dir: Path) -> str:
+    """One mission-planning run in the project folder, with its record.
+
+    This replaced a `coding` run in a disposable `<N>/coding/` workspace that
+    saw nothing but the copied `new_mission.md`. Planning a mission means
+    weighing the code against the direction documents and the devlog, so the
+    run happens where all three are — and the role is its own, not `coding`.
+    """
+    record = next_record_path(RECORDS_ROOT / "superdirector")
     output, _, exit_code = run_role(
-        "coding",
+        "superdirector",
         guide("mission_superdirector", "guide.md"),
-        cwd=coding_dir,
-        timeout=CODING_TIMEOUT_SECONDS,
+        cwd=project_dir,
+        timeout=SUPERDIRECTOR_TIMEOUT_SECONDS,
         record=record,
     )
     if exit_code != 0:
-        raise ListenerError(f"coding run exited {exit_code}: {output.strip()[:500]}")
+        raise ListenerError(f"superdirector run exited {exit_code}: {output.strip()[:500]}")
     return output.strip()
+
+
+def clear_planning_files(project_dir: Path) -> None:
+    """Remove the planning round's files from the project folder.
+
+    Called only after Plane has accepted the whole round. Plane holds the
+    canonical copies from that moment on, and Step 6 reads them back from
+    there; leaving the files would mean a later round's registration could
+    pick up a stale `task[N].md` that the superdirector did not write.
+    """
+    for path in [
+        project_dir / MISSION_FILE,
+        project_dir / PLAN_FILE,
+        *(path for _, path in task_files(project_dir)),
+    ]:
+        path.unlink(missing_ok=True)
 
 
 def handle_front_response(
@@ -218,29 +257,47 @@ def handle_front_response(
     Returns the report sections and whether the topic should be resolved
     after the final reply.
 
-    No command file is deleted and no split is cleaned up. Each serving works
-    in a fresh generation `<N>/`, so a previous generation's `new_mission.md`
-    or `task[N].md` is simply never looked at again — the generation number is
-    the guard, and the leftovers stay as evidence of what that run was told.
-    `N` is also the Sub-Work generation key, so keys from a cancelled
-    generation (which live in Plane forever) cannot be reused.
+    The front's own workspace is still a fresh generation `<N>/` and nothing
+    in it is deleted — the generation number is the guard, and the leftovers
+    stay as evidence of what that run was told. `N` is also the Sub-Work
+    generation key, so keys from a cancelled generation (which live in Plane
+    forever) cannot be reused.
+
+    The *planning* files are different. They live in the persistent project
+    folder, where no generation number separates one round from the next, so
+    they are cleared once Plane has taken them — and deliberately left behind
+    when it has not, so a retry finds the plan instead of paying for it twice.
     """
     sections: list[str] = []
     resolve_after = False
 
-    new_mission = front_dir / "new_mission.md"
+    new_mission = front_dir / MISSION_FILE
     if new_mission.is_file():
-        title, description = split_document(new_mission.read_text(encoding="utf-8"))
-        sections.append(upsert_work(project, channel, topic, title, description))
+        project_dir = project_directory(project)
+        project_dir.mkdir(parents=True, exist_ok=True)
+        mission_text = new_mission.read_text(encoding="utf-8")
+        (project_dir / MISSION_FILE).write_text(mission_text, encoding="utf-8")
+
+        sections.append(run_superdirector(project_dir))
+
+        plan = project_dir / PLAN_FILE
+        if not plan.is_file():
+            raise ListenerError(
+                f"the superdirector wrote no {PLAN_FILE} in {project_dir}"
+            )
+        # Title from the mission, description from the plan: the Work is the
+        # mission the requester asked for, described by what the
+        # superdirector decided to do about it. Step 6 reads this back as
+        # `plan.md`, so the whole file travels, heading included.
+        title, _ = split_document(mission_text)
+        sections.append(
+            upsert_work(project, channel, topic, title, plan.read_text(encoding="utf-8"))
+        )
         cancelled = cancel_sub_works(project, channel, topic)
         if cancelled:
             sections.append(f"cancelled {cancelled} existing sub-work(s)")
-        coding_dir = generation_dir(channel, topic, number, "coding")
-        (coding_dir / "new_mission.md").write_text(
-            new_mission.read_text(encoding="utf-8"), encoding="utf-8"
-        )
-        sections.append(run_coding(coding_dir))
-        sections.extend(register_task_files(project, channel, topic, coding_dir, number))
+        sections.extend(register_task_files(project, channel, topic, project_dir, number))
+        clear_planning_files(project_dir)
 
     start_flag = front_dir / "start.flag"
     if start_flag.is_file():
