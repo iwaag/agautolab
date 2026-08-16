@@ -67,8 +67,14 @@ def test_init_project_runs_every_idempotent_step_in_order(monkeypatch, tmp_path)
         "ensure_gitignore",
         lambda config, path: calls.append(("gitignore", path.relative_to(tmp_path))),
     )
+    monkeypatch.setattr(
+        project_init,
+        "ensure_aesthetics",
+        lambda config, path: calls.append(("aesthetics", path.relative_to(tmp_path))),
+    )
 
     assert project_init.init_project("demo-project") == "success"
+    # `aesthetics.md` is seeded in the direction clone and nowhere else.
     assert calls == [
         ("plane", "demo-project"),
         ("repo", "demo-project"),
@@ -77,10 +83,37 @@ def test_init_project_runs_every_idempotent_step_in_order(monkeypatch, tmp_path)
         ("repo", "demo-project-direction"),
         ("clone", "demo-project-direction", Path("demo-project/direction")),
         ("gitignore", Path("demo-project/direction")),
+        ("aesthetics", Path("demo-project/direction")),
         ("repo", "demo-project-devlog"),
         ("clone", "demo-project-devlog", Path("demo-project/devlog")),
         ("gitignore", Path("demo-project/devlog")),
     ]
+
+
+def test_ensure_aesthetics_seeds_once_and_keeps_a_rewrite(monkeypatch, tmp_path):
+    commands = []
+    monkeypatch.setattr(
+        project_init, "_git", lambda config, *args, cwd=None: commands.append(args) or ""
+    )
+    gitea = project_init.GiteaConfig("http://gitea", "token", "autodev")
+
+    assert project_init.ensure_aesthetics(gitea, tmp_path) is True
+    assert (tmp_path / "aesthetics.md").read_text(encoding="utf-8") == (
+        "2D retro digital game art style\n"
+    )
+    assert [args[0] for args in commands] == ["add", "-c", "push"]
+    assert commands[0] == ("add", "aesthetics.md")
+    assert commands[-1] == ("push", "origin", "HEAD:main")
+
+    # Presence, not content: a project whose art direction someone rewrote
+    # keeps the rewrite on the next init.
+    commands.clear()
+    (tmp_path / "aesthetics.md").write_text("hand-written direction\n", encoding="utf-8")
+    assert project_init.ensure_aesthetics(gitea, tmp_path) is False
+    assert commands == []
+    assert (tmp_path / "aesthetics.md").read_text(encoding="utf-8") == (
+        "hand-written direction\n"
+    )
 
 
 def test_ensure_gitignore_seeds_commits_and_is_idempotent(monkeypatch, tmp_path):
