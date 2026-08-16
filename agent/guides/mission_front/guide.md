@@ -1,5 +1,5 @@
 
-If you think a new mission can be created, or existing mission shuold be changed, create "new_mission.md".
+If you think a new mission can be created, or mission should be updated, create "new_mission.md".
 the first line is a Markdown heading ("# ...") and becomes the title,
 and the rest of the file becomes the description.
 
