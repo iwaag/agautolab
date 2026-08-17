@@ -323,6 +323,31 @@ def _commit_and_push(config: GiteaConfig, workspace: Path, path: Path, message: 
     _git(config, "push", "origin", "HEAD:main", cwd=workspace)
 
 
+def commit_all_and_push(config: GiteaConfig, workspace: Path, message: str) -> bool:
+    """Commit and push whatever is dirty in `workspace`, if anything is.
+
+    Returns whether a commit was made. `git add -A` respects the clone's
+    `.gitignore`, so `.local/` never enters the commit; the porcelain check
+    is what makes a clean workspace cost nothing.
+    """
+    if not _git(config, "status", "--porcelain", cwd=workspace).strip():
+        return False
+    _git(config, "add", "-A", cwd=workspace)
+    _git(
+        config,
+        "-c",
+        f"user.name={GIT_AUTHOR_NAME}",
+        "-c",
+        f"user.email={GIT_AUTHOR_EMAIL}",
+        "commit",
+        "-m",
+        message,
+        cwd=workspace,
+    )
+    _git(config, "push", "origin", "HEAD:main", cwd=workspace)
+    return True
+
+
 def ensure_aesthetics(config: GiteaConfig, workspace: Path) -> bool:
     """Seed the direction clone's `aesthetics.md`, and push it.
 

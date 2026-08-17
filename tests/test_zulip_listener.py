@@ -902,15 +902,23 @@ def test_dispatch_routes_run_topics_anywhere_and_mission_topics_only_in_projects
         lambda client, channel, topic: routed.append(("mission", channel, topic)),
     )
 
+    monkeypatch.setattr(
+        zulip_listener, "handle_bmining",
+        lambda client, channel, topic: routed.append(("bmining", channel, topic)),
+    )
+
     zulip_listener.dispatch(None, "general", "run-1")
     zulip_listener.dispatch(None, CHANNEL, "run-2")
     zulip_listener.dispatch(None, CHANNEL, TOPIC)
     zulip_listener.dispatch(None, "general", "mission-stray")  # silently ignored
+    zulip_listener.dispatch(None, CHANNEL, "bmining-idea")
+    zulip_listener.dispatch(None, "general", "bmining-stray")  # silently ignored
 
     assert routed == [
         ("run", "general", "run-1"),
         ("run", CHANNEL, "run-2"),
         ("mission", CHANNEL, TOPIC),
+        ("bmining", CHANNEL, "bmining-idea"),
     ]
 
 
@@ -929,3 +937,144 @@ def test_the_listener_never_widens_its_own_subscriptions():
 def test_project_from_channel_rejects_non_project_channels(channel):
     with pytest.raises(zulip_listener.ListenerError):
         zulip_listener.project_from_channel(channel)
+
+
+# --- bmining topics ---------------------------------------------------------
+
+
+BMINING_TOPIC = "bmining-idea"
+
+
+def wire_bmining(monkeypatch, tmp_path, calls, *, reply="director says hi",
+                 committed=False, director=None):
+    monkeypatch.setattr(zulip_listener, "PROJECTS_ROOT", tmp_path / "projects")
+    monkeypatch.setattr(zulip_listener, "RECORDS_ROOT", tmp_path / "records")
+    monkeypatch.setattr(
+        zulip_listener, "init_project", lambda project: calls.append(("init", project)) or "success"
+    )
+    monkeypatch.setattr(
+        zulip_listener,
+        "run_director",
+        director or (lambda prompt, cwd: calls.append(("director", prompt, cwd)) or reply),
+    )
+    monkeypatch.setattr(zulip_listener, "load_gitea_config", lambda: "gitea-config")
+    monkeypatch.setattr(
+        zulip_listener,
+        "commit_all_and_push",
+        lambda config, workspace, message: (
+            calls.append(("push", config, workspace, message)) or committed
+        ),
+    )
+    monkeypatch.setattr(
+        topics,
+        "topic_write",
+        lambda topic, text, **kwargs: calls.append(("write", topic, text, kwargs)) or "success",
+    )
+    guides = tmp_path / "guides"
+    (guides / "bmining_director").mkdir(parents=True)
+    (guides / "bmining_director" / "guide.md").write_text("BMINING GUIDE")
+    monkeypatch.setattr(zulip_listener, "GUIDES", guides)
+
+
+def last_write(calls):
+    """The final reply — after it, serve_topic re-checks history, so the
+    last call is a read, not the write."""
+    return [call for call in calls if call[0] == "write"][-1][2]
+
+
+def bmining_paths(tmp_path):
+    direction = tmp_path / "projects" / PROJECT / "direction"
+    return direction, direction / ".local" / "work"
+
+
+def test_handle_bmining_places_chatlog_runs_director_and_replies(monkeypatch, tmp_path):
+    calls, seen = [], {}
+    direction, work = bmining_paths(tmp_path)
+
+    def director(prompt, cwd):
+        seen["chatlog"] = (work / "chatlog.md").read_text()
+        calls.append(("director", prompt, cwd))
+        return "director says hi"
+
+    wire_bmining(monkeypatch, tmp_path, calls, director=director)
+    zulip_listener.handle_bmining(Client(calls), CHANNEL, BMINING_TOPIC)
+
+    kinds = [call[0] for call in calls if call[0] != "history"]
+    assert kinds == ["whoami", "write", "init", "director", "push", "write"]
+    assert calls[1][2] == zulip_listener.ACK_TEXT
+    assert "[Developer] Build it" in seen["chatlog"]
+    directed = next(call for call in calls if call[0] == "director")
+    assert directed[2] == direction
+    assert "BMINING GUIDE" in directed[1]
+    assert '".local/work/chatlog.md"' in directed[1]
+    assert last_write(calls) == "director says hi"
+
+
+def test_bmining_work_directory_is_removed_after_the_reply(monkeypatch, tmp_path):
+    calls = []
+    _, work = bmining_paths(tmp_path)
+    work.mkdir(parents=True)
+    (work / "leftover.txt").write_text("stale")
+
+    wire_bmining(monkeypatch, tmp_path, calls)
+    zulip_listener.handle_bmining(Client(calls), CHANNEL, BMINING_TOPIC)
+
+    assert not work.exists()
+
+
+def test_bmining_replaces_a_leftover_chatlog(monkeypatch, tmp_path):
+    calls, seen = [], {}
+    _, work = bmining_paths(tmp_path)
+    work.mkdir(parents=True)
+    (work / "chatlog.md").write_text("stale conversation")
+
+    def director(prompt, cwd):
+        seen["chatlog"] = (work / "chatlog.md").read_text()
+        return "reply"
+
+    wire_bmining(monkeypatch, tmp_path, calls, director=director)
+    zulip_listener.handle_bmining(Client(calls), CHANNEL, BMINING_TOPIC)
+
+    assert "stale conversation" not in seen["chatlog"]
+    assert "[Developer] Build it" in seen["chatlog"]
+
+
+def test_bmining_reports_the_push_when_the_clone_was_dirty(monkeypatch, tmp_path):
+    calls = []
+    direction, _ = bmining_paths(tmp_path)
+    wire_bmining(monkeypatch, tmp_path, calls, committed=True)
+
+    zulip_listener.handle_bmining(Client(calls), CHANNEL, BMINING_TOPIC)
+
+    pushed = next(call for call in calls if call[0] == "push")
+    assert pushed[2] == direction
+    assert BMINING_TOPIC in pushed[3]
+    assert "recorded notes committed and pushed" in last_write(calls)
+
+
+def test_bmining_stays_quiet_about_a_clean_clone(monkeypatch, tmp_path):
+    calls = []
+    wire_bmining(monkeypatch, tmp_path, calls, committed=False)
+
+    zulip_listener.handle_bmining(Client(calls), CHANNEL, BMINING_TOPIC)
+
+    assert "committed" not in last_write(calls)
+
+
+def test_a_failed_director_run_still_cleans_up_and_answers(monkeypatch, tmp_path):
+    calls = []
+    _, work = bmining_paths(tmp_path)
+
+    def director(prompt, cwd):
+        raise zulip_listener.ListenerError("boom")
+
+    wire_bmining(monkeypatch, tmp_path, calls, director=director)
+    zulip_listener.handle_bmining(Client(calls), CHANNEL, BMINING_TOPIC)
+
+    assert not work.exists()
+    assert "failed during director: boom" in last_write(calls)
+    assert all(call[0] != "push" for call in calls)
+
+
+def test_bmining_is_swept(monkeypatch):
+    assert "bmining-" == zulip_listener.BMINING_TOPIC_PREFIX

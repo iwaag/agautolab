@@ -26,7 +26,9 @@ WORKING_ALLOWED_TOOLS = (
 
 ROLE_ALLOWED_TOOLS = {
     "front": WORKING_ALLOWED_TOOLS,
-    "director": "Read,Glob,Grep",
+    # `director` records discussion notes into the direction clone it runs in
+    # (brain_mining); recording is writing, so it gets the working set.
+    "director": WORKING_ALLOWED_TOOLS,
     "summarizer": "Read,Glob,Grep",
     "mediator": WORKING_ALLOWED_TOOLS,
     # `coding` writes task files in whatever workspace its caller points it at.
@@ -49,7 +51,7 @@ ROLE_WORKSPACES = {
 # The roles that only read. Under claude_code that is ROLE_ALLOWED_TOOLS above;
 # under agcode it is the offered tool set itself — agcode has no permission
 # engine, so a read-only door is simply handed fewer tools.
-READONLY_ROLES = {"director", "summarizer"}
+READONLY_ROLES = {"summarizer"}
 
 
 def _agcode_args(role: str) -> list[str]:

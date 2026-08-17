@@ -159,3 +159,30 @@ def test_auto_description_carries_marker_and_slug():
 def test_init_project_rejects_unsafe_names(name):
     with pytest.raises(project_init.ProjectInitError):
         project_init.init_project(name)
+
+
+def test_commit_all_and_push_commits_a_dirty_workspace(monkeypatch, tmp_path):
+    commands = []
+
+    def fake_git(config, *args, cwd=None):
+        commands.append(args)
+        return " M notes.md\n?? new.md\n" if args[0] == "status" else ""
+
+    monkeypatch.setattr(project_init, "_git", fake_git)
+    gitea = project_init.GiteaConfig("http://gitea", "token", "autodev")
+
+    assert project_init.commit_all_and_push(gitea, tmp_path, "record notes") is True
+    assert commands[0] == ("status", "--porcelain")
+    assert ("add", "-A") in commands
+    assert commands[-1] == ("push", "origin", "HEAD:main")
+
+
+def test_commit_all_and_push_leaves_a_clean_workspace_alone(monkeypatch, tmp_path):
+    commands = []
+    monkeypatch.setattr(
+        project_init, "_git", lambda config, *args, cwd=None: commands.append(args) or ""
+    )
+    gitea = project_init.GiteaConfig("http://gitea", "token", "autodev")
+
+    assert project_init.commit_all_and_push(gitea, tmp_path, "record notes") is False
+    assert [args[0] for args in commands] == ["status"]

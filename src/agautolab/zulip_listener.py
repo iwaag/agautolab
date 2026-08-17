@@ -62,7 +62,14 @@ from .mission import (
     upsert_work,
     write_mission_workspace,
 )
-from .project_init import PROJECT_NAME, PROJECTS_ROOT, init_project
+from .project_init import (
+    AUTO_MARKER,
+    PROJECT_NAME,
+    PROJECTS_ROOT,
+    commit_all_and_push,
+    init_project,
+    load_gitea_config,
+)
 from .role_run import run_role
 
 AGAUTOLAB_ROOT = Path(__file__).resolve().parents[2]
@@ -74,6 +81,7 @@ RECORDS_ROOT = AGAUTOLAB_ROOT / ".local" / "agent"
 MISSION_TOPIC_PREFIX = "mission-"
 RUN_TOPIC_PREFIX = "run-"
 CREATE_TOPIC_PREFIX = "create-"
+BMINING_TOPIC_PREFIX = "bmining-"
 PROJECT_CHANNEL_PREFIX = "pj-"
 HISTORY_MESSAGES = 1000
 
@@ -131,6 +139,9 @@ WORK_TIMEOUT_SECONDS = 1200
 # this one sees `main/`, `direction/` and `devlog/`, so it gets the work
 # timeout rather than the split's.
 SUPERDIRECTOR_TIMEOUT_SECONDS = WORK_TIMEOUT_SECONDS
+# The director reads the whole direction clone and records notes into it, so
+# it gets the work timeout too.
+DIRECTOR_TIMEOUT_SECONDS = WORK_TIMEOUT_SECONDS
 
 __all__ = [
     "ZULIP_ENV",
@@ -138,12 +149,16 @@ __all__ = [
     "answer_prompt",
     "asset_gate",
     "asset_order_text",
+    "bmining_prompt",
+    "bmining_work_directory",
+    "direction_directory",
     "dispatch",
     "find_asset_key",
     "format_chatlog",
     "front_prompt",
     "generation_dir",
     "guide",
+    "handle_bmining",
     "handle_create",
     "handle_front_response",
     "handle_run",
@@ -155,8 +170,10 @@ __all__ = [
     "project_channel",
     "project_directory",
     "resign",
+    "run_director",
     "run_front",
     "run_superdirector",
+    "serve_bmining",
     "run_work",
     "serve",
     "topic_workspace",
@@ -676,6 +693,91 @@ def handle_create(client: ZulipClient, channel: str, topic: str) -> None:
                 channel=channel, client=client)
 
 
+# --- brain-mining discussion on bmining- topics -----------------------------
+
+
+def direction_directory(slug: str) -> Path:
+    """`.local/projects/<slug>/direction/` — the clone the director works in."""
+    return PROJECTS_ROOT / slug / "direction"
+
+
+def bmining_work_directory(slug: str) -> Path:
+    """`.local/work/` inside the direction clone — holds only the chatlog.
+
+    Re-created with a fresh chatlog on every serving and removed after the
+    reply; what the director *records* lives in the clone proper.
+    """
+    return direction_directory(slug) / ".local" / "work"
+
+
+def bmining_prompt(bot_name: str) -> str:
+    """The chatlog placement, then the discussion guide."""
+    return prompt_with_guide(
+        [
+            f'The chatlog is placed at ".local/work/{CHATLOG_FILE}" in the '
+            f"working directory. You are {bot_name!r} in the chatlog.",
+        ],
+        guide("bmining_director", "guide.md"),
+    )
+
+
+def run_director(prompt: str, cwd: Path) -> str:
+    """One discussion run in the direction clone, with its record."""
+    record = next_record_path(RECORDS_ROOT / "director")
+    output, _, exit_code = run_role(
+        "director",
+        prompt,
+        cwd=cwd,
+        timeout=DIRECTOR_TIMEOUT_SECONDS,
+        record=record,
+    )
+    if exit_code != 0:
+        raise ListenerError(f"director run exited {exit_code}: {output.strip()[:500]}")
+    return output.strip()
+
+
+def serve_bmining(context) -> TopicResult:
+    """One discussion serving: chatlog in, director run, notes pushed.
+
+    The commit/push of whatever the director recorded is deterministic
+    handler code — the agent is never asked to run git, and `.gitignore`
+    (not the cleanup) is what keeps the chatlog out of the commit.
+    """
+    project = project_from_channel(context.channel)
+
+    context.step = "project setup"
+    init_project(project)
+
+    direction_dir = direction_directory(project)
+    work_dir = bmining_work_directory(project)
+    try:
+        context.step = "chatlog placement"
+        work_dir.mkdir(parents=True, exist_ok=True)
+        chatlog_path(work_dir).write_text(
+            format_chatlog(context.history, context.self_id), encoding="utf-8"
+        )
+
+        context.step = "director"
+        sections = [run_director(bmining_prompt(context.bot_name), direction_dir)]
+
+        context.step = "recording"
+        if commit_all_and_push(
+            load_gitea_config(),
+            direction_dir,
+            f"{AUTO_MARKER} bmining notes from {context.topic}",
+        ):
+            sections.append("recorded notes committed and pushed")
+        return TopicResult(sections)
+    finally:
+        remove_work_directory(work_dir)
+
+
+def handle_bmining(client: ZulipClient, channel: str, topic: str) -> None:
+    """Serve one awaiting bmining topic through the shared skeleton."""
+    log(f"bmining topic {channel!r}/{topic!r}")
+    serve_topic(client, channel, topic, serve_bmining, ack_text=ACK_TEXT, empty_reply=EMPTY_REPLY)
+
+
 def observe_topic(channel: str, topic: str) -> None:
     """Passive handler (`AUTOLAB_ZULIP_LOG_ONLY=1`): log sweep matches, never act."""
     log(f"observed sweep match {channel!r}/{topic!r}")
@@ -700,6 +802,9 @@ def dispatch(client: ZulipClient, channel: str, topic: str) -> None:
     if topic.startswith(CREATE_TOPIC_PREFIX):
         handle_create(client, channel, topic)
         return
+    if topic.startswith(BMINING_TOPIC_PREFIX):
+        handle_bmining(client, channel, topic)
+        return
     handle_topic(client, channel, topic)
 
 
@@ -715,7 +820,12 @@ def main() -> None:
     # the project creator's decision about who the work goes to, not something
     # a listener may widen on its own. See pyagag's README, "Subscription is
     # the routing decision".
-    prefixes = (MISSION_TOPIC_PREFIX, RUN_TOPIC_PREFIX, CREATE_TOPIC_PREFIX)
+    prefixes = (
+        MISSION_TOPIC_PREFIX,
+        RUN_TOPIC_PREFIX,
+        CREATE_TOPIC_PREFIX,
+        BMINING_TOPIC_PREFIX,
+    )
     log(f"agautolab zulip listener starting (pull sweep, prefixes {prefixes})")
     try:
         sweep_serve(client, handler, topic_filter=prefixes)
