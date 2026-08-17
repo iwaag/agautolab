@@ -12,11 +12,15 @@ continued conversation ran on top of the previous run's leftovers and a
 separate `generation` counter file had to keep Sub-Work keys apart. `N` is now
 both the workspace and that key.
 
-The superdirector serves the topic alone — there is no front relay. It reads
-the chatlog itself, and the project's clones are reachable from its serving
-workspace through symlinks (`link_project_folders`), so everything one run
-wrote — `plan.md`, the task split, the flags — stays behind in its own
-generation as evidence and can never be acted on twice.
+The superdirector serves the topic alone — there is no front relay. It runs
+in the persistent project folder, where `main/`, `direction/` and `devlog/`
+are real directories (symlinking them into the workspace was tried first, and
+harness file tools do not follow directory symlinks), and the serving's own
+generation workspace is handed to it by absolute path — the same shape as the
+create-topic answer flow. The chatlog and Plane mirror are read from there,
+and `plan.md`, the task split and the flags are written back there, so
+everything one run wrote stays behind in its own generation as evidence and
+can never be acted on twice.
 """
 
 from __future__ import annotations
@@ -31,7 +35,6 @@ from pathlib import Path
 
 from agag.topics import (
     TopicResult,
-    chatlog_placement,
     chatlog_path,
     format_chatlog,
     generation_dir as shared_generation_dir,
@@ -99,7 +102,6 @@ EMPTY_REPLY = "There is nothing in this topic to answer yet."
 # the superdirector wrote this run.
 PLAN_FILE = "plan.md"
 CURRENT_DIR = "current"
-PROJECT_FOLDERS = ("main", "direction", "devlog")
 
 # --- the asset route -------------------------------------------------------
 #
@@ -167,7 +169,6 @@ __all__ = [
     "handle_run",
     "handle_superdirector_response",
     "handle_topic",
-    "link_project_folders",
     "main",
     "mentions_us",
     "next_record_path",
@@ -222,32 +223,31 @@ def next_record_path(directory: Path) -> Path:
     return shared_next_record_path(directory)
 
 
-def superdirector_prompt(bot_name: str, plane_files: bool) -> str:
-    lines = [chatlog_placement(bot_name)]
+def superdirector_prompt(bot_name: str, workspace: Path, plane_files: bool) -> str:
+    """The placement lines, then the guide — the `answer_prompt` shape:
+    read from and write to the workspace by absolute path, work in the
+    project itself."""
+    lines = [
+        f'The conversation with the requester ("{CHATLOG_FILE}") is placed in '
+        f'"{workspace}". You are {bot_name!r} in the chatlog.',
+    ]
     if plane_files:
         lines.append(
-            f'The currently registered mission and tasks are placed in "{CURRENT_DIR}/".'
+            "The currently registered mission and tasks are placed in "
+            f'"{workspace / CURRENT_DIR}".'
         )
+    lines.append(
+        f'Write every file this guide asks for — "{PLAN_FILE}", "task[N].md", '
+        f'the flags — into "{workspace}".'
+    )
+    lines.append("Your working directory is the project itself.")
     return prompt_with_guide(lines, guide("mission_superdirector", "guide.md"))
-
-
-def link_project_folders(workspace: Path, project: str) -> None:
-    """Symlink the project's clones into one serving workspace.
-
-    The superdirector works in a fresh generation directory, so the persistent
-    clones it plans from — `main/`, `direction/`, `devlog/` — are reached
-    through links rather than by running in the project folder itself. What it
-    writes next to them stays in the generation; what it reads through them is
-    always the live clone.
-    """
-    project_dir = project_directory(project)
-    for name in PROJECT_FOLDERS:
-        (workspace / name).symlink_to(project_dir / name, target_is_directory=True)
 
 
 def serve(context) -> TopicResult:
     """agautolab's part of one serving: project setup, Plane read-back, and
-    one superdirector run in its own generation workspace.
+    one superdirector run in the project folder, reading from and writing to
+    the serving's generation workspace by absolute path.
 
     `handle_superdirector_response` then acts on what the superdirector
     *wrote* — its answer is relayed verbatim and never parsed. A run that
@@ -263,7 +263,6 @@ def serve(context) -> TopicResult:
 
     context.step = "project setup"
     init_project(project)
-    link_project_folders(workspace, project)
 
     context.step = "plane read-back"
     current = workspace / CURRENT_DIR
@@ -274,7 +273,10 @@ def serve(context) -> TopicResult:
 
     context.step = "superdirector"
     sections = [
-        run_superdirector(superdirector_prompt(context.bot_name, plane_files), workspace)
+        run_superdirector(
+            superdirector_prompt(context.bot_name, workspace, plane_files),
+            project_directory(project),
+        )
     ]
 
     context.step = "response handling"
@@ -298,11 +300,12 @@ def project_directory(project: str) -> Path:
 
 
 def run_superdirector(prompt: str, cwd: Path) -> str:
-    """One mission-planning run in the serving workspace, with its record.
+    """One mission-planning run in the project folder, with its record.
 
     Planning a mission means weighing the chatlog against the code, the
-    direction documents and the devlog, so the run happens where all four are
-    reachable — the generation workspace `link_project_folders` prepared.
+    direction documents and the devlog, so the run happens where the clones
+    are real directories; the chatlog and its outputs travel by absolute
+    workspace path in the prompt.
     """
     record = next_record_path(RECORDS_ROOT / "superdirector")
     output, _, exit_code = run_role(

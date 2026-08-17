@@ -143,22 +143,11 @@ def test_handle_topic_acks_then_runs_the_steps_in_order(monkeypatch, tmp_path):
     # The Plane mirror goes to `current/`, and an empty mirror leaves nothing.
     assert calls[4][1] == workspace / "current"
     assert not (workspace / "current").exists()
-    assert calls[5][2] == workspace
+    # The run happens in the project folder; the workspace travels by path.
+    assert calls[5][2] == project_dir(tmp_path)
+    assert str(workspace) in calls[5][1]
     assert "currently registered mission" not in calls[5][1]
     assert calls[6][1:3] == (TOPIC, "planner says hi")
-
-
-def test_the_workspace_links_the_project_clones(monkeypatch, tmp_path):
-    calls = []
-    wire(monkeypatch, tmp_path, calls)
-
-    zulip_listener.handle_topic(Client(calls), CHANNEL, TOPIC)
-
-    workspace = superdirector_dir(tmp_path)
-    for name in ("main", "direction", "devlog"):
-        link = workspace / name
-        assert link.is_symlink()
-        assert link.readlink() == project_dir(tmp_path) / name
 
 
 def test_each_serving_cuts_a_new_generation(monkeypatch, tmp_path):
@@ -172,9 +161,10 @@ def test_each_serving_cuts_a_new_generation(monkeypatch, tmp_path):
 
     assert superdirector_dir(tmp_path, 1).is_dir()
     assert superdirector_dir(tmp_path, 2).is_dir()
-    assert [call[2] for call in calls if call[0] == "superdirector"] == [
-        superdirector_dir(tmp_path, 1), superdirector_dir(tmp_path, 2),
-    ]
+    # Each run is pointed at its own generation workspace.
+    prompts = [call[1] for call in calls if call[0] == "superdirector"]
+    assert str(superdirector_dir(tmp_path, 1)) in prompts[0]
+    assert str(superdirector_dir(tmp_path, 2)) in prompts[1]
 
 
 def test_handle_topic_mentions_plane_files_when_they_were_written(monkeypatch, tmp_path):
@@ -184,9 +174,10 @@ def test_handle_topic_mentions_plane_files_when_they_were_written(monkeypatch, t
     zulip_listener.handle_topic(Client(calls), CHANNEL, TOPIC)
 
     prompt = next(call[1] for call in calls if call[0] == "superdirector")
-    assert 'The currently registered mission and tasks are placed in "current/".' in prompt
+    current = superdirector_dir(tmp_path) / "current"
+    assert f'The currently registered mission and tasks are placed in "{current}".' in prompt
     assert prompt.endswith("GUIDE TEXT")
-    assert (superdirector_dir(tmp_path) / "current").is_dir()
+    assert current.is_dir()
 
 
 def test_handle_topic_marks_the_bots_own_lines_in_the_chatlog(monkeypatch, tmp_path):
@@ -370,7 +361,9 @@ def test_handle_topic_resolves_the_topic_after_the_final_reply(monkeypatch, tmp_
     monkeypatch.setattr(
         zulip_listener,
         "run_superdirector",
-        lambda prompt, cwd: (cwd / "cancel.flag").touch() or "cancelling",
+        lambda prompt, cwd: (
+            (superdirector_dir(tmp_path) / "cancel.flag").touch() or "cancelling"
+        ),
     )
 
     zulip_listener.handle_topic(client, CHANNEL, TOPIC)
@@ -392,7 +385,9 @@ def test_handle_topic_reports_a_response_handling_failure(monkeypatch, tmp_path)
     monkeypatch.setattr(
         zulip_listener,
         "run_superdirector",
-        lambda prompt, cwd: (cwd / "start.flag").touch() or "starting",
+        lambda prompt, cwd: (
+            (superdirector_dir(tmp_path) / "start.flag").touch() or "starting"
+        ),
     )
 
     zulip_listener.handle_topic(Client(calls), CHANNEL, TOPIC)
@@ -428,22 +423,26 @@ def test_handle_topic_reprocesses_when_a_human_posted_during_the_run(monkeypatch
     assert (superdirector_dir(tmp_path, 2) / "chatlog.md").read_text().endswith("one more thing\n")
 
 
-def test_superdirector_prompt_carries_autolabs_own_extra_line(monkeypatch, tmp_path):
+def test_superdirector_prompt_points_at_the_workspace(monkeypatch, tmp_path):
     guide_dir = tmp_path / "mission_superdirector"
     guide_dir.mkdir(parents=True)
     (guide_dir / "guide.md").write_text("GUIDE TEXT\n")
     monkeypatch.setattr(zulip_listener, "GUIDES", tmp_path)
+    workspace = tmp_path / "ws"
 
-    assert zulip_listener.superdirector_prompt("Autolab", plane_files=False) == (
-        "The chatlog is placed in the working directory. "
-        "You are 'Autolab' in the chatlog.\n\nGUIDE TEXT"
-    )
-    assert zulip_listener.superdirector_prompt("Autolab", plane_files=True) == (
-        "The chatlog is placed in the working directory. "
-        "You are 'Autolab' in the chatlog.\n"
-        'The currently registered mission and tasks are placed in "current/".'
-        "\n\nGUIDE TEXT"
-    )
+    prompt = zulip_listener.superdirector_prompt("Autolab", workspace, plane_files=False)
+    assert f'("chatlog.md") is placed in "{workspace}"' in prompt
+    assert "You are 'Autolab' in the chatlog." in prompt
+    assert f'"plan.md", "task[N].md", the flags — into "{workspace}"' in prompt
+    assert "Your working directory is the project itself." in prompt
+    assert "currently registered" not in prompt
+    assert prompt.endswith("GUIDE TEXT")
+
+    prompt = zulip_listener.superdirector_prompt("Autolab", workspace, plane_files=True)
+    assert (
+        "The currently registered mission and tasks are placed in "
+        f'"{workspace / "current"}".'
+    ) in prompt
 
 
 def test_guide_refuses_to_start_without_the_file(monkeypatch, tmp_path):

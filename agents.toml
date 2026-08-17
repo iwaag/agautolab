@@ -33,11 +33,11 @@ requires = []
 profile = "sonnet"
 requires = []
 
-# Reads the whole project — main/, direction/, devlog/ — to plan one mission.
-# On `local` while the reworked mission flow is exercised (2026-08-18); put it
-# back on the strongest profile once the flow is trusted.
+# Reads the whole project — main/, direction/, devlog/ — to plan one mission,
+# so it runs on the strongest profile available. Same profile as `coding`
+# today; the role exists so the two can diverge without touching call sites.
 [roles.superdirector]
-profile = "local"
+profile = "sonnet"
 requires = []
 
 [roles.summarizer]
