@@ -11,11 +11,11 @@ is autolab's own policy on top of it:
 - which Work to execute next, and how a finished one is reported back
 
 Both directions still live here. Reading, a topic's Work becomes `mission.md`
-and its live Sub-Works `task1.md`, `task2.md`, … in the topic's front
-workspace (`write_mission_workspace`). Writing, the front's `new_mission.md`
-updates or creates the Work (`upsert_work`), obsolete Sub-Works are cancelled
-— never deleted (`cancel_sub_works`) — and the coding split's `task[N].md`
-files are registered as a new generation of Sub-Works (`register_task_files`).
+and its live Sub-Works `task1.md`, `task2.md`, … in the serving workspace's
+`current/` mirror (`write_mission_workspace`). Writing, the superdirector's
+`plan.md` updates or creates the Work (`upsert_work`), obsolete Sub-Works are
+cancelled — never deleted (`cancel_sub_works`) — and its `task[N].md` files
+are registered as a new generation of Sub-Works (`register_task_files`).
 
 Works are keyed on Plane's own `external_source`/`external_id` pair, so a key
 survives a wiped `.local/`.
@@ -185,7 +185,7 @@ def ensure_issue(
 
 def task_files(directory: Path) -> list[tuple[int, Path]]:
     """`task[N].md` files in numeric order. Anything else in the directory —
-    the copied `new_mission.md` included — is simply not a task."""
+    the chatlog and the `current/` mirror included — is simply not a task."""
     tasks: list[tuple[int, Path]] = []
     if not directory.is_dir():
         return tasks
@@ -504,7 +504,7 @@ def report_work(
     return label, commented, success
 
 
-# --- writing the front's decisions back to Plane ---------------------------
+# --- writing the superdirector's decisions back to Plane -------------------
 
 
 def _prepare(project: str) -> tuple[PlaneConfig, dict, str]:

@@ -45,9 +45,10 @@ class Client:
         self.calls.append(("resolve", message_id, topic))
 
 
-def wire(monkeypatch, tmp_path, calls, *, plane_files=False, front="front says hi"):
+def wire(monkeypatch, tmp_path, calls, *, plane_files=False, superdirector="planner says hi"):
     monkeypatch.setattr(zulip_listener, "TOPICS_ROOT", tmp_path / "topics")
     monkeypatch.setattr(zulip_listener, "RECORDS_ROOT", tmp_path / "records")
+    monkeypatch.setattr(zulip_listener, "PROJECTS_ROOT", tmp_path / "projects")
     monkeypatch.setattr(
         zulip_listener, "init_project", lambda project: calls.append(("init", project)) or "success"
     )
@@ -60,8 +61,8 @@ def wire(monkeypatch, tmp_path, calls, *, plane_files=False, front="front says h
     )
     monkeypatch.setattr(
         zulip_listener,
-        "run_front",
-        lambda prompt, cwd: calls.append(("front", prompt, cwd)) or front,
+        "run_superdirector",
+        lambda prompt, cwd: calls.append(("superdirector", prompt, cwd)) or superdirector,
     )
     monkeypatch.setattr(
         topics,
@@ -69,8 +70,8 @@ def wire(monkeypatch, tmp_path, calls, *, plane_files=False, front="front says h
         lambda topic, text, **kwargs: calls.append(("write", topic, text, kwargs)) or "success",
     )
     guides = tmp_path / "guides"
-    (guides / "mission_front").mkdir(parents=True)
-    (guides / "mission_front" / "guide.md").write_text("GUIDE TEXT")
+    (guides / "mission_superdirector").mkdir(parents=True)
+    (guides / "mission_superdirector" / "guide.md").write_text("GUIDE TEXT")
     monkeypatch.setattr(zulip_listener, "GUIDES", guides)
 
 
@@ -78,22 +79,10 @@ PROJECT = "demo-project"
 PLAN_TEXT = "# The plan\n\nStep one, step two."
 
 
-def wire_response(
-    monkeypatch,
-    tmp_path,
-    calls,
-    *,
-    superdirector="planning done",
-    plan=PLAN_TEXT,
-    tasks=("# First\ndo this",),
-    cancelled=0,
-):
-    """Stub everything `handle_front_response` reaches outside the filesystem.
-
-    The superdirector stub writes what a real run would leave behind in the
-    project folder — `plan.md` and the task split — because the cleanup and
-    the parent-work description are read off those files.
-    """
+def wire_response(monkeypatch, tmp_path, calls, *, cancelled=0):
+    """Stub everything `handle_superdirector_response` reaches beyond the
+    filesystem — the run itself already happened; the handler only acts on
+    the files it left in the serving workspace."""
     monkeypatch.setattr(zulip_listener, "PROJECTS_ROOT", tmp_path / "projects")
     monkeypatch.setattr(
         zulip_listener,
@@ -108,16 +97,6 @@ def wire_response(
         "cancel_sub_works",
         lambda project, channel, topic: calls.append(("cancel-subs",)) or cancelled,
     )
-
-    def superdirector_run(project_dir):
-        calls.append(("superdirector", project_dir))
-        if plan is not None:
-            (project_dir / "plan.md").write_text(plan)
-        for number, text in enumerate(tasks, start=1):
-            (project_dir / f"task{number}.md").write_text(text)
-        return superdirector
-
-    monkeypatch.setattr(zulip_listener, "run_superdirector", superdirector_run)
     monkeypatch.setattr(
         zulip_listener,
         "register_task_files",
@@ -132,14 +111,14 @@ def wire_response(
     )
 
 
-def front_dir(tmp_path, number=1):
+def superdirector_dir(tmp_path, number=1):
     """Each serving works in a fresh generation `<N>/`, not one stable dir."""
-    return tmp_path / "topics" / CHANNEL / TOPIC / str(number) / "front"
+    return tmp_path / "topics" / CHANNEL / TOPIC / str(number) / "superdirector"
 
 
 def project_dir(tmp_path, project=PROJECT):
-    """The persistent project folder — `main/`, `direction/`, `devlog/` and,
-    for the length of one planning round, the planning files."""
+    """The persistent project folder — `main/`, `direction/` and `devlog/`,
+    reached from the serving workspace through symlinks."""
     return tmp_path / "projects" / project
 
 
@@ -153,21 +132,37 @@ def test_handle_topic_acks_then_runs_the_steps_in_order(monkeypatch, tmp_path):
     # The trailing history read is the post-run re-check for human messages
     # that arrived during the run (none here, so the handler leaves).
     assert [call[0] for call in calls] == [
-        "whoami", "write", "history", "init", "plane", "front", "write", "history",
+        "whoami", "write", "history", "init", "plane", "superdirector", "write", "history",
     ]
     # The ack is the first post, before any work: it makes the bot the last
     # poster so a later sweep skips the topic while this run is in flight.
     assert calls[1][1:3] == (TOPIC, zulip_listener.ACK_TEXT)
-    # The chatlog lands in this generation's front workspace.
-    assert (front_dir(tmp_path) / "chatlog.md").read_text() == "[Developer] Build it\n"
-    assert calls[4][1] == front_dir(tmp_path)
-    assert calls[5][2] == front_dir(tmp_path)
-    assert "mission and tasks" not in calls[5][1]
-    assert calls[6][1:3] == (TOPIC, "front says hi")
+    # The chatlog lands in this generation's superdirector workspace.
+    workspace = superdirector_dir(tmp_path)
+    assert (workspace / "chatlog.md").read_text() == "[Developer] Build it\n"
+    # The Plane mirror goes to `current/`, and an empty mirror leaves nothing.
+    assert calls[4][1] == workspace / "current"
+    assert not (workspace / "current").exists()
+    assert calls[5][2] == workspace
+    assert "currently registered mission" not in calls[5][1]
+    assert calls[6][1:3] == (TOPIC, "planner says hi")
+
+
+def test_the_workspace_links_the_project_clones(monkeypatch, tmp_path):
+    calls = []
+    wire(monkeypatch, tmp_path, calls)
+
+    zulip_listener.handle_topic(Client(calls), CHANNEL, TOPIC)
+
+    workspace = superdirector_dir(tmp_path)
+    for name in ("main", "direction", "devlog"):
+        link = workspace / name
+        assert link.is_symlink()
+        assert link.readlink() == project_dir(tmp_path) / name
 
 
 def test_each_serving_cuts_a_new_generation(monkeypatch, tmp_path):
-    """Before this, one stable `front/` was reused forever, so a continued
+    """Before this, one stable directory was reused forever, so a continued
     conversation ran on top of the previous run's leftovers."""
     calls = []
     wire(monkeypatch, tmp_path, calls)
@@ -175,10 +170,10 @@ def test_each_serving_cuts_a_new_generation(monkeypatch, tmp_path):
     zulip_listener.handle_topic(Client(calls), CHANNEL, TOPIC)
     zulip_listener.handle_topic(Client(calls), CHANNEL, TOPIC)
 
-    assert front_dir(tmp_path, 1).is_dir()
-    assert front_dir(tmp_path, 2).is_dir()
-    assert [call[2] for call in calls if call[0] == "front"] == [
-        front_dir(tmp_path, 1), front_dir(tmp_path, 2),
+    assert superdirector_dir(tmp_path, 1).is_dir()
+    assert superdirector_dir(tmp_path, 2).is_dir()
+    assert [call[2] for call in calls if call[0] == "superdirector"] == [
+        superdirector_dir(tmp_path, 1), superdirector_dir(tmp_path, 2),
     ]
 
 
@@ -188,9 +183,10 @@ def test_handle_topic_mentions_plane_files_when_they_were_written(monkeypatch, t
 
     zulip_listener.handle_topic(Client(calls), CHANNEL, TOPIC)
 
-    prompt = next(call[1] for call in calls if call[0] == "front")
-    assert "The current mission and tasks are also placed in the working directory." in prompt
+    prompt = next(call[1] for call in calls if call[0] == "superdirector")
+    assert 'The currently registered mission and tasks are placed in "current/".' in prompt
     assert prompt.endswith("GUIDE TEXT")
+    assert (superdirector_dir(tmp_path) / "current").is_dir()
 
 
 def test_handle_topic_marks_the_bots_own_lines_in_the_chatlog(monkeypatch, tmp_path):
@@ -206,7 +202,7 @@ def test_handle_topic_marks_the_bots_own_lines_in_the_chatlog(monkeypatch, tmp_p
 
     zulip_listener.handle_topic(client, CHANNEL, TOPIC)
 
-    assert (front_dir(tmp_path) / "chatlog.md").read_text() == (
+    assert (superdirector_dir(tmp_path) / "chatlog.md").read_text() == (
         "[Developer] Build it\n[Autolab (you)] ack\n"
     )
 
@@ -218,12 +214,12 @@ def test_handle_topic_always_answers_with_how_far_it_got(monkeypatch, tmp_path):
     def explode(prompt, cwd):
         raise zulip_listener.ListenerError("claude_code timed out")
 
-    monkeypatch.setattr(zulip_listener, "run_front", explode)
+    monkeypatch.setattr(zulip_listener, "run_superdirector", explode)
 
     zulip_listener.handle_topic(Client(calls), CHANNEL, TOPIC)
 
     assert calls[-1][0] == "write"
-    assert "failed during front: claude_code timed out" in calls[-1][2]
+    assert "failed during superdirector: claude_code timed out" in calls[-1][2]
 
 
 def test_handle_topic_reports_a_channel_that_is_not_a_project(monkeypatch, tmp_path):
@@ -239,122 +235,110 @@ def test_an_empty_topic_costs_no_agent_run(monkeypatch, tmp_path):
     calls = []
     wire(monkeypatch, tmp_path, calls)
     zulip_listener.handle_topic(Client(calls, history=[]), CHANNEL, TOPIC)
-    assert not any(call[0] == "front" for call in calls)
+    assert not any(call[0] == "superdirector" for call in calls)
     assert calls[-1][2] == zulip_listener.EMPTY_REPLY
 
 
-def test_new_mission_plans_in_the_project_folder_and_registers_the_plan(monkeypatch, tmp_path):
+def test_a_plan_is_registered_from_the_serving_workspace(monkeypatch, tmp_path):
     calls = []
-    monkeypatch.setattr(zulip_listener, "TOPICS_ROOT", tmp_path / "topics")
     wire_response(monkeypatch, tmp_path, calls, cancelled=2)
-    front = front_dir(tmp_path)
-    front.mkdir(parents=True)
-    (front / "new_mission.md").write_text("# Build it\n\nThe body.")
+    workspace = superdirector_dir(tmp_path)
+    workspace.mkdir(parents=True)
+    (workspace / "plan.md").write_text(PLAN_TEXT)
+    (workspace / "task1.md").write_text("# First\ndo this")
 
-    sections, resolve_after = zulip_listener.handle_front_response(
-        CHANNEL, TOPIC, PROJECT, front, 1
+    sections, resolve_after = zulip_listener.handle_superdirector_response(
+        CHANNEL, TOPIC, PROJECT, workspace, 1
     )
 
-    # The superdirector runs first now: the parent Work's description is what
-    # it decided, which does not exist until it has run.
-    assert [call[0] for call in calls] == [
-        "superdirector", "upsert", "cancel-subs", "register",
-    ]
-    assert calls[0][1] == project_dir(tmp_path)
-    # Title from the mission, description from the plan — the whole file,
-    # heading included, because Step 6 reads it back as `plan.md`.
-    assert calls[1][4:6] == ("Build it", PLAN_TEXT)
-    assert calls[3][1] == project_dir(tmp_path)
+    assert [call[0] for call in calls] == ["upsert", "cancel-subs", "register"]
+    # Title and description both from the plan — the whole file, heading
+    # included, because Step 6 reads it back as `plan.md`.
+    assert calls[0][4:6] == ("The plan", PLAN_TEXT)
+    assert calls[2][1] == workspace
     # The Sub-Work generation key is the generation number itself.
-    assert calls[3][2] == 1
+    assert calls[2][2] == 1
     assert sections == [
-        "planning done",
-        'updated PD-4 "Build it"',
+        'updated PD-4 "The plan"',
         "cancelled 2 existing sub-work(s)",
         "created sub-work rev 1",
     ]
     assert resolve_after is False
 
 
-def test_the_planning_files_are_cleared_once_plane_has_them(monkeypatch, tmp_path):
-    """The project folder is persistent — no generation number separates one
-    round from the next — so a registered round leaves nothing behind."""
+def test_the_workspace_keeps_its_evidence_after_registration(monkeypatch, tmp_path):
+    """The generation number is the guard against double-acting — nothing in
+    the serving workspace is deleted."""
     calls = []
-    monkeypatch.setattr(zulip_listener, "TOPICS_ROOT", tmp_path / "topics")
-    wire_response(monkeypatch, tmp_path, calls, tasks=("# First\na", "# Second\nb"))
-    front = front_dir(tmp_path)
-    front.mkdir(parents=True)
-    (front / "new_mission.md").write_text("# Build it\n\nThe body.")
-    (project_dir(tmp_path) / "main").mkdir(parents=True)
+    wire_response(monkeypatch, tmp_path, calls)
+    workspace = superdirector_dir(tmp_path)
+    workspace.mkdir(parents=True)
+    (workspace / "plan.md").write_text(PLAN_TEXT)
+    (workspace / "task1.md").write_text("# First\na")
+    (workspace / "task2.md").write_text("# Second\nb")
 
-    zulip_listener.handle_front_response(CHANNEL, TOPIC, PROJECT, front, 1)
+    zulip_listener.handle_superdirector_response(CHANNEL, TOPIC, PROJECT, workspace, 1)
 
-    remaining = sorted(path.name for path in project_dir(tmp_path).iterdir())
-    assert remaining == ["main"]
-    # The front's own generation keeps its evidence.
-    assert (front / "new_mission.md").exists()
+    remaining = sorted(path.name for path in workspace.iterdir())
+    assert remaining == ["plan.md", "task1.md", "task2.md"]
 
 
-def test_a_failed_registration_leaves_the_plan_for_a_retry(monkeypatch, tmp_path):
+def test_a_failed_registration_is_reported_not_swallowed(monkeypatch, tmp_path):
     calls = []
-    monkeypatch.setattr(zulip_listener, "TOPICS_ROOT", tmp_path / "topics")
     wire_response(monkeypatch, tmp_path, calls)
 
     def explode(project, channel, topic, plan_dir, rev):
         raise zulip_listener.ListenerError("plane is down")
 
     monkeypatch.setattr(zulip_listener, "register_task_files", explode)
-    front = front_dir(tmp_path)
-    front.mkdir(parents=True)
-    (front / "new_mission.md").write_text("# Build it\n\nThe body.")
+    workspace = superdirector_dir(tmp_path)
+    workspace.mkdir(parents=True)
+    (workspace / "plan.md").write_text(PLAN_TEXT)
 
     with pytest.raises(zulip_listener.ListenerError):
-        zulip_listener.handle_front_response(CHANNEL, TOPIC, PROJECT, front, 1)
-
-    # Paying sonnet twice for the same plan is the thing being avoided.
-    assert sorted(path.name for path in project_dir(tmp_path).iterdir()) == [
-        "new_mission.md", "plan.md", "task1.md",
-    ]
+        zulip_listener.handle_superdirector_response(CHANNEL, TOPIC, PROJECT, workspace, 1)
 
 
-def test_a_superdirector_that_wrote_no_plan_is_a_failure(monkeypatch, tmp_path):
+def test_a_run_that_wrote_nothing_changes_nothing(monkeypatch, tmp_path):
+    """A question-only run: the reply is the whole outcome."""
     calls = []
-    monkeypatch.setattr(zulip_listener, "TOPICS_ROOT", tmp_path / "topics")
-    wire_response(monkeypatch, tmp_path, calls, plan=None, tasks=())
-    front = front_dir(tmp_path)
-    front.mkdir(parents=True)
-    (front / "new_mission.md").write_text("# Build it\n\nThe body.")
+    wire_response(monkeypatch, tmp_path, calls)
+    workspace = superdirector_dir(tmp_path)
+    workspace.mkdir(parents=True)
 
-    with pytest.raises(zulip_listener.ListenerError):
-        zulip_listener.handle_front_response(CHANNEL, TOPIC, PROJECT, front, 1)
-    # Nothing reached Plane, so nothing may be reported as if it had.
-    assert [call[0] for call in calls] == ["superdirector"]
+    sections, resolve_after = zulip_listener.handle_superdirector_response(
+        CHANNEL, TOPIC, PROJECT, workspace, 1
+    )
+
+    assert calls == []
+    assert sections == []
+    assert resolve_after is False
 
 
 def test_the_sub_work_key_follows_the_generation(monkeypatch, tmp_path):
     """A later generation's split must not collide with a cancelled one's
     keys, which live in Plane forever."""
     calls = []
-    monkeypatch.setattr(zulip_listener, "TOPICS_ROOT", tmp_path / "topics")
     wire_response(monkeypatch, tmp_path, calls)
     for number in (1, 4):
-        front = front_dir(tmp_path, number)
-        front.mkdir(parents=True)
-        (front / "new_mission.md").write_text("# Build it\n\nThe body.")
-        zulip_listener.handle_front_response(CHANNEL, TOPIC, PROJECT, front, number)
+        workspace = superdirector_dir(tmp_path, number)
+        workspace.mkdir(parents=True)
+        (workspace / "plan.md").write_text(PLAN_TEXT)
+        zulip_listener.handle_superdirector_response(
+            CHANNEL, TOPIC, PROJECT, workspace, number
+        )
     assert [call[2] for call in calls if call[0] == "register"] == [1, 4]
 
 
 def test_start_flag_moves_the_work_to_in_progress(monkeypatch, tmp_path):
     calls = []
-    monkeypatch.setattr(zulip_listener, "TOPICS_ROOT", tmp_path / "topics")
     wire_response(monkeypatch, tmp_path, calls)
-    front = front_dir(tmp_path)
-    front.mkdir(parents=True)
-    (front / "start.flag").touch()
+    workspace = superdirector_dir(tmp_path)
+    workspace.mkdir(parents=True)
+    (workspace / "start.flag").touch()
 
-    sections, resolve_after = zulip_listener.handle_front_response(
-        CHANNEL, TOPIC, PROJECT, front, 1
+    sections, resolve_after = zulip_listener.handle_superdirector_response(
+        CHANNEL, TOPIC, PROJECT, workspace, 1
     )
 
     assert calls == [("transition", "started")]
@@ -364,14 +348,13 @@ def test_start_flag_moves_the_work_to_in_progress(monkeypatch, tmp_path):
 
 def test_cancel_flag_cancels_everything_and_requests_resolution(monkeypatch, tmp_path):
     calls = []
-    monkeypatch.setattr(zulip_listener, "TOPICS_ROOT", tmp_path / "topics")
     wire_response(monkeypatch, tmp_path, calls, cancelled=3)
-    front = front_dir(tmp_path)
-    front.mkdir(parents=True)
-    (front / "cancel.flag").touch()
+    workspace = superdirector_dir(tmp_path)
+    workspace.mkdir(parents=True)
+    (workspace / "cancel.flag").touch()
 
-    sections, resolve_after = zulip_listener.handle_front_response(
-        CHANNEL, TOPIC, PROJECT, front, 1
+    sections, resolve_after = zulip_listener.handle_superdirector_response(
+        CHANNEL, TOPIC, PROJECT, workspace, 1
     )
 
     assert calls == [("cancel-subs",), ("transition", "cancelled")]
@@ -386,7 +369,7 @@ def test_handle_topic_resolves_the_topic_after_the_final_reply(monkeypatch, tmp_
     wire_response(monkeypatch, tmp_path, calls)
     monkeypatch.setattr(
         zulip_listener,
-        "run_front",
+        "run_superdirector",
         lambda prompt, cwd: (cwd / "cancel.flag").touch() or "cancelling",
     )
 
@@ -408,7 +391,7 @@ def test_handle_topic_reports_a_response_handling_failure(monkeypatch, tmp_path)
     monkeypatch.setattr(zulip_listener, "transition_work", explode)
     monkeypatch.setattr(
         zulip_listener,
-        "run_front",
+        "run_superdirector",
         lambda prompt, cwd: (cwd / "start.flag").touch() or "starting",
     )
 
@@ -438,27 +421,27 @@ def test_handle_topic_reprocesses_when_a_human_posted_during_the_run(monkeypatch
 
     zulip_listener.handle_topic(ScriptedClient(), CHANNEL, TOPIC)
 
-    assert [call[0] for call in calls].count("front") == 2
+    assert [call[0] for call in calls].count("superdirector") == 2
     acks = [call for call in calls if call[0] == "write" and call[2] == zulip_listener.ACK_TEXT]
     assert len(acks) == 2
     # The second round is its own generation, with the fuller chatlog.
-    assert (front_dir(tmp_path, 2) / "chatlog.md").read_text().endswith("one more thing\n")
+    assert (superdirector_dir(tmp_path, 2) / "chatlog.md").read_text().endswith("one more thing\n")
 
 
-def test_front_prompt_carries_autolabs_own_extra_line(monkeypatch, tmp_path):
-    guide_dir = tmp_path / "mission_front"
+def test_superdirector_prompt_carries_autolabs_own_extra_line(monkeypatch, tmp_path):
+    guide_dir = tmp_path / "mission_superdirector"
     guide_dir.mkdir(parents=True)
     (guide_dir / "guide.md").write_text("GUIDE TEXT\n")
     monkeypatch.setattr(zulip_listener, "GUIDES", tmp_path)
 
-    assert zulip_listener.front_prompt("Autolab", plane_files=False) == (
+    assert zulip_listener.superdirector_prompt("Autolab", plane_files=False) == (
         "The chatlog is placed in the working directory. "
         "You are 'Autolab' in the chatlog.\n\nGUIDE TEXT"
     )
-    assert zulip_listener.front_prompt("Autolab", plane_files=True) == (
+    assert zulip_listener.superdirector_prompt("Autolab", plane_files=True) == (
         "The chatlog is placed in the working directory. "
         "You are 'Autolab' in the chatlog.\n"
-        "The current mission and tasks are also placed in the working directory."
+        'The currently registered mission and tasks are placed in "current/".'
         "\n\nGUIDE TEXT"
     )
 
@@ -466,7 +449,7 @@ def test_front_prompt_carries_autolabs_own_extra_line(monkeypatch, tmp_path):
 def test_guide_refuses_to_start_without_the_file(monkeypatch, tmp_path):
     monkeypatch.setattr(zulip_listener, "GUIDES", tmp_path)
     with pytest.raises(GuideError):
-        zulip_listener.guide("mission_front", "guide.md")
+        zulip_listener.guide("mission_superdirector", "guide.md")
 
 
 RUN_TOPIC = "run-1"

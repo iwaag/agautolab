@@ -1,4 +1,4 @@
-"""Pull mission topics from Zulip into topic workspaces and the front agent.
+"""Pull mission topics from Zulip into topic workspaces and the superdirector.
 
 `agag.zulip.sweep_serve` finds every unresolved `mission-*` topic whose last
 poster is not this bot, and `agag.topics.serve_topic` serves each one — the
@@ -7,10 +7,16 @@ always reply naming the failed step, then re-check for human posts that
 arrived during the run.
 
 Each serving cuts a new generation directory `<N>/`, the way agforge's create
-topics do. Before that, one stable `front/` directory was reused forever, so a
+topics do. Before that, one stable directory was reused forever, so a
 continued conversation ran on top of the previous run's leftovers and a
 separate `generation` counter file had to keep Sub-Work keys apart. `N` is now
 both the workspace and that key.
+
+The superdirector serves the topic alone — there is no front relay. It reads
+the chatlog itself, and the project's clones are reachable from its serving
+workspace through symlinks (`link_project_folders`), so everything one run
+wrote — `plan.md`, the task split, the flags — stays behind in its own
+generation as evidence and can never be acted on twice.
 """
 
 from __future__ import annotations
@@ -57,7 +63,6 @@ from .mission import (
     register_task_files,
     report_work,
     split_document,
-    task_files,
     transition_work,
     upsert_work,
     write_mission_workspace,
@@ -88,9 +93,13 @@ HISTORY_MESSAGES = 1000
 ACK_TEXT = "Message received. Please wait for the reply."
 EMPTY_REPLY = "There is nothing in this topic to answer yet."
 
-# The planning round's files, all of them in the persistent project folder.
-MISSION_FILE = "new_mission.md"
+# The planning round's files, all of them in the serving's own generation
+# workspace. The Plane mirror lives in `current/` inside that workspace so the
+# read-back `task1.md`, `task2.md`, … can never be mistaken for a task split
+# the superdirector wrote this run.
 PLAN_FILE = "plan.md"
+CURRENT_DIR = "current"
+PROJECT_FOLDERS = ("main", "direction", "devlog")
 
 # --- the asset route -------------------------------------------------------
 #
@@ -128,16 +137,12 @@ ASSET_PROMPT_NOTE = (
     "truly unacceptable, treat the work as failed:\n"
 )
 
-# One topic occupies the listener for at most the sum of these; the sweep
-# loop is single-threaded and serial, so that sum is also the delay before
-# the next matching topic is looked at (events keep queueing meanwhile).
-FRONT_TIMEOUT_SECONDS = 360
-# Real work, not a task split: an order of magnitude more room.
+# One topic occupies the listener for at most this long; the sweep loop is
+# single-threaded and serial, so this is also the delay before the next
+# matching topic is looked at (events keep queueing meanwhile).
 WORK_TIMEOUT_SECONDS = 1200
-# The superdirector reads the whole project before it plans. The disposable
-# coding split it replaced ran on 600 s while seeing only `new_mission.md`;
-# this one sees `main/`, `direction/` and `devlog/`, so it gets the work
-# timeout rather than the split's.
+# The superdirector reads the whole project — `main/`, `direction/` and
+# `devlog/` — and the chatlog before it plans, so it gets the work timeout.
 SUPERDIRECTOR_TIMEOUT_SECONDS = WORK_TIMEOUT_SECONDS
 # The director reads the whole direction clone and records notes into it, so
 # it gets the work timeout too.
@@ -155,14 +160,14 @@ __all__ = [
     "dispatch",
     "find_asset_key",
     "format_chatlog",
-    "front_prompt",
     "generation_dir",
     "guide",
     "handle_bmining",
     "handle_create",
-    "handle_front_response",
     "handle_run",
+    "handle_superdirector_response",
     "handle_topic",
+    "link_project_folders",
     "main",
     "mentions_us",
     "next_record_path",
@@ -171,8 +176,8 @@ __all__ = [
     "project_directory",
     "resign",
     "run_director",
-    "run_front",
     "run_superdirector",
+    "superdirector_prompt",
     "serve_bmining",
     "run_work",
     "serve",
@@ -217,53 +222,64 @@ def next_record_path(directory: Path) -> Path:
     return shared_next_record_path(directory)
 
 
-def front_prompt(bot_name: str, plane_files: bool) -> str:
+def superdirector_prompt(bot_name: str, plane_files: bool) -> str:
     lines = [chatlog_placement(bot_name)]
     if plane_files:
-        lines.append("The current mission and tasks are also placed in the working directory.")
-    return prompt_with_guide(lines, guide("mission_front", "guide.md"))
+        lines.append(
+            f'The currently registered mission and tasks are placed in "{CURRENT_DIR}/".'
+        )
+    return prompt_with_guide(lines, guide("mission_superdirector", "guide.md"))
 
 
-def run_front(prompt: str, cwd: Path) -> str:
-    """One front run in the topic workspace, with its `ag.agent-run.v1` record."""
-    record = next_record_path(RECORDS_ROOT / "front")
-    output, _, exit_code = run_role(
-        "front",
-        prompt,
-        cwd=cwd,
-        timeout=FRONT_TIMEOUT_SECONDS,
-        record=record,
-    )
-    if exit_code != 0:
-        raise ListenerError(f"front run exited {exit_code}: {output.strip()[:500]}")
-    return output.strip()
+def link_project_folders(workspace: Path, project: str) -> None:
+    """Symlink the project's clones into one serving workspace.
+
+    The superdirector works in a fresh generation directory, so the persistent
+    clones it plans from — `main/`, `direction/`, `devlog/` — are reached
+    through links rather than by running in the project folder itself. What it
+    writes next to them stays in the generation; what it reads through them is
+    always the live clone.
+    """
+    project_dir = project_directory(project)
+    for name in PROJECT_FOLDERS:
+        (workspace / name).symlink_to(project_dir / name, target_is_directory=True)
 
 
 def serve(context) -> TopicResult:
-    """agautolab's part of one serving: project setup, Plane read-back, front.
+    """agautolab's part of one serving: project setup, Plane read-back, and
+    one superdirector run in its own generation workspace.
 
-    `handle_front_response` then acts on what the front *wrote* — its answer
-    is relayed verbatim and never parsed.
+    `handle_superdirector_response` then acts on what the superdirector
+    *wrote* — its answer is relayed verbatim and never parsed. A run that
+    wrote nothing changed nothing: the reply (a question, usually) is the
+    whole outcome.
     """
     project = project_from_channel(context.channel)
     number = next_generation(topic_workspace(context.channel, context.topic))
-    front_dir = generation_dir(context.channel, context.topic, number, "front")
-    chatlog_path(front_dir).write_text(
+    workspace = generation_dir(context.channel, context.topic, number, "superdirector")
+    chatlog_path(workspace).write_text(
         format_chatlog(context.history, context.self_id), encoding="utf-8"
     )
 
     context.step = "project setup"
     init_project(project)
+    link_project_folders(workspace, project)
 
     context.step = "plane read-back"
-    plane_files = write_mission_workspace(front_dir, project, context.channel, context.topic)
+    current = workspace / CURRENT_DIR
+    current.mkdir(exist_ok=True)
+    plane_files = write_mission_workspace(current, project, context.channel, context.topic)
+    if not plane_files:
+        current.rmdir()
 
-    context.step = "front"
-    sections = [run_front(front_prompt(context.bot_name, plane_files), front_dir)]
+    context.step = "superdirector"
+    sections = [
+        run_superdirector(superdirector_prompt(context.bot_name, plane_files), workspace)
+    ]
 
     context.step = "response handling"
-    response_sections, resolve_after = handle_front_response(
-        context.channel, context.topic, project, front_dir, number
+    response_sections, resolve_after = handle_superdirector_response(
+        context.channel, context.topic, project, workspace, number
     )
     sections.extend(response_sections)
     return TopicResult(sections, resolve_after=resolve_after)
@@ -281,19 +297,18 @@ def project_directory(project: str) -> Path:
     return PROJECTS_ROOT / project
 
 
-def run_superdirector(project_dir: Path) -> str:
-    """One mission-planning run in the project folder, with its record.
+def run_superdirector(prompt: str, cwd: Path) -> str:
+    """One mission-planning run in the serving workspace, with its record.
 
-    This replaced a `coding` run in a disposable `<N>/coding/` workspace that
-    saw nothing but the copied `new_mission.md`. Planning a mission means
-    weighing the code against the direction documents and the devlog, so the
-    run happens where all three are — and the role is its own, not `coding`.
+    Planning a mission means weighing the chatlog against the code, the
+    direction documents and the devlog, so the run happens where all four are
+    reachable — the generation workspace `link_project_folders` prepared.
     """
     record = next_record_path(RECORDS_ROOT / "superdirector")
     output, _, exit_code = run_role(
         "superdirector",
-        guide("mission_superdirector", "guide.md"),
-        cwd=project_dir,
+        prompt,
+        cwd=cwd,
         timeout=SUPERDIRECTOR_TIMEOUT_SECONDS,
         record=record,
     )
@@ -302,78 +317,44 @@ def run_superdirector(project_dir: Path) -> str:
     return output.strip()
 
 
-def clear_planning_files(project_dir: Path) -> None:
-    """Remove the planning round's files from the project folder.
-
-    Called only after Plane has accepted the whole round. Plane holds the
-    canonical copies from that moment on, and Step 6 reads them back from
-    there; leaving the files would mean a later round's registration could
-    pick up a stale `task[N].md` that the superdirector did not write.
-    """
-    for path in [
-        project_dir / MISSION_FILE,
-        project_dir / PLAN_FILE,
-        *(path for _, path in task_files(project_dir)),
-    ]:
-        path.unlink(missing_ok=True)
-
-
-def handle_front_response(
-    channel: str, topic: str, project: str, front_dir: Path, number: int
+def handle_superdirector_response(
+    channel: str, topic: str, project: str, workspace: Path, number: int
 ) -> tuple[list[str], bool]:
-    """Act on what the front wrote: `new_mission.md`, then the flags.
+    """Act on what the superdirector wrote: `plan.md`, then the flags.
 
     Returns the report sections and whether the topic should be resolved
     after the final reply.
 
-    The front's own workspace is still a fresh generation `<N>/` and nothing
-    in it is deleted — the generation number is the guard, and the leftovers
-    stay as evidence of what that run was told. `N` is also the Sub-Work
-    generation key, so keys from a cancelled generation (which live in Plane
-    forever) cannot be reused.
-
-    The *planning* files are different. They live in the persistent project
-    folder, where no generation number separates one round from the next, so
-    they are cleared once Plane has taken them — and deliberately left behind
-    when it has not, so a retry finds the plan instead of paying for it twice.
+    The workspace is a fresh generation `<N>/` and nothing in it is deleted —
+    the generation number is the guard, and the leftovers stay as evidence of
+    what that run was told. `N` is also the Sub-Work generation key, so keys
+    from a cancelled generation (which live in Plane forever) cannot be
+    reused. A run that wrote no `plan.md` and no flag asked a question
+    instead; nothing changes state.
     """
     sections: list[str] = []
     resolve_after = False
 
-    new_mission = front_dir / MISSION_FILE
-    if new_mission.is_file():
-        project_dir = project_directory(project)
-        project_dir.mkdir(parents=True, exist_ok=True)
-        mission_text = new_mission.read_text(encoding="utf-8")
-        (project_dir / MISSION_FILE).write_text(mission_text, encoding="utf-8")
-
-        sections.append(run_superdirector(project_dir))
-
-        plan = project_dir / PLAN_FILE
-        if not plan.is_file():
-            raise ListenerError(
-                f"the superdirector wrote no {PLAN_FILE} in {project_dir}"
-            )
-        # Title from the mission, description from the plan: the Work is the
-        # mission the requester asked for, described by what the
-        # superdirector decided to do about it. Step 6 reads this back as
-        # `plan.md`, so the whole file travels, heading included.
-        title, _ = split_document(mission_text)
-        sections.append(
-            upsert_work(project, channel, topic, title, plan.read_text(encoding="utf-8"))
-        )
+    plan = workspace / PLAN_FILE
+    if plan.is_file():
+        # Title and description both from the plan: the Work is what the
+        # superdirector decided the mission means. Step 6 reads the
+        # description back as `plan.md`, so the whole file travels, heading
+        # included.
+        plan_text = plan.read_text(encoding="utf-8")
+        title, _ = split_document(plan_text)
+        sections.append(upsert_work(project, channel, topic, title, plan_text))
         cancelled = cancel_sub_works(project, channel, topic)
         if cancelled:
             sections.append(f"cancelled {cancelled} existing sub-work(s)")
-        sections.extend(register_task_files(project, channel, topic, project_dir, number))
-        clear_planning_files(project_dir)
+        sections.extend(register_task_files(project, channel, topic, workspace, number))
 
-    start_flag = front_dir / "start.flag"
+    start_flag = workspace / "start.flag"
     if start_flag.is_file():
         label = transition_work(project, channel, topic, "started")
         sections.append(f"mission {label} is now In Progress")
 
-    cancel_flag = front_dir / "cancel.flag"
+    cancel_flag = workspace / "cancel.flag"
     if cancel_flag.is_file():
         cancelled = cancel_sub_works(project, channel, topic)
         label = transition_work(project, channel, topic, "cancelled")
