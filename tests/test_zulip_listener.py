@@ -1157,3 +1157,27 @@ def test_handle_run_completes_the_work_of_a_run_that_said_nothing(monkeypatch, t
     assert zulip_listener.NO_CLOSING_MESSAGE in outcome
     assert "work PD-7: commented yes, Done yes" in outcome
     assert "failed" not in outcome
+
+
+def test_run_progress_logs_a_failed_post_and_keeps_going(monkeypatch):
+    """A display that breaks must not kill the run — but a topic that went
+    quiet because posting failed has to be tellable from one that went quiet
+    because the run stalled."""
+    logged = []
+    monkeypatch.setattr(zulip_listener, "log", logged.append)
+
+    def refuse(topic, text, **kwargs):
+        raise zulip_listener.ZulipError("HTTP 500")
+
+    monkeypatch.setattr(zulip_listener, "topic_write", refuse)
+    progress = zulip_listener.RunProgress(None, "general", "run-1", interval_s=0)
+
+    progress({"type": "assistant", "message": {"role": "assistant", "content": [
+        {"type": "text", "text": "still working"}]}})
+
+    assert len(logged) == 1
+    assert "could not post progress to 'general'/'run-1'" in logged[0]
+    assert "dropping 1 line(s)" in logged[0]
+    # Dropped, not requeued: a Zulip outage must not grow `pending` for the
+    # rest of a twenty-minute run.
+    assert progress.pending == []

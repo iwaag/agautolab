@@ -440,8 +440,12 @@ class RunProgress:
     `__call__` runs on run_harness's reader thread while the listener thread
     is blocked inside the run, and `flush` only after the run has returned
     (run_harness joins its reader before returning) — so the two never touch
-    `pending` concurrently. Zulip errors out of a post are the harness's to
-    swallow: events are telemetry and must never kill the run.
+    `pending` concurrently.
+
+    A failed post is logged and its lines are dropped. Dropping keeps a
+    Zulip outage from growing `pending` for the rest of a twenty-minute run,
+    and the log line is what tells a reader that the topic went quiet
+    because the display broke, not because the run stalled.
     """
 
     def __init__(self, client: ZulipClient, channel: str, topic: str,
@@ -470,9 +474,16 @@ class RunProgress:
         if not self.pending:
             return
         body = "\n".join(self.pending)
+        lines = len(self.pending)
         self.pending = []
         self.last_post = time.monotonic()
-        topic_write(self.topic, body, channel=self.channel, client=self.client)
+        try:
+            topic_write(self.topic, body, channel=self.channel, client=self.client)
+        except Exception as error:  # noqa: BLE001 - progress never kills a run
+            log(
+                f"could not post progress to {self.channel!r}/{self.topic!r}, "
+                f"dropping {lines} line(s): {error!r}"
+            )
 
 
 def run_work(workspace: Path, asset_url: str | None = None,
