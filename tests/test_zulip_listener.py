@@ -914,35 +914,15 @@ def test_dispatch_routes_run_topics_anywhere_and_mission_topics_only_in_projects
     ]
 
 
-def test_subscribe_project_channels_puts_every_active_user_in_pj_channels():
-    calls = []
+def test_the_listener_never_widens_its_own_subscriptions():
+    """Subscription is the project creator's routing decision, not the listener's.
 
-    class Client:
-        def users(self):
-            return [
-                {"user_id": 7, "is_active": True},
-                {"user_id": 8, "is_active": True},
-                {"user_id": 9, "is_active": False},
-            ]
-
-        def channels(self):
-            return [
-                {"name": "general", "stream_id": 1},
-                {"name": "pj-one", "stream_id": 2},
-                {"name": "pj-two", "stream_id": 3},
-            ]
-
-        def channel_subscribers(self, stream_id):
-            return {1: [7], 2: [7, 8], 3: [7]}[stream_id]
-
-        def subscribe_channels(self, names, principals=None):
-            calls.append((names, principals))
-
-    # `general` is reconciled like a project channel (that is what makes
-    # `run-` topics visible to the sweep), `pj-one` is already complete, and
-    # the deactivated user is never subscribed anywhere.
-    assert zulip_listener.subscribe_project_channels(Client()) == ["general", "pj-two"]
-    assert calls == [(["general"], [8]), (["pj-two"], [8])]
+    The listener used to put every active user in every `pj-*` channel every
+    60s. Two autolab instances then heard every project, and `mission-`/`run-`
+    topics have no addressing rule to tell them apart.
+    """
+    assert not hasattr(zulip_listener, "subscribe_project_channels")
+    assert not hasattr(zulip_listener, "subscription_loop")
 
 
 @pytest.mark.parametrize("channel", ["general", "pj-x", "pj-Bad_Name"])

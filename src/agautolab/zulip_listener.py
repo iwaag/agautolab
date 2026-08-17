@@ -19,8 +19,6 @@ import json
 import os
 import re
 import shutil
-import threading
-import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -77,9 +75,7 @@ MISSION_TOPIC_PREFIX = "mission-"
 RUN_TOPIC_PREFIX = "run-"
 CREATE_TOPIC_PREFIX = "create-"
 PROJECT_CHANNEL_PREFIX = "pj-"
-GENERAL_CHANNEL = "general"
 HISTORY_MESSAGES = 1000
-SUBSCRIBE_INTERVAL_SECONDS = 60
 
 ACK_TEXT = "Message received. Please wait for the reply."
 EMPTY_REPLY = "There is nothing in this topic to answer yet."
@@ -162,7 +158,6 @@ __all__ = [
     "run_front",
     "run_superdirector",
     "run_work",
-    "subscribe_project_channels",
     "serve",
     "topic_workspace",
     "work_directory",
@@ -681,41 +676,6 @@ def handle_create(client: ZulipClient, channel: str, topic: str) -> None:
                 channel=channel, client=client)
 
 
-def subscribe_project_channels(client: ZulipClient) -> list[str]:
-    """Put every active realm user in every `pj-*` channel and in `#general`.
-
-    A project channel is a shared room, not the autolab bot's private inbox:
-    all agents participate and each one filters for the topics it owns. This
-    also covers a channel a human created by hand, which no agent would
-    otherwise be in — and Zulip delivers no events for an unsubscribed channel,
-    so the sweep can only see subscribed channels. `#general` is reconciled the
-    same way because it is where `run-` topics live.
-    """
-    everyone = {
-        int(user["user_id"]) for user in client.users() if user.get("is_active", True)
-    }
-    reconciled = []
-    for channel in client.channels():
-        name = str(channel.get("name", ""))
-        if not (name.startswith(PROJECT_CHANNEL_PREFIX) or name == GENERAL_CHANNEL):
-            continue
-        missing = sorted(everyone - set(client.channel_subscribers(channel["stream_id"])))
-        if missing:
-            client.subscribe_channels([name], principals=missing)
-            reconciled.append(name)
-            log(f"subscribed {len(missing)} user(s) to {name}")
-    return reconciled
-
-
-def subscription_loop(client: ZulipClient) -> None:
-    while True:
-        time.sleep(SUBSCRIBE_INTERVAL_SECONDS)
-        try:
-            subscribe_project_channels(client)
-        except Exception as error:
-            log(f"project channel subscription refresh failed: {error!r}")
-
-
 def observe_topic(channel: str, topic: str) -> None:
     """Passive handler (`AUTOLAB_ZULIP_LOG_ONLY=1`): log sweep matches, never act."""
     log(f"observed sweep match {channel!r}/{topic!r}")
@@ -751,12 +711,10 @@ def main() -> None:
         def handler(channel: str, topic: str) -> None:
             dispatch(client, channel, topic)
 
-    subscription_client = ZulipClient.from_env(ZULIP_ENV)
-    try:
-        subscribe_project_channels(subscription_client)
-    except ZulipError as error:
-        log(f"initial project channel subscription refresh failed: {error!r}")
-    threading.Thread(target=subscription_loop, args=(subscription_client,), daemon=True).start()
+    # No subscription reconciliation: what this listener is subscribed to is
+    # the project creator's decision about who the work goes to, not something
+    # a listener may widen on its own. See pyagag's README, "Subscription is
+    # the routing decision".
     prefixes = (MISSION_TOPIC_PREFIX, RUN_TOPIC_PREFIX, CREATE_TOPIC_PREFIX)
     log(f"agautolab zulip listener starting (pull sweep, prefixes {prefixes})")
     try:
