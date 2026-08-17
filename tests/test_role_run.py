@@ -42,7 +42,9 @@ def test_front_runs_harness_in_the_callers_workspace(monkeypatch, tmp_path):
     # `front` works, so it gets agcode's full tool set: no preset flag, just
     # the turn/deadline budget every agcode role carries.
     assert calls[0][2]["extra_args"] == [
-        "--max-turns", str(role_run.AGCODE_MAX_TURNS), "--deadline-s", "60.0",
+        "--max-turns", str(role_run.AGCODE_MAX_TURNS),
+        "--max-tokens", str(role_run.AGCODE_MAX_TOKENS),
+        "--deadline-s", "60.0",
     ]
     assert calls[0][2]["transcript_path"] == tmp_path / "raw.jsonl"
     # agcode has no permission engine to bypass.
@@ -88,7 +90,9 @@ def test_readonly_role_on_agcode_is_handed_fewer_tools(monkeypatch, tmp_path):
     role_run.run_role("summarizer", "summarize", cwd=tmp_path, timeout=5)
 
     assert calls[0]["extra_args"] == [
-        "--max-turns", str(role_run.AGCODE_MAX_TURNS), "--deadline-s", "60.0",
+        "--max-turns", str(role_run.AGCODE_MAX_TURNS),
+        "--max-tokens", str(role_run.AGCODE_MAX_TOKENS),
+        "--deadline-s", "60.0",
         "--tools", "read-only",
     ]
 

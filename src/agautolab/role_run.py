@@ -66,10 +66,19 @@ AGCODE_MAX_TURNS = 200
 # dying mid-turn.
 AGCODE_DEADLINE_MARGIN_S = 60
 
+# agcode's default response ceiling (4096) is too low for this work: a coding
+# turn is a long thinking block plus a whole source file in one write call,
+# and a foodchain run (2026-08-18) was cut off mid-file by it. agcode recovers
+# from a cut-off turn now, but recovery costs a turn and re-plans work the
+# model had already done, so the ceiling is raised to where a normal file
+# write fits in one response.
+AGCODE_MAX_TOKENS = 16384
+
 
 def _agcode_args(role: str, timeout: float) -> list[str]:
     args = [
         "--max-turns", str(AGCODE_MAX_TURNS),
+        "--max-tokens", str(AGCODE_MAX_TOKENS),
         "--deadline-s", str(max(60.0, timeout - AGCODE_DEADLINE_MARGIN_S)),
     ]
     if role in READONLY_ROLES:
