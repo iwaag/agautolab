@@ -54,8 +54,26 @@ ROLE_WORKSPACES = {
 READONLY_ROLES = {"summarizer"}
 
 
-def _agcode_args(role: str) -> list[str]:
-    return ["--tools", "read-only"] if role in READONLY_ROLES else []
+# agcode's built-in turn budget (20) starves real coding runs — every
+# pj-foodchain work run died on turn_budget_exhausted (2026-08-18) — so hand
+# it a budget large enough that the wall clock, not the turn counter, is the
+# effective limit.
+AGCODE_MAX_TURNS = 200
+
+# agcode ends itself this many seconds before the caller's subprocess timeout
+# would kill it, so a long run still reports its own outcome record instead of
+# dying mid-turn.
+AGCODE_DEADLINE_MARGIN_S = 60
+
+
+def _agcode_args(role: str, timeout: float) -> list[str]:
+    args = [
+        "--max-turns", str(AGCODE_MAX_TURNS),
+        "--deadline-s", str(max(60.0, timeout - AGCODE_DEADLINE_MARGIN_S)),
+    ]
+    if role in READONLY_ROLES:
+        args += ["--tools", "read-only"]
+    return args
 
 
 def run_role(role: str, prompt: str, *, cwd: Path, timeout: float,
@@ -74,7 +92,7 @@ def run_role(role: str, prompt: str, *, cwd: Path, timeout: float,
         cwd=run_cwd,
         timeout=timeout,
         allowed_tools=ROLE_ALLOWED_TOOLS.get(role),
-        extra_args=_agcode_args(role) if agent.harness == "agcode" else None,
+        extra_args=_agcode_args(role, timeout) if agent.harness == "agcode" else None,
         # claude_code's permission classifier blocks commands the allowlist
         # covers (seen 2026-08-18: `ls -la direction/ 2>&1` inside a compound
         # command, despite `Bash(ls:*)`), and a non-interactive run turns that

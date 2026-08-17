@@ -39,8 +39,11 @@ def test_front_runs_harness_in_the_callers_workspace(monkeypatch, tmp_path):
     # workspace and the gateway at its own, so the caller's cwd must win.
     assert calls[0][2]["cwd"] == tmp_path
     assert calls[0][2]["allowed_tools"] == role_run.ROLE_ALLOWED_TOOLS["front"]
-    # `front` works, so it gets agcode's full tool set: no preset flag.
-    assert calls[0][2]["extra_args"] == []
+    # `front` works, so it gets agcode's full tool set: no preset flag, just
+    # the turn/deadline budget every agcode role carries.
+    assert calls[0][2]["extra_args"] == [
+        "--max-turns", str(role_run.AGCODE_MAX_TURNS), "--deadline-s", "60.0",
+    ]
     assert calls[0][2]["transcript_path"] == tmp_path / "raw.jsonl"
     # agcode has no permission engine to bypass.
     assert calls[0][2]["skip_permissions"] is False
@@ -84,7 +87,10 @@ def test_readonly_role_on_agcode_is_handed_fewer_tools(monkeypatch, tmp_path):
 
     role_run.run_role("summarizer", "summarize", cwd=tmp_path, timeout=5)
 
-    assert calls[0]["extra_args"] == ["--tools", "read-only"]
+    assert calls[0]["extra_args"] == [
+        "--max-turns", str(role_run.AGCODE_MAX_TURNS), "--deadline-s", "60.0",
+        "--tools", "read-only",
+    ]
 
 
 def test_resolution_checks_harness_availability(monkeypatch, tmp_path):
