@@ -42,6 +42,8 @@ def test_front_runs_harness_in_the_callers_workspace(monkeypatch, tmp_path):
     # `front` works, so it gets agcode's full tool set: no preset flag.
     assert calls[0][2]["extra_args"] == []
     assert calls[0][2]["transcript_path"] == tmp_path / "raw.jsonl"
+    # agcode has no permission engine to bypass.
+    assert calls[0][2]["skip_permissions"] is False
 
 
 def test_mediator_runs_in_its_fixed_workspace(monkeypatch, tmp_path):
@@ -61,6 +63,9 @@ def test_mediator_runs_in_its_fixed_workspace(monkeypatch, tmp_path):
     assert calls[0]["cwd"] == role_run.PROJECT_ROOT / "agent" / "mediator"
     # claude_code gets no agcode preset flag; its grant is allowed_tools.
     assert calls[0]["extra_args"] is None
+    # claude_code's classifier denies allowed commands in non-interactive
+    # runs, so it is bypassed for the workspace-bound roles.
+    assert calls[0]["skip_permissions"] is True
 
 
 def test_readonly_role_on_agcode_is_handed_fewer_tools(monkeypatch, tmp_path):
