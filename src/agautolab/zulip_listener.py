@@ -29,8 +29,10 @@ import json
 import os
 import re
 import shutil
+import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
 
 from agag.topics import (
@@ -151,6 +153,7 @@ SUPERDIRECTOR_TIMEOUT_SECONDS = WORK_TIMEOUT_SECONDS
 DIRECTOR_TIMEOUT_SECONDS = WORK_TIMEOUT_SECONDS
 
 __all__ = [
+    "RunProgress",
     "ZULIP_ENV",
     "aesthetics_text",
     "answer_prompt",
@@ -172,6 +175,7 @@ __all__ = [
     "main",
     "mentions_us",
     "next_record_path",
+    "progress_line",
     "run_answer",
     "project_channel",
     "project_directory",
@@ -383,7 +387,86 @@ def work_prompt(asset_url: str | None) -> str:
     return f"{prompt}{ASSET_PROMPT_NOTE}{asset_url}" if asset_url else prompt
 
 
-def run_work(workspace: Path, asset_url: str | None = None) -> str:
+# --- live progress on run- topics -------------------------------------------
+#
+# The harness streams its conversation events (run_harness `on_event`) while
+# the coding run is underway, and RunProgress turns them into topic posts.
+# Editing one growing message would be tidier, but the realm's
+# message_content_edit_limit_seconds (10 minutes on a default Zulip) is
+# shorter than WORK_TIMEOUT_SECONDS, so an edit-based display would start
+# failing mid-run; appending a throttled post survives any run length.
+
+PROGRESS_INTERVAL_SECONDS = 120
+PROGRESS_LINE_CHARS = 160
+
+# The one argument of a tool call worth showing, tried in this order. Covers
+# claude_code's tools (Bash/Read/Write/Edit/Glob/Grep/WebFetch) and agcode's
+# (run/read/write/list) without naming either harness.
+PROGRESS_DETAIL_KEYS = ("command", "file_path", "path", "pattern", "url")
+
+
+def progress_line(block: dict) -> str | None:
+    """One display line for one content block of an assistant event, or None
+    for the block types progress does not show (thinking, tool results)."""
+    kind = block.get("type")
+    if kind == "text":
+        text = " ".join(str(block.get("text", "")).split())
+        return f"💬 {text[:PROGRESS_LINE_CHARS]}" if text else None
+    if kind == "tool_use":
+        name = str(block.get("name", "?"))
+        arguments = block.get("input") if isinstance(block.get("input"), dict) else {}
+        detail = next(
+            (str(arguments[key]) for key in PROGRESS_DETAIL_KEYS if arguments.get(key)),
+            "",
+        )
+        detail = " ".join(detail.split())[:PROGRESS_LINE_CHARS]
+        return f"🔧 {name}: {detail}" if detail else f"🔧 {name}"
+    return None
+
+
+class RunProgress:
+    """Accumulate harness events and post them to the run- topic, throttled.
+
+    `__call__` runs on run_harness's reader thread while the listener thread
+    is blocked inside the run, and `flush` only after the run has returned
+    (run_harness joins its reader before returning) — so the two never touch
+    `pending` concurrently. Zulip errors out of a post are the harness's to
+    swallow: events are telemetry and must never kill the run.
+    """
+
+    def __init__(self, client: ZulipClient, channel: str, topic: str,
+                 interval_s: float = PROGRESS_INTERVAL_SECONDS):
+        self.client = client
+        self.channel = channel
+        self.topic = topic
+        self.interval_s = interval_s
+        self.pending: list[str] = []
+        self.last_post = time.monotonic()
+
+    def __call__(self, event: dict) -> None:
+        if event.get("type") != "assistant":
+            return
+        message = event.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        for block in content if isinstance(content, list) else []:
+            if isinstance(block, dict) and (line := progress_line(block)):
+                self.pending.append(line)
+        if self.pending and time.monotonic() - self.last_post >= self.interval_s:
+            self.flush()
+
+    def flush(self) -> None:
+        """Post whatever accumulated; called on the interval and once after
+        the run, so the last actions before an outcome are never lost."""
+        if not self.pending:
+            return
+        body = "\n".join(self.pending)
+        self.pending = []
+        self.last_post = time.monotonic()
+        topic_write(self.topic, body, channel=self.channel, client=self.client)
+
+
+def run_work(workspace: Path, asset_url: str | None = None,
+             on_event: Callable[[dict], None] | None = None) -> str:
     """One work run in a project's `main` clone, with its `ag.agent-run.v1` record."""
     record = next_record_path(RECORDS_ROOT / "run")
     output, _, exit_code = run_role(
@@ -392,6 +475,7 @@ def run_work(workspace: Path, asset_url: str | None = None) -> str:
         cwd=workspace,
         timeout=WORK_TIMEOUT_SECONDS,
         record=record,
+        on_event=on_event,
     )
     if exit_code != 0:
         raise ListenerError(f"work run exited {exit_code}: {output.strip()[:500]}")
@@ -552,7 +636,13 @@ def handle_run(client: ZulipClient, channel: str, topic: str) -> None:
         )
 
         step = "work run"
-        sections.append(run_work(workspace, asset_url))
+        progress = RunProgress(client, channel, topic)
+        try:
+            sections.append(run_work(workspace, asset_url, on_event=progress))
+        finally:
+            # The tail of the stream — what the run was doing when it ended —
+            # posts before the outcome does, whichever outcome it is.
+            progress.flush()
 
         step = "reporting to plane"
         report_path = work_dir / "report.md"

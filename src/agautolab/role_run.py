@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 from agag.harness import run_harness, write_run_record
@@ -79,8 +80,13 @@ def _agcode_args(role: str, timeout: float) -> list[str]:
 def run_role(role: str, prompt: str, *, cwd: Path, timeout: float,
              profile: str | None = None, transcript: Path | None = None,
              record: Path | None = None,
-             project: str | None = None) -> tuple[str, dict, int]:
-    """Resolve `role`, run it once, and return output, record, and exit code."""
+             project: str | None = None,
+             on_event: Callable[[dict], None] | None = None) -> tuple[str, dict, int]:
+    """Resolve `role`, run it once, and return output, record, and exit code.
+
+    `on_event` is run_harness's live-progress seam: when set, the harness
+    streams its conversation events to it as the run proceeds.
+    """
     project = project or (project_name_from_direction(cwd) if role == "director" else None)
     project_roles = load_project_roles(project)
     profile_override = profile or project_roles.get(role)
@@ -100,6 +106,7 @@ def run_role(role: str, prompt: str, *, cwd: Path, timeout: float,
         # classifier is bypassed; the allowlist stays as documentation of
         # what a role is expected to reach for.
         skip_permissions=agent.harness == "claude_code",
+        on_event=on_event,
         transcript_path=transcript,
     )
     result.meta["project"] = project

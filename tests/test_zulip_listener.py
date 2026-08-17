@@ -464,7 +464,7 @@ def wire_run(monkeypatch, tmp_path, calls, *, chosen, report=None, success=False
         lambda topic, text, **kwargs: calls.append(("write", topic, text)) or "success",
     )
 
-    def work_run(workspace, asset_url=None):
+    def work_run(workspace, asset_url=None, on_event=None):
         calls.append(("run", workspace, asset_url))
         work = workspace / ".local" / "work"
         if report is not None:
@@ -517,9 +517,9 @@ def test_handle_run_writes_the_work_file_before_running(monkeypatch, tmp_path):
     wire_run(monkeypatch, tmp_path, calls, chosen=CHOSEN)
     real_run = zulip_listener.run_work
 
-    def capture(workspace, asset_url=None):
+    def capture(workspace, asset_url=None, on_event=None):
         seen["work.md"] = (workspace / ".local" / "work" / "work.md").read_text()
-        return real_run(workspace, asset_url)
+        return real_run(workspace, asset_url, on_event)
 
     monkeypatch.setattr(zulip_listener, "run_work", capture)
     zulip_listener.handle_run(Client(calls), "general", RUN_TOPIC)
@@ -560,7 +560,7 @@ def test_handle_run_reports_a_failure_and_still_cleans_up(monkeypatch, tmp_path)
     calls = []
     wire_run(monkeypatch, tmp_path, calls, chosen=CHOSEN)
 
-    def explode(workspace, asset_url=None):
+    def explode(workspace, asset_url=None, on_event=None):
         calls.append(("run", workspace, asset_url))
         raise zulip_listener.ListenerError("claude_code timed out")
 
@@ -1060,3 +1060,62 @@ def test_a_failed_director_run_still_cleans_up_and_answers(monkeypatch, tmp_path
 
 def test_bmining_is_swept(monkeypatch):
     assert "bmining-" == zulip_listener.BMINING_TOPIC_PREFIX
+
+
+# --- live progress on run- topics --------------------------------------------
+
+
+def test_progress_line_shapes():
+    assert zulip_listener.progress_line(
+        {"type": "text", "text": "  working\non it  "}
+    ) == "💬 working on it"
+    assert zulip_listener.progress_line({"type": "thinking", "thinking": "..."}) is None
+    assert zulip_listener.progress_line(
+        {"type": "tool_use", "name": "Bash", "input": {"command": "git status"}}
+    ) == "🔧 Bash: git status"
+    # agcode's `run` tool spells its argument `command` too; a tool with no
+    # showable argument still names itself.
+    assert zulip_listener.progress_line(
+        {"type": "tool_use", "name": "TodoWrite", "input": {"todos": []}}
+    ) == "🔧 TodoWrite"
+
+
+def test_run_progress_throttles_then_posts(monkeypatch):
+    posts = []
+    monkeypatch.setattr(
+        zulip_listener, "topic_write",
+        lambda topic, text, **kwargs: posts.append((topic, text)),
+    )
+    progress = zulip_listener.RunProgress(None, "general", "run-1", interval_s=1000)
+
+    progress({"type": "assistant", "message": {"role": "assistant", "content": [
+        {"type": "tool_use", "id": "t1", "name": "Read", "input": {"file_path": "a.py"}}]}})
+    assert posts == []  # inside the interval: accumulated, not posted
+
+    progress.last_post -= 2000
+    progress({"type": "assistant", "message": {"role": "assistant", "content": [
+        {"type": "text", "text": "done reading"}]}})
+    assert posts == [("run-1", "🔧 Read: a.py\n💬 done reading")]
+
+    progress({"type": "user", "message": {"content": []}})  # not an assistant event
+    progress.flush()
+    assert len(posts) == 1  # nothing pending: flush posts nothing
+
+
+def test_handle_run_posts_the_progress_tail_before_the_outcome(monkeypatch, tmp_path):
+    calls = []
+    wire_run(monkeypatch, tmp_path, calls, chosen=CHOSEN)
+
+    def streaming_run(workspace, asset_url=None, on_event=None):
+        on_event({"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "t1", "name": "Bash",
+             "input": {"command": "uv run pytest"}}]}})
+        return "work done"
+
+    monkeypatch.setattr(zulip_listener, "run_work", streaming_run)
+    zulip_listener.handle_run(Client(calls), "general", RUN_TOPIC)
+
+    writes = [call for call in calls if call[0] == "write"]
+    assert writes[0][2] == zulip_listener.ACK_TEXT
+    assert writes[1][2] == "🔧 Bash: uv run pytest"  # the flushed tail
+    assert "work done" in writes[2][2]  # then the outcome
