@@ -1119,3 +1119,41 @@ def test_handle_run_posts_the_progress_tail_before_the_outcome(monkeypatch, tmp_
     assert writes[0][2] == zulip_listener.ACK_TEXT
     assert writes[1][2] == "🔧 Bash: uv run pytest"  # the flushed tail
     assert "work done" in writes[2][2]  # then the outcome
+
+
+# --- a run that ends without a closing message --------------------------------
+
+
+def test_run_wrappers_report_a_missing_closing_message(monkeypatch, tmp_path):
+    """The harness stopped failing such runs (their work is their files, not
+    their farewell), so each wrapper says so rather than returning nothing:
+    a serving whose sections are all empty posts nothing at all, and a topic
+    that got only an ack drops out of the sweep until a human posts again."""
+    monkeypatch.setattr(zulip_listener, "RECORDS_ROOT", tmp_path / "records")
+    monkeypatch.setattr(
+        zulip_listener, "run_role",
+        lambda role, prompt, **kwargs: ("   \n", {"outcome": "done"}, 0),
+    )
+    monkeypatch.setattr(zulip_listener, "work_prompt", lambda asset_url: "PROMPT")
+    monkeypatch.setattr(zulip_listener, "bmining_prompt", lambda bot_name: "PROMPT")
+
+    assert zulip_listener.run_work(tmp_path) == zulip_listener.NO_CLOSING_MESSAGE
+    assert zulip_listener.run_superdirector("p", tmp_path) == zulip_listener.NO_CLOSING_MESSAGE
+    assert zulip_listener.run_director("p", tmp_path) == zulip_listener.NO_CLOSING_MESSAGE
+
+
+def test_handle_run_completes_the_work_of_a_run_that_said_nothing(monkeypatch, tmp_path):
+    """The regression this rule change fixes: a coding run that edited files
+    for fourteen turns and stopped without a farewell used to be a failure,
+    and its workspace — report included — was deleted with it."""
+    calls = []
+    wire_run(monkeypatch, tmp_path, calls, chosen=CHOSEN, report="all good", success=True,
+             output=zulip_listener.NO_CLOSING_MESSAGE)
+
+    zulip_listener.handle_run(Client(calls), "general", RUN_TOPIC)
+
+    assert calls[2][1:] == ("p1", "i1", "all good", True)  # reported, not discarded
+    outcome = calls[-1][2]
+    assert zulip_listener.NO_CLOSING_MESSAGE in outcome
+    assert "work PD-7: commented yes, Done yes" in outcome
+    assert "failed" not in outcome

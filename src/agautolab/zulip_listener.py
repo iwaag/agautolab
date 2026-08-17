@@ -98,6 +98,13 @@ HISTORY_MESSAGES = 1000
 ACK_TEXT = "Message received. Please wait for the reply."
 EMPTY_REPLY = "There is nothing in this topic to answer yet."
 
+# What a run that ended without a closing message contributes to its report.
+# The harness no longer fails such a run (its work is its files, not its
+# farewell), so every flow that quotes an agent's answer needs something to
+# say instead — a topic that got only an ack and then silence would drop out
+# of the sweep until a human posts again.
+NO_CLOSING_MESSAGE = "(the run ended without a closing message)"
+
 # The planning round's files, all of them in the serving's own generation
 # workspace. The Plane mirror lives in `current/` inside that workspace so the
 # read-back `task1.md`, `task2.md`, … can never be mistaken for a task split
@@ -321,7 +328,10 @@ def run_superdirector(prompt: str, cwd: Path) -> str:
     )
     if exit_code != 0:
         raise ListenerError(f"superdirector run exited {exit_code}: {output.strip()[:500]}")
-    return output.strip()
+    # A planning run's outcome is `plan.md` and the flags it wrote, which
+    # `handle_superdirector_response` reads next; the answer is only the
+    # covering note, so its absence is reported, not raised.
+    return output.strip() or NO_CLOSING_MESSAGE
 
 
 def handle_superdirector_response(
@@ -479,7 +489,10 @@ def run_work(workspace: Path, asset_url: str | None = None,
     )
     if exit_code != 0:
         raise ListenerError(f"work run exited {exit_code}: {output.strip()[:500]}")
-    return output.strip()
+    # Whether the work succeeded is read from `report.md` and `success.flag`
+    # by the caller, never from this text: a run that edited files for
+    # fourteen turns and then stopped without a farewell still did the work.
+    return output.strip() or NO_CLOSING_MESSAGE
 
 
 # --- the asset state machine -----------------------------------------------
@@ -807,7 +820,9 @@ def run_director(prompt: str, cwd: Path) -> str:
     )
     if exit_code != 0:
         raise ListenerError(f"director run exited {exit_code}: {output.strip()[:500]}")
-    return output.strip()
+    # The discussion notes the director recorded are committed by the caller
+    # whatever it said here.
+    return output.strip() or NO_CLOSING_MESSAGE
 
 
 def serve_bmining(context) -> TopicResult:
