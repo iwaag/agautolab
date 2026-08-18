@@ -40,6 +40,10 @@ ROLE_ALLOWED_TOOLS = {
     # folder, and answers agforge's questions from it. It writes files, so it
     # gets the writable set rather than `director`'s read-only one.
     "superdirector": WORKING_ALLOWED_TOOLS,
+    # `supercoder` does the coding work of one `run-` topic in the project
+    # folder and writes `report.md` into the serving workspace, so it gets the
+    # same writable set as `coding`.
+    "supercoder": WORKING_ALLOWED_TOOLS,
 }
 
 # `front` is deliberately absent: the zulip listener runs it in the topic

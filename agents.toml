@@ -40,6 +40,13 @@ requires = []
 profile = "sonnet"
 requires = []
 
+# Serves one `run-` topic as a conversation with the developer, in the
+# project folder. Same profile as `coding` today; the role exists so the two
+# can diverge without touching call sites.
+[roles.supercoder]
+profile = "sonnet"
+requires = []
+
 [roles.summarizer]
 profile = "sonnet"
 requires = []

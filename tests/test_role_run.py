@@ -115,3 +115,13 @@ def test_resolution_checks_harness_availability(monkeypatch, tmp_path):
     role_run.run_role("front", "work", cwd=tmp_path, timeout=5)
 
     assert "check_available" not in seen[0]
+
+
+def test_supercoder_is_a_configured_role_with_the_working_grant():
+    """A run- serving resolves `supercoder`; without an allowlist entry
+    claude_code would omit `--allowedTools` and wait for an interactive
+    permission answer until the timeout."""
+    from agautolab.agent_settings import resolve_project_role
+
+    assert role_run.ROLE_ALLOWED_TOOLS["supercoder"] == role_run.WORKING_ALLOWED_TOOLS
+    assert resolve_project_role("supercoder").profile == "sonnet"
