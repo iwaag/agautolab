@@ -25,11 +25,6 @@ AUTO_MARKER = "[AUTO]"
 AUTO_DESCRIPTION_PREFIX = f"{AUTO_MARKER} autolab project: "
 IGNORE_LINE = ".local/"
 
-# The stopgap art direction. How a `direction/` repository should really be
-# populated is its own design question; until that is answered, every project
-# gets one line of it so the asset flow has a house style to quote.
-AESTHETICS_FILE = "aesthetics.md"
-AESTHETICS_TEXT = "2D retro digital game art style\n"
 GIT_AUTHOR_NAME = "autolab-agent"
 GIT_AUTHOR_EMAIL = "autolab-agent@agautolab.invalid"
 
@@ -348,25 +343,6 @@ def commit_all_and_push(config: GiteaConfig, workspace: Path, message: str) -> b
     return True
 
 
-def ensure_aesthetics(config: GiteaConfig, workspace: Path) -> bool:
-    """Seed the direction clone's `aesthetics.md`, and push it.
-
-    Returns whether a commit was made. Idempotent, and deliberately
-    *presence*-based rather than content-based: a project whose art direction
-    someone has since rewritten keeps that rewrite. An existing project gains
-    the file on its next `init_project`.
-    """
-    path = workspace / AESTHETICS_FILE
-    if path.exists():
-        return False
-    try:
-        path.write_text(AESTHETICS_TEXT, encoding="utf-8")
-    except OSError as error:
-        raise ProjectInitError(f"cannot write {path}: {error}") from error
-    _commit_and_push(config, workspace, path, f"Add {AESTHETICS_FILE}")
-    return True
-
-
 def init_project(project: str) -> str:
     if not PROJECT_NAME.fullmatch(project):
         raise ProjectInitError(
@@ -386,6 +362,4 @@ def init_project(project: str) -> str:
         workspace = project_root / directory
         ensure_clone(gitea, repo, workspace)
         ensure_gitignore(gitea, workspace)
-        if directory == "direction":
-            ensure_aesthetics(gitea, workspace)
     return "success"
