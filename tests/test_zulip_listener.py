@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 import pytest
@@ -636,134 +637,269 @@ def test_guide_refuses_to_start_without_the_file(monkeypatch, tmp_path):
         zulip_listener.guide("mission_superdirector", "guide.md")
 
 
-RUN_TOPIC = "run-1"
+# --- serving one task on a run- topic ---------------------------------------
+#
+# A run- topic is bound to one Sub-Work by its own name and lives in that
+# mission's work- channel. It is a conversation, not a button: every human
+# post re-serves it, and `report.md` — the agreement signal the guide asks
+# for — is what closes it.
 
+WORK_CHANNEL = "work-pd-4"
+RUN_TOPIC = "run-task2-pd-4"
+BINDING = "[AUTO] project: demo-project; mission: pj-demo-project/mission-one"
 
-def wire_run(monkeypatch, tmp_path, calls, *, chosen, report=None, success=False,
-             output="work done"):
-    monkeypatch.setattr(zulip_listener, "PROJECTS_ROOT", tmp_path / "projects")
-    monkeypatch.setattr(zulip_listener, "next_work", lambda: chosen)
-    monkeypatch.setattr(
-        zulip_listener,
-        "topic_write",
-        lambda topic, text, **kwargs: calls.append(("write", topic, text)) or "success",
-    )
-
-    def work_run(workspace, asset_url=None, on_event=None):
-        calls.append(("run", workspace, asset_url))
-        work = workspace / ".local" / "work"
-        if report is not None:
-            (work / "report.md").write_text(report)
-        if success:
-            (work / "success.flag").touch()
-        return output
-
-    monkeypatch.setattr(zulip_listener, "run_work", work_run)
-    monkeypatch.setattr(
-        zulip_listener,
-        "report_work",
-        lambda project_id, issue_id, text, ok: (
-            calls.append(("report", project_id, issue_id, text, ok)) or ("PD-7", bool(text), ok)
-        ),
-    )
-
-
-CHOSEN = zulip_listener.Work("demo-project", "Add the README", "Write it.", "p1", "i1")
-ASSET_WORK = zulip_listener.Work(
-    "demo-project", "Sprite sheet", "A 32x32 hero.", "p1", "i9", is_asset=True
+TARGET = zulip_listener.RunTarget(
+    zulip_listener.Work("demo-project", "Add the README", "Write it.", "p1", "i1"),
+    "PD-6", 2, "PD-4", "Fix title screen",
+)
+ASSET_TARGET = zulip_listener.RunTarget(
+    zulip_listener.Work("demo-project", "Sprite sheet", "A 32x32 hero.", "p1", "i9",
+                        is_asset=True),
+    "PD-9", 2, "PD-4", "Fix title screen",
 )
 ASSET_CHANNEL = "pj-demo-project"
 ASSET_TOPIC = "create-asset_i9"
 
 
-def test_handle_run_executes_comments_completes_and_cleans_up(monkeypatch, tmp_path):
+class RunClient(Client):
+    """A client whose realm already holds the mission's work- channel."""
+
+    channels_list = [
+        {"name": CHANNEL, "stream_id": 7, "folder_id": None},
+        {"name": WORK_CHANNEL, "stream_id": 8, "folder_id": None, "description": BINDING},
+    ]
+
+
+def calls_of(calls, kind):
+    return [call for call in calls if call[0] == kind]
+
+
+def last_reply(calls):
+    """The final reply — after it, serve_topic re-checks history, so the last
+    call is a read, not a write."""
+    return calls_of(calls, "write")[-1][2]
+
+
+def wire_run(monkeypatch, tmp_path, calls, *, target=TARGET, report=None,
+             output="work done", pushed=True):
+    monkeypatch.setattr(zulip_listener, "PROJECTS_ROOT", tmp_path / "projects")
+    monkeypatch.setattr(zulip_listener, "TOPICS_ROOT", tmp_path / "topics")
+    monkeypatch.setattr(zulip_listener, "RECORDS_ROOT", tmp_path / "records")
+    monkeypatch.setattr(
+        zulip_listener, "init_project", lambda project: calls.append(("init", project)) or "ok"
+    )
+    monkeypatch.setattr(
+        zulip_listener,
+        "run_target",
+        lambda project, channel, topic, serial: (
+            calls.append(("target", project, channel, topic, serial)) or target
+        ),
+    )
+    monkeypatch.setattr(
+        topics,
+        "topic_write",
+        lambda topic, text, **kwargs: calls.append(("write", topic, text, kwargs)) or "success",
+    )
+    monkeypatch.setattr(
+        zulip_listener,
+        "topic_write",
+        lambda topic, text, **kwargs: calls.append(("write", topic, text, kwargs)) or "success",
+    )
+
+    def supercoder(prompt, cwd, on_event=None):
+        calls.append(("supercoder", prompt, cwd))
+        workspace = Path(re.search(r'is placed in "([^"]+)"', prompt).group(1))
+        if report is not None:
+            (workspace / "report.md").write_text(report)
+        return output
+
+    monkeypatch.setattr(zulip_listener, "run_supercoder", supercoder)
+    monkeypatch.setattr(
+        zulip_listener,
+        "report_work",
+        lambda project_id, issue_id, text, ok: (
+            calls.append(("report", project_id, issue_id, text, ok)) or ("PD-6", bool(text), ok)
+        ),
+    )
+    monkeypatch.setattr(zulip_listener, "load_gitea_config", lambda: "gitea-config")
+    monkeypatch.setattr(
+        zulip_listener,
+        "commit_all_and_push",
+        lambda config, workspace, message: (
+            calls.append(("push", workspace, message)) or pushed
+        ),
+    )
+    guides = tmp_path / "guides"
+    (guides / "run_supercoder").mkdir(parents=True)
+    (guides / "run_supercoder" / "guide.md").write_text("RUN GUIDE")
+    monkeypatch.setattr(zulip_listener, "GUIDES", guides)
+
+
+def supercoder_dir(tmp_path, number=1):
+    return tmp_path / "topics" / WORK_CHANNEL / RUN_TOPIC / str(number) / "supercoder"
+
+
+@pytest.mark.parametrize(
+    "channel,topic",
+    [
+        ("general", "run-1"),               # the old any-channel button
+        (CHANNEL, "run-task1-pd-4"),        # right name, wrong channel
+        (WORK_CHANNEL, "run-something"),    # right channel, no serial
+    ],
+)
+def test_a_run_topic_that_is_not_bound_to_a_task_is_explained(monkeypatch, tmp_path,
+                                                              channel, topic):
     calls = []
-    wire_run(monkeypatch, tmp_path, calls, chosen=CHOSEN, report="all good", success=True)
+    wire_run(monkeypatch, tmp_path, calls)
+    zulip_listener.handle_run(RunClient(calls), channel, topic)
 
-    zulip_listener.handle_run(Client(calls), "general", RUN_TOPIC)
-
-    workspace = tmp_path / "projects" / "demo-project" / "main"
-    assert [call[0] for call in calls] == ["write", "run", "report", "write"]
-    assert calls[0][2] == zulip_listener.ACK_TEXT
-    assert calls[1][1:] == (workspace, None)
-    assert calls[2][1:] == ("p1", "i1", "all good", True)
-    outcome = calls[-1][2]
-    assert 'running "Add the README" in demo-project' in outcome
-    assert "work done" in outcome
-    assert "work PD-7: commented yes, Done yes" in outcome
-    # `.local/work/` is gone; the workspace itself stays.
-    assert not (workspace / ".local" / "work").exists()
-    assert workspace.is_dir()
+    assert not any(call[0] in {"target", "supercoder"} for call in calls)
+    assert last_reply(calls) == zulip_listener.WRONG_PLACE_REPLY
 
 
-def test_handle_run_writes_the_work_file_before_running(monkeypatch, tmp_path):
+def test_the_previous_task_gate_answers_before_any_cost(monkeypatch, tmp_path):
     calls = []
-    seen = {}
-    wire_run(monkeypatch, tmp_path, calls, chosen=CHOSEN)
-    real_run = zulip_listener.run_work
+    blocked = zulip_listener.RunTarget(TARGET.work, "PD-6", 2, "PD-4", "Fix title screen",
+                                       blocked_by="PD-5")
+    wire_run(monkeypatch, tmp_path, calls, target=blocked)
 
-    def capture(workspace, asset_url=None, on_event=None):
-        seen["work.md"] = (workspace / ".local" / "work" / "work.md").read_text()
-        return real_run(workspace, asset_url, on_event)
+    zulip_listener.handle_run(RunClient(calls), WORK_CHANNEL, RUN_TOPIC)
 
-    monkeypatch.setattr(zulip_listener, "run_work", capture)
-    zulip_listener.handle_run(Client(calls), "general", RUN_TOPIC)
-    assert seen["work.md"] == "# Add the README\n\nWrite it.\n"
+    assert not any(call[0] in {"init", "supercoder"} for call in calls)
+    assert last_reply(calls) == f"{zulip_listener.PREVIOUS_WORK_REPLY} (PD-5)"
 
 
-def test_handle_run_without_eligible_work_posts_no_work(monkeypatch, tmp_path):
+def test_a_serving_runs_the_supercoder_in_the_project_with_its_workspace(monkeypatch, tmp_path):
     calls = []
-    wire_run(monkeypatch, tmp_path, calls, chosen=None)
-    zulip_listener.handle_run(Client(calls), "general", RUN_TOPIC)
-    assert [call[2] for call in calls] == [zulip_listener.ACK_TEXT, "no work"]
+    wire_run(monkeypatch, tmp_path, calls)
+
+    zulip_listener.handle_run(RunClient(calls), WORK_CHANNEL, RUN_TOPIC)
+
+    assert [call[0] for call in calls if call[0] not in {"whoami", "history", "channels"}] == [
+        "write", "target", "init", "supercoder", "write",
+    ]
+    # The serial comes from the topic name, the project and mission key from
+    # the channel description.
+    assert calls_of(calls, "target")[0][1:] == ("demo-project", CHANNEL, "mission-one", 2)
+    prompt, cwd = next((call[1], call[2]) for call in calls if call[0] == "supercoder")
+    workspace = supercoder_dir(tmp_path)
+    assert cwd == tmp_path / "projects" / "demo-project"
+    assert str(workspace) in prompt
+    assert prompt.endswith("RUN GUIDE")
+    # The task travels in the prompt, read from Plane — the task[N].md the
+    # superdirector wrote lives in another generation's directory.
+    assert "# Add the README\n\nWrite it." in prompt
+    assert (workspace / "chatlog.md").read_text() == "[Developer] Build it\n"
+    # No report: the conversation is simply not finished. Nothing closes.
+    assert not any(call[0] in {"report", "push"} for call in calls)
+    assert last_reply(calls) == "work done"
 
 
-def test_handle_run_refuses_a_dirty_workspace_and_keeps_it(monkeypatch, tmp_path):
+def test_each_serving_of_a_run_topic_cuts_a_new_generation(monkeypatch, tmp_path):
     calls = []
-    wire_run(monkeypatch, tmp_path, calls, chosen=CHOSEN)
-    leftover = tmp_path / "projects" / "demo-project" / "main" / ".local" / "work"
-    leftover.mkdir(parents=True)
-    (leftover / "work.md").write_text("from a crashed run")
+    wire_run(monkeypatch, tmp_path, calls)
+    zulip_listener.handle_run(RunClient(calls), WORK_CHANNEL, RUN_TOPIC)
+    zulip_listener.handle_run(RunClient(calls), WORK_CHANNEL, RUN_TOPIC)
 
-    zulip_listener.handle_run(Client(calls), "general", RUN_TOPIC)
-
-    assert not any(call[0] == "run" for call in calls)
-    assert "work dirty" in calls[-1][2]
-    assert (leftover / "work.md").exists()  # manual cleanup is the recovery
+    assert supercoder_dir(tmp_path, 1).is_dir()
+    assert supercoder_dir(tmp_path, 2).is_dir()
 
 
-def test_handle_run_without_a_report_says_so_and_leaves_the_work_open(monkeypatch, tmp_path):
+def test_a_report_completes_the_task_records_it_and_resolves_the_topic(monkeypatch, tmp_path):
     calls = []
-    wire_run(monkeypatch, tmp_path, calls, chosen=CHOSEN)
-    zulip_listener.handle_run(Client(calls), "general", RUN_TOPIC)
-    assert calls[2][1:] == ("p1", "i1", None, False)
-    assert "no report" in calls[-1][2]
-    assert "work PD-7: commented no, Done no" in calls[-1][2]
+    wire_run(monkeypatch, tmp_path, calls, report="all good\n")
+
+    zulip_listener.handle_run(RunClient(calls), WORK_CHANNEL, RUN_TOPIC)
+
+    assert calls_of(calls, "report")[0][1:] == ("p1", "i1", "all good\n", True)
+    # The devlog record is deterministic handler code, never the agent's git.
+    devlog = tmp_path / "projects" / "demo-project" / "devlog"
+    task_dir = devlog / "pd-4-fix-title-screen" / "task-2"
+    assert (task_dir / "work.md").read_text() == "# Add the README\n\nWrite it.\n"
+    assert (task_dir / "report.md").read_text() == "all good\n"
+    assert calls_of(calls, "push")[0][1:] == (devlog, "[AUTO] task 2 report for PD-4")
+    outcome = last_reply(calls)
+    assert "task PD-6: commented yes, Done yes; resolving this topic" in outcome
+    assert "recorded pd-4-fix-title-screen/task-2 in devlog and pushed" in outcome
+    assert any(call[0] == "resolve" for call in calls)
 
 
-def test_handle_run_reports_a_failure_and_still_cleans_up(monkeypatch, tmp_path):
+def test_the_mission_devlog_directory_is_minted_once_and_then_found(monkeypatch, tmp_path):
+    """A later re-plan may rewrite the Work title; a record that moved would
+    stop being a record, so the directory is looked up by its label prefix."""
+    devlog = tmp_path / "projects" / "demo-project" / "devlog"
+    (devlog / "pd-4-fix-title-screen").mkdir(parents=True)
     calls = []
-    wire_run(monkeypatch, tmp_path, calls, chosen=CHOSEN)
+    renamed = zulip_listener.RunTarget(TARGET.work, "PD-6", 2, "PD-4",
+                                       "Rewrite the whole title sequence")
+    wire_run(monkeypatch, tmp_path, calls, target=renamed, report="done")
 
-    def explode(workspace, asset_url=None, on_event=None):
-        calls.append(("run", workspace, asset_url))
+    zulip_listener.handle_run(RunClient(calls), WORK_CHANNEL, RUN_TOPIC)
+
+    assert sorted(path.name for path in devlog.iterdir()) == ["pd-4-fix-title-screen"]
+
+
+@pytest.mark.parametrize(
+    "title,stem",
+    [
+        ("Fix title screen", "fix-title-screen"),
+        ("  A & B: ship it!  ", "a-b-ship-it"),
+        ("日本語だけ", "mission"),
+    ],
+)
+def test_title_slug_stays_one_readable_path_component(title, stem):
+    assert zulip_listener.title_slug(title) == stem
+
+
+def test_a_run_that_said_nothing_still_closes_on_its_report(monkeypatch, tmp_path):
+    """The harness stopped failing a run that wrote files and no farewell;
+    `report.md`, not the answer text, is what says the task is done."""
+    calls = []
+    wire_run(monkeypatch, tmp_path, calls, report="all good",
+             output=zulip_listener.NO_CLOSING_MESSAGE)
+
+    zulip_listener.handle_run(RunClient(calls), WORK_CHANNEL, RUN_TOPIC)
+
+    assert calls_of(calls, "report")[0][1:] == ("p1", "i1", "all good", True)
+    outcome = last_reply(calls)
+    assert zulip_listener.NO_CLOSING_MESSAGE in outcome
+    assert "failed" not in outcome
+
+
+def test_a_failed_supercoder_run_is_reported_into_the_topic(monkeypatch, tmp_path):
+    calls = []
+    wire_run(monkeypatch, tmp_path, calls)
+
+    def explode(prompt, cwd, on_event=None):
         raise zulip_listener.ListenerError("claude_code timed out")
 
-    monkeypatch.setattr(zulip_listener, "run_work", explode)
-    zulip_listener.handle_run(Client(calls), "general", RUN_TOPIC)
+    monkeypatch.setattr(zulip_listener, "run_supercoder", explode)
+    zulip_listener.handle_run(RunClient(calls), WORK_CHANNEL, RUN_TOPIC)
 
-    assert "failed during work run: claude_code timed out" in calls[-1][2]
-    assert not (tmp_path / "projects" / "demo-project" / "main" / ".local" / "work").exists()
+    assert "failed during supercoder: claude_code timed out" in last_reply(calls)
+    assert not any(call[0] == "resolve" for call in calls)
+
+
+def test_a_work_channel_without_a_binding_is_reported(monkeypatch, tmp_path):
+    calls = []
+    wire_run(monkeypatch, tmp_path, calls)
+
+    class Bare(RunClient):
+        channels_list = [{"name": WORK_CHANNEL, "stream_id": 8, "description": "made by hand"}]
+
+    zulip_listener.handle_run(Bare(calls), WORK_CHANNEL, RUN_TOPIC)
+
+    assert "failed during reading the binding" in last_reply(calls)
+    assert not any(call[0] == "supercoder" for call in calls)
 
 
 # --- the asset state machine -----------------------------------------------
 #
-# The autolab Work stays `unstarted` through states 1-2, so `next_work()`
-# keeps choosing it and everything behind it waits for the asset. Accepted
-# for this episode.
+# Since topics are per-task, a waiting asset blocks only its own task now,
+# never the whole queue.
 
 
-def wire_asset(monkeypatch, tmp_path, calls, *, state, key=None, url="http://minio/fresh"):
+def wire_asset(monkeypatch, calls, *, state, key=None, url="http://minio/fresh"):
     monkeypatch.setattr(
         zulip_listener, "asset_order",
         lambda project_id, channel, issue_id: (
@@ -781,98 +917,85 @@ def wire_asset(monkeypatch, tmp_path, calls, *, state, key=None, url="http://min
 
 def test_an_unordered_asset_is_ordered_and_the_serving_ends(monkeypatch, tmp_path):
     calls = []
-    wire_run(monkeypatch, tmp_path, calls, chosen=ASSET_WORK)
-    wire_asset(monkeypatch, tmp_path, calls, state="absent")
+    wire_run(monkeypatch, tmp_path, calls, target=ASSET_TARGET)
+    wire_asset(monkeypatch, calls, state="absent")
     direction = tmp_path / "projects" / "demo-project" / "direction"
     direction.mkdir(parents=True)
     (direction / "aesthetics.md").write_text("2D retro digital game art style\n")
 
-    zulip_listener.handle_run(Client(calls), "general", RUN_TOPIC)
+    zulip_listener.handle_run(RunClient(calls), WORK_CHANNEL, RUN_TOPIC)
 
-    # No coding run, and Plane is not written: the Work stays unstarted.
-    assert [call[0] for call in calls] == ["write", "order-state", "write", "write"]
-    order = calls[2]
-    assert order[1] == ASSET_TOPIC
+    assert not any(call[0] in {"init", "supercoder"} for call in calls)
+    order = next(call for call in calls if call[0] == "write" and call[1] == ASSET_TOPIC)
     # Self-contained: agforge's front reads the whole topic chatlog and its
     # generator plans from that, so the order carries everything.
     assert order[2] == (
         "# Sprite sheet\n\nA 32x32 hero.\n\n"
         "Art direction for this project:\n2D retro digital game art style"
     )
-    assert f"asset ordered in {ASSET_CHANNEL}/{ASSET_TOPIC}" in calls[-1][2]
+    assert f"asset ordered in {ASSET_CHANNEL}/{ASSET_TOPIC}" in last_reply(calls)
 
 
 def test_an_order_without_aesthetics_still_stands_alone(monkeypatch, tmp_path):
     calls = []
-    wire_run(monkeypatch, tmp_path, calls, chosen=ASSET_WORK)
-    wire_asset(monkeypatch, tmp_path, calls, state="absent")
-    zulip_listener.handle_run(Client(calls), "general", RUN_TOPIC)
-    assert calls[2][2] == "# Sprite sheet\n\nA 32x32 hero."
+    wire_run(monkeypatch, tmp_path, calls, target=ASSET_TARGET)
+    wire_asset(monkeypatch, calls, state="absent")
+    zulip_listener.handle_run(RunClient(calls), WORK_CHANNEL, RUN_TOPIC)
+    order = next(call for call in calls if call[0] == "write" and call[1] == ASSET_TOPIC)
+    assert order[2] == "# Sprite sheet\n\nA 32x32 hero."
 
 
 def test_an_asset_in_progress_reports_and_fires_no_runcreate(monkeypatch, tmp_path):
     """The Omni Agent triggers `runcreate-` by hand this episode; autolab must
     never emit one."""
     calls = []
-    wire_run(monkeypatch, tmp_path, calls, chosen=ASSET_WORK)
-    wire_asset(monkeypatch, tmp_path, calls, state="working")
+    wire_run(monkeypatch, tmp_path, calls, target=ASSET_TARGET)
+    wire_asset(monkeypatch, calls, state="working")
 
-    zulip_listener.handle_run(Client(calls), "general", RUN_TOPIC)
+    zulip_listener.handle_run(RunClient(calls), WORK_CHANNEL, RUN_TOPIC)
 
-    assert [call[0] for call in calls] == ["write", "order-state", "write"]
-    assert f"asset in progress in {ASSET_CHANNEL}/{ASSET_TOPIC}" in calls[-1][2]
+    assert f"asset in progress in {ASSET_CHANNEL}/{ASSET_TOPIC}" in last_reply(calls)
     assert not any("runcreate" in str(call) for call in calls)
-    assert not any(call[0] in {"run", "report"} for call in calls)
+    assert not any(call[0] in {"supercoder", "report"} for call in calls)
 
 
-def test_a_completed_asset_is_resigned_and_the_url_reaches_the_run(monkeypatch, tmp_path):
+def test_a_completed_asset_is_resigned_and_the_url_reaches_the_prompt(monkeypatch, tmp_path):
     calls = []
-    wire_run(monkeypatch, tmp_path, calls, chosen=ASSET_WORK, report="done", success=True)
-    wire_asset(monkeypatch, tmp_path, calls, state="done", key="files/2026-08-16/abc.zip")
+    wire_run(monkeypatch, tmp_path, calls, target=ASSET_TARGET)
+    wire_asset(monkeypatch, calls, state="done", key="files/2026-08-16/abc.zip")
 
-    zulip_listener.handle_run(Client(calls), "general", RUN_TOPIC)
+    zulip_listener.handle_run(RunClient(calls), WORK_CHANNEL, RUN_TOPIC)
 
-    assert [call[0] for call in calls] == [
-        "write", "order-state", "find-key", "resign", "run", "report", "write",
-    ]
     # Re-signed immediately before the run, so a 1200 s run cannot outlive
     # the 60-minute URL it was handed.
-    assert calls[3][1] == "files/2026-08-16/abc.zip"
-    assert calls[4][2] == "http://minio/fresh"
-    assert "asset ready (files/2026-08-16/abc.zip)" in calls[-1][2]
+    assert [call[0] for call in calls
+            if call[0] in {"order-state", "find-key", "resign", "supercoder"}] == [
+        "order-state", "find-key", "resign", "supercoder",
+    ]
+    prompt = next(call[1] for call in calls if call[0] == "supercoder")
+    assert prompt.endswith("http://minio/fresh")
+    assert "try to compromise" in prompt
+    assert "asset ready (files/2026-08-16/abc.zip)" in last_reply(calls)
 
 
 def test_a_completed_asset_without_a_key_footer_is_a_failure(monkeypatch, tmp_path):
     calls = []
-    wire_run(monkeypatch, tmp_path, calls, chosen=ASSET_WORK)
-    wire_asset(monkeypatch, tmp_path, calls, state="done", key=None)
+    wire_run(monkeypatch, tmp_path, calls, target=ASSET_TARGET)
+    wire_asset(monkeypatch, calls, state="done", key=None)
 
-    zulip_listener.handle_run(Client(calls), "general", RUN_TOPIC)
+    zulip_listener.handle_run(RunClient(calls), WORK_CHANNEL, RUN_TOPIC)
 
-    assert "failed during asset check" in calls[-1][2]
-    assert zulip_listener.S3_KEY_MARKER in calls[-1][2]
-    assert not any(call[0] == "run" for call in calls)
+    assert "failed during asset check" in last_reply(calls)
+    assert zulip_listener.S3_KEY_MARKER in last_reply(calls)
+    assert not any(call[0] == "supercoder" for call in calls)
 
 
-def test_a_plain_work_never_touches_the_asset_route(monkeypatch, tmp_path):
+def test_a_plain_task_never_touches_the_asset_route(monkeypatch, tmp_path):
     calls = []
-    wire_run(monkeypatch, tmp_path, calls, chosen=CHOSEN)
-    wire_asset(monkeypatch, tmp_path, calls, state="absent")
-    zulip_listener.handle_run(Client(calls), "general", RUN_TOPIC)
+    wire_run(monkeypatch, tmp_path, calls)
+    wire_asset(monkeypatch, calls, state="absent")
+    zulip_listener.handle_run(RunClient(calls), WORK_CHANNEL, RUN_TOPIC)
     assert not any(call[0] in {"order-state", "find-key", "resign"} for call in calls)
-
-
-def test_the_asset_note_is_appended_to_the_run_guide(monkeypatch, tmp_path):
-    guides = tmp_path / "guides"
-    (guides / "run_coding").mkdir(parents=True)
-    (guides / "run_coding" / "guide.md").write_text("RUN GUIDE")
-    monkeypatch.setattr(zulip_listener, "GUIDES", guides)
-
-    assert zulip_listener.work_prompt(None) == "RUN GUIDE"
-    prompt = zulip_listener.work_prompt("http://minio/x.zip")
-    assert prompt.startswith("RUN GUIDE\n\nNote: the asset required by this work")
-    assert "try to compromise" in prompt
-    assert prompt.endswith("\nhttp://minio/x.zip")
 
 
 def test_find_asset_key_takes_the_newest_footer(monkeypatch):
@@ -1143,12 +1266,6 @@ def wire_bmining(monkeypatch, tmp_path, calls, *, reply="director says hi",
     monkeypatch.setattr(zulip_listener, "GUIDES", guides)
 
 
-def last_write(calls):
-    """The final reply — after it, serve_topic re-checks history, so the
-    last call is a read, not the write."""
-    return [call for call in calls if call[0] == "write"][-1][2]
-
-
 def bmining_paths(tmp_path):
     direction = tmp_path / "projects" / PROJECT / "direction"
     return direction, direction / ".local" / "work"
@@ -1174,7 +1291,7 @@ def test_handle_bmining_places_chatlog_runs_director_and_replies(monkeypatch, tm
     assert directed[2] == direction
     assert "BMINING GUIDE" in directed[1]
     assert '".local/work/chatlog.md"' in directed[1]
-    assert last_write(calls) == "director says hi"
+    assert last_reply(calls) == "director says hi"
 
 
 def test_bmining_work_directory_is_removed_after_the_reply(monkeypatch, tmp_path):
@@ -1216,7 +1333,7 @@ def test_bmining_reports_the_push_when_the_clone_was_dirty(monkeypatch, tmp_path
     pushed = next(call for call in calls if call[0] == "push")
     assert pushed[2] == direction
     assert BMINING_TOPIC in pushed[3]
-    assert "recorded notes committed and pushed" in last_write(calls)
+    assert "recorded notes committed and pushed" in last_reply(calls)
 
 
 def test_bmining_stays_quiet_about_a_clean_clone(monkeypatch, tmp_path):
@@ -1225,7 +1342,7 @@ def test_bmining_stays_quiet_about_a_clean_clone(monkeypatch, tmp_path):
 
     zulip_listener.handle_bmining(Client(calls), CHANNEL, BMINING_TOPIC)
 
-    assert "committed" not in last_write(calls)
+    assert "committed" not in last_reply(calls)
 
 
 def test_a_failed_director_run_still_cleans_up_and_answers(monkeypatch, tmp_path):
@@ -1239,7 +1356,7 @@ def test_a_failed_director_run_still_cleans_up_and_answers(monkeypatch, tmp_path
     zulip_listener.handle_bmining(Client(calls), CHANNEL, BMINING_TOPIC)
 
     assert not work.exists()
-    assert "failed during director: boom" in last_write(calls)
+    assert "failed during director: boom" in last_reply(calls)
     assert all(call[0] != "push" for call in calls)
 
 
@@ -1287,20 +1404,20 @@ def test_run_progress_throttles_then_posts(monkeypatch):
     assert len(posts) == 1  # nothing pending: flush posts nothing
 
 
-def test_handle_run_posts_the_progress_tail_before_the_outcome(monkeypatch, tmp_path):
+def test_a_serving_posts_the_progress_tail_before_the_outcome(monkeypatch, tmp_path):
     calls = []
-    wire_run(monkeypatch, tmp_path, calls, chosen=CHOSEN)
+    wire_run(monkeypatch, tmp_path, calls)
 
-    def streaming_run(workspace, asset_url=None, on_event=None):
+    def streaming_run(prompt, cwd, on_event=None):
         on_event({"type": "assistant", "message": {"role": "assistant", "content": [
             {"type": "tool_use", "id": "t1", "name": "Bash",
              "input": {"command": "uv run pytest"}}]}})
         return "work done"
 
-    monkeypatch.setattr(zulip_listener, "run_work", streaming_run)
-    zulip_listener.handle_run(Client(calls), "general", RUN_TOPIC)
+    monkeypatch.setattr(zulip_listener, "run_supercoder", streaming_run)
+    zulip_listener.handle_run(RunClient(calls), WORK_CHANNEL, RUN_TOPIC)
 
-    writes = [call for call in calls if call[0] == "write"]
+    writes = calls_of(calls, "write")
     assert writes[0][2] == zulip_listener.ACK_TEXT
     assert writes[1][2] == "🔧 Bash: uv run pytest"  # the flushed tail
     assert "work done" in writes[2][2]  # then the outcome
@@ -1319,29 +1436,11 @@ def test_run_wrappers_report_a_missing_closing_message(monkeypatch, tmp_path):
         zulip_listener, "run_role",
         lambda role, prompt, **kwargs: ("   \n", {"outcome": "done"}, 0),
     )
-    monkeypatch.setattr(zulip_listener, "work_prompt", lambda asset_url: "PROMPT")
     monkeypatch.setattr(zulip_listener, "bmining_prompt", lambda bot_name: "PROMPT")
 
-    assert zulip_listener.run_work(tmp_path) == zulip_listener.NO_CLOSING_MESSAGE
+    assert zulip_listener.run_supercoder("p", tmp_path) == zulip_listener.NO_CLOSING_MESSAGE
     assert zulip_listener.run_superdirector("p", tmp_path) == zulip_listener.NO_CLOSING_MESSAGE
     assert zulip_listener.run_director("p", tmp_path) == zulip_listener.NO_CLOSING_MESSAGE
-
-
-def test_handle_run_completes_the_work_of_a_run_that_said_nothing(monkeypatch, tmp_path):
-    """The regression this rule change fixes: a coding run that edited files
-    for fourteen turns and stopped without a farewell used to be a failure,
-    and its workspace — report included — was deleted with it."""
-    calls = []
-    wire_run(monkeypatch, tmp_path, calls, chosen=CHOSEN, report="all good", success=True,
-             output=zulip_listener.NO_CLOSING_MESSAGE)
-
-    zulip_listener.handle_run(Client(calls), "general", RUN_TOPIC)
-
-    assert calls[2][1:] == ("p1", "i1", "all good", True)  # reported, not discarded
-    outcome = calls[-1][2]
-    assert zulip_listener.NO_CLOSING_MESSAGE in outcome
-    assert "work PD-7: commented yes, Done yes" in outcome
-    assert "failed" not in outcome
 
 
 def test_run_progress_logs_a_failed_post_and_keeps_going(monkeypatch):

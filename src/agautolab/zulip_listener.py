@@ -65,6 +65,7 @@ from agag.zulip import (
 
 from .mission import (
     ASSET_TOPIC_PREFIX,
+    RunTarget,
     TaskChange,
     Work,
     asset_answer_context,
@@ -73,9 +74,9 @@ from .mission import (
     cancel_sub_works,
     compose_document,
     description_html,
-    next_work,
     reconcile_task_files,
     report_work,
+    run_target,
     split_document,
     transition_work,
     upsert_work,
@@ -131,6 +132,10 @@ NO_CLOSING_MESSAGE = "(the run ended without a closing message)"
 # the superdirector wrote this run.
 PLAN_FILE = "plan.md"
 CURRENT_DIR = "current"
+
+# How much of a mission title the devlog directory name keeps. Long enough to
+# recognise, short enough to stay one readable path component.
+MISSION_DIR_TITLE_CHARS = 48
 
 # --- the asset route -------------------------------------------------------
 #
@@ -202,29 +207,35 @@ __all__ = [
     "handle_run",
     "handle_superdirector_response",
     "handle_topic",
+    "devlog_directory",
     "live_topic_name",
     "mirror_task_changes",
+    "mission_directory",
     "main",
     "mentions_us",
     "next_record_path",
     "prepare_run_surfaces",
+    "parse_run_topic",
     "progress_line",
     "run_answer",
+    "run_supercoder",
     "run_topic",
     "project_channel",
     "project_directory",
+    "record_task_in_devlog",
     "resign",
     "run_director",
     "run_superdirector",
     "superdirector_prompt",
     "serve_bmining",
-    "run_work",
     "serve",
+    "serve_run",
+    "supercoder_prompt",
+    "title_slug",
     "topic_workspace",
     "work_channel",
+    "work_channel_binding",
     "work_channel_description",
-    "work_directory",
-    "work_prompt",
 ]
 
 
@@ -570,19 +581,56 @@ def handle_superdirector_response(
     return sections, resolve_after
 
 
-def work_directory(slug: str) -> Path:
-    """`.local/work/` inside the project's shared `main` clone.
+def supercoder_prompt(bot_name: str, workspace: Path, task: str,
+                      asset_url: str | None) -> str:
+    """The placement lines, the task, then the guide — `superdirector_prompt`'s
+    shape: read from and write to the workspace by absolute path, work in the
+    project itself.
 
-    The work run happens in that clone, the same directory every later run
-    reuses; `.local/work/` is the one place this phase writes and deletes.
+    The task text is the Sub-Work as Plane holds it, not a file in the
+    workspace: Plane is the ledger from registration onwards, and the
+    `task[N].md` the superdirector wrote lives in another generation's
+    directory.
     """
-    return PROJECTS_ROOT / slug / "main" / ".local" / "work"
+    lines = [
+        f'The conversation with the developer ("{CHATLOG_FILE}") is placed in '
+        f'"{workspace}". You are {bot_name!r} in the chatlog.',
+        f'Write "{REPORT_FILE}" — and any other file this guide asks for — '
+        f'into "{workspace}".',
+        "Your working directory is the project itself.",
+        "",
+        "The task this topic is for:",
+        "",
+        task.strip(),
+    ]
+    guide_text = guide("run_supercoder", "guide.md")
+    if asset_url:
+        guide_text = f"{guide_text}{ASSET_PROMPT_NOTE}{asset_url}"
+    return prompt_with_guide(lines, guide_text)
 
 
-def work_prompt(asset_url: str | None) -> str:
-    """The run guide, plus the asset note when there is an asset to fetch."""
-    prompt = guide("run_coding", "guide.md")
-    return f"{prompt}{ASSET_PROMPT_NOTE}{asset_url}" if asset_url else prompt
+def run_supercoder(prompt: str, cwd: Path,
+                   on_event: Callable[[dict], None] | None = None) -> str:
+    """One task-serving run in the project folder, with its record.
+
+    Like the superdirector it runs where `main/`, `direction/` and `devlog/`
+    are real directories, and its serving workspace travels by absolute path.
+    """
+    record = next_record_path(RECORDS_ROOT / "supercoder")
+    output, _, exit_code = run_role(
+        "supercoder",
+        prompt,
+        cwd=cwd,
+        timeout=WORK_TIMEOUT_SECONDS,
+        record=record,
+        on_event=on_event,
+    )
+    if exit_code != 0:
+        raise ListenerError(f"supercoder run exited {exit_code}: {output.strip()[:500]}")
+    # Whether the task is done is read from `report.md`, never from this text:
+    # a run that edited files for fourteen turns and then stopped without a
+    # farewell still did the work.
+    return output.strip() or NO_CLOSING_MESSAGE
 
 
 # --- live progress on run- topics -------------------------------------------
@@ -674,26 +722,6 @@ class RunProgress:
             )
 
 
-def run_work(workspace: Path, asset_url: str | None = None,
-             on_event: Callable[[dict], None] | None = None) -> str:
-    """One work run in a project's `main` clone, with its `ag.agent-run.v1` record."""
-    record = next_record_path(RECORDS_ROOT / "run")
-    output, _, exit_code = run_role(
-        "coding",
-        work_prompt(asset_url),
-        cwd=workspace,
-        timeout=WORK_TIMEOUT_SECONDS,
-        record=record,
-        on_event=on_event,
-    )
-    if exit_code != 0:
-        raise ListenerError(f"work run exited {exit_code}: {output.strip()[:500]}")
-    # Whether the work succeeded is read from `report.md` and `success.flag`
-    # by the caller, never from this text: a run that edited files for
-    # fourteen turns and then stopped without a farewell still did the work.
-    return output.strip() or NO_CLOSING_MESSAGE
-
-
 # --- the asset state machine -----------------------------------------------
 
 
@@ -758,9 +786,9 @@ def asset_gate(client: ZulipClient, work: Work) -> tuple[list[str], str | None]:
 
     Returns `(report sections, download url)`. A `None` url means the serving
     finishes here — the order was just placed, or agforge is still on it. The
-    autolab Work is deliberately left `unstarted` in both cases, so
-    `next_work` keeps choosing it and everything behind it waits for the
-    asset. Blocking the queue is accepted for this episode.
+    Sub-Work is deliberately left where it is in both cases; the next post in
+    the topic looks again. Since topics are per-task now, a waiting asset
+    blocks only its own task, never the whole queue.
 
     Plane is the ledger for all three states; no local file records that an
     order was placed.
@@ -790,94 +818,198 @@ def remove_work_directory(work_dir: Path) -> None:
     shutil.rmtree(work_dir, ignore_errors=True)
 
 
-def handle_run(client: ZulipClient, channel: str, topic: str) -> None:
-    """Execute one Work, triggered by any non-bot post in a `run-` topic.
+# --- serving one task on a run- topic ---------------------------------------
+#
+# A `run-` topic is no longer a channel-agnostic button that picks whatever
+# Work is next. It lives in one mission's `work-` channel, it is bound to one
+# Sub-Work by its own name, and it is a conversation: every human post
+# re-serves it, so finishing a task is something the developer and the
+# supercoder agree on rather than something one agent run decides alone.
 
-    The chatlog is never read: a `run-` topic is a button, not a conversation.
-    Whatever the topic gets, one eligible Work is chosen from Plane
-    (`next_work`), executed in its project's `main` clone, and reported back
-    to both Plane and the topic. Every exit path after the ack posts
-    something, the same discipline `handle_topic` follows.
+REPORT_FILE = "report.md"
+WRONG_PLACE_REPLY = (
+    "This `run-` topic is not bound to any task. A run topic is created by "
+    "planning a mission: it is named `run-task<N>-<work label>` and lives in "
+    "that mission's `work-<work label>` channel. Post in the mission topic to "
+    "plan or re-plan, and the topics will appear."
+)
+PREVIOUS_WORK_REPLY = "Please complete previous work"
 
-    A Work carrying the `asset` label goes through `asset_gate` first, and
-    two of its three outcomes end the serving before any coding run.
+
+def parse_run_topic(channel: str, topic: str) -> int | None:
+    """The task serial this topic serves, or None when it serves none.
+
+    Both halves of the binding are checked: the topic name has to carry a
+    serial, and it has to sit in a `work-` channel. `dispatch` still routes
+    every `run-` topic here, so this is what replaces the old any-channel
+    button.
     """
-    log(f"run topic {channel!r}/{topic!r}")
-    topic_write(topic, ACK_TEXT, channel=channel, client=client)
+    if not channel.startswith(WORK_CHANNEL_PREFIX):
+        return None
+    match = RUN_TOPIC_NAME.fullmatch(topic)
+    return int(match.group("serial")) if match else None
+
+
+def work_channel_binding(client: ZulipClient, channel: str) -> tuple[str, str, str]:
+    """`(project slug, mission channel, mission topic)` from the channel's
+    description, which `ensure_work_channel` wrote when it planned."""
+    existing = find_channel(client, channel)
+    if not existing:
+        raise ListenerError(f"no channel {channel!r} to read a binding from")
+    match = WORK_CHANNEL_BINDING.search(str(existing.get("description") or ""))
+    if not match:
+        raise ListenerError(
+            f"the description of {channel!r} carries no "
+            f"'project: <slug>; mission: <channel>/<topic>' binding"
+        )
+    return match.group("slug"), match.group("channel"), match.group("topic")
+
+
+def devlog_directory(slug: str) -> Path:
+    """`.local/projects/<slug>/devlog/` — the clone the task records go into."""
+    return PROJECTS_ROOT / slug / "devlog"
+
+
+def title_slug(title: str) -> str:
+    """A directory-safe stem for a Work title: `Fix title screen` → `fix-title-screen`."""
+    stem = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+    return stem[:MISSION_DIR_TITLE_CHARS].rstrip("-") or "mission"
+
+
+def mission_directory(devlog: Path, label: str, title: str) -> Path:
+    """The mission's devlog directory, minted once and then found by prefix.
+
+    The name freezes the Work title as it was at the *first* write, because a
+    later re-plan may rewrite that title (`upsert_work`) and a record that
+    moved would stop being a record. The current title lives inside `work.md`
+    anyway, so nothing is lost by the freeze.
+    """
+    prefix = f"{label.lower()}-"
+    if devlog.is_dir():
+        existing = sorted(
+            path for path in devlog.iterdir()
+            if path.is_dir() and path.name.startswith(prefix)
+        )
+        if existing:
+            return existing[0]
+    return devlog / f"{prefix}{title_slug(title)}"
+
+
+def record_task_in_devlog(target, workspace: Path, report: str) -> str:
+    """File the task and its report in the devlog clone, and push. One line.
+
+    Deterministic handler code, the `serve_bmining` pattern: the agent is
+    never asked to run git, and what it wrote travels by copy rather than by
+    trust.
+    """
+    devlog = devlog_directory(target.work.slug)
+    directory = mission_directory(devlog, target.mission_label, target.mission_title)
+    task_dir = directory / f"task-{target.serial}"
+    task_dir.mkdir(parents=True, exist_ok=True)
+    (task_dir / "work.md").write_text(
+        compose_document(target.work.name, description_html(target.work.description)),
+        encoding="utf-8",
+    )
+    (task_dir / REPORT_FILE).write_text(report, encoding="utf-8")
+    pushed = commit_all_and_push(
+        load_gitea_config(),
+        devlog,
+        f"{AUTO_MARKER} task {target.serial} report for {target.mission_label}",
+    )
+    relative = task_dir.relative_to(devlog)
+    return (
+        f"recorded {relative} in devlog and pushed" if pushed
+        else f"recorded {relative} in devlog (nothing to commit)"
+    )
+
+
+def serve_run(context) -> TopicResult:
+    """One serving of one `run-` topic: gate, agent, and — only if the run
+    wrote a report — the close-out.
+
+    The report file is the agreement signal the guide asks for ("if the
+    developer agreed that the task was done, create report.md"), and the
+    serving's own generation directory is what stops one report from being
+    acted on twice.
+    """
+    serial = parse_run_topic(context.channel, context.topic)
+    if serial is None:
+        return TopicResult([WRONG_PLACE_REPLY])
+
+    context.step = "reading the binding"
+    slug, mission_channel, mission_topic = work_channel_binding(
+        context.client, context.channel
+    )
+
+    context.step = "the previous-work gate"
+    target = run_target(slug, mission_channel, mission_topic, serial)
+    if target.blocked_by:
+        # Handler-side, before any cost: no agent run happens behind a gate.
+        return TopicResult([f"{PREVIOUS_WORK_REPLY} ({target.blocked_by})"])
 
     sections: list[str] = []
-    work_dir: Path | None = None
-    step = "choosing the work"
+    asset_url: str | None = None
+    if target.work.is_asset:
+        context.step = "asset check"
+        asset_sections, asset_url = asset_gate(context.client, target.work)
+        sections.extend(asset_sections)
+        if asset_url is None:
+            # Ordered, or still being made. Per-task topics mean this blocks
+            # only its own task now, not the whole queue.
+            return TopicResult(sections)
+
+    context.step = "project setup"
+    init_project(slug)
+
+    number = next_generation(topic_workspace(context.channel, context.topic))
+    workspace = generation_dir(context.channel, context.topic, number, "supercoder")
+    chatlog_path(workspace).write_text(
+        format_chatlog(context.history, context.self_id), encoding="utf-8"
+    )
+
+    context.step = "supercoder"
+    task_text = compose_document(
+        target.work.name, description_html(target.work.description)
+    )
+    progress = RunProgress(context.client, context.channel, context.topic)
     try:
-        chosen = next_work()
-        if chosen is None:
-            topic_write(topic, "no work", channel=channel, client=client)
-            return
-        workspace = PROJECTS_ROOT / chosen.slug / "main"
-        candidate = work_directory(chosen.slug)
-        if candidate.is_dir() and any(candidate.iterdir()):
-            topic_write(
-                topic,
-                f"work dirty: {chosen.slug}/main has a leftover .local/work/; "
-                "remove it by hand and trigger again",
-                channel=channel,
-                client=client,
-            )
-            return
-
-        asset_url: str | None = None
-        if chosen.is_asset:
-            step = "asset check"
-            asset_sections, asset_url = asset_gate(client, chosen)
-            sections.append(f'asset work "{chosen.name}" in {chosen.slug}')
-            sections.extend(asset_sections)
-            if asset_url is None:
-                # The Work stays unstarted; the next trigger looks again.
-                topic_write(topic, "\n\n".join(sections), channel=channel, client=client)
-                return
-
-        sections.append(f'running "{chosen.name}" in {chosen.slug}')
-
-        step = "writing the work"
-        # Only now does the directory become this run's to delete.
-        work_dir = candidate
-        work_dir.mkdir(parents=True, exist_ok=True)
-        (work_dir / "work.md").write_text(
-            compose_document(chosen.name, description_html(chosen.description)),
-            encoding="utf-8",
-        )
-
-        step = "work run"
-        progress = RunProgress(client, channel, topic)
-        try:
-            sections.append(run_work(workspace, asset_url, on_event=progress))
-        finally:
-            # The tail of the stream — what the run was doing when it ended —
-            # posts before the outcome does, whichever outcome it is.
-            progress.flush()
-
-        step = "reporting to plane"
-        report_path = work_dir / "report.md"
-        report = report_path.read_text(encoding="utf-8") if report_path.is_file() else None
-        success = (work_dir / "success.flag").exists()
-        if report is None:
-            sections.append("no report")
-        work_label, commented, completed = report_work(
-            chosen.project_id, chosen.issue_id, report, success
-        )
         sections.append(
-            f"work {work_label}: commented {'yes' if commented else 'no'}, "
-            f"Done {'yes' if completed else 'no'}"
+            run_supercoder(
+                supercoder_prompt(context.bot_name, workspace, task_text, asset_url),
+                project_directory(slug),
+                on_event=progress,
+            )
         )
-    except Exception as error:  # noqa: BLE001 - the topic is the error channel
-        log(f"run topic workflow failed during {step}: {error!r}")
-        sections.append(f"failed during {step}: {error}")
     finally:
-        if work_dir is not None:
-            remove_work_directory(work_dir)
+        # The tail of the stream — what the run was doing when it ended —
+        # posts before the outcome does, whichever outcome it is.
+        progress.flush()
 
-    topic_write(topic, "\n\n".join(section for section in sections if section),
-                channel=channel, client=client)
+    report_path = workspace / REPORT_FILE
+    if not report_path.is_file():
+        # Not a failure: the conversation simply is not finished. The topic
+        # stays open and the next human post serves it again.
+        return TopicResult(sections)
+
+    context.step = "closing the task"
+    report = report_path.read_text(encoding="utf-8")
+    label, commented, completed = report_work(
+        target.work.project_id, target.work.issue_id, report, True
+    )
+    sections.append(
+        f"task {label}: commented {'yes' if commented else 'no'}, "
+        f"Done {'yes' if completed else 'no'}; resolving this topic"
+    )
+
+    context.step = "devlog record"
+    sections.append(record_task_in_devlog(target, workspace, report))
+    return TopicResult(sections, resolve_after=True)
+
+
+def handle_run(client: ZulipClient, channel: str, topic: str) -> None:
+    """Serve one awaiting `run-` topic through the shared skeleton."""
+    log(f"run topic {channel!r}/{topic!r}")
+    serve_topic(client, channel, topic, serve_run, ack_text=ACK_TEXT, empty_reply=EMPTY_REPLY)
 
 
 # --- answering agforge's questions on create- topics -----------------------
@@ -1074,12 +1206,14 @@ def observe_topic(channel: str, topic: str) -> None:
 def dispatch(client: ZulipClient, channel: str, topic: str) -> None:
     """Route one swept topic to its handler.
 
-    `run-` topics work in any channel — they carry no project of their own,
-    the project comes from the chosen Work. `mission-` and `create-` topics
-    still need a `pj-*` channel and are silently ignored elsewhere: with
-    `#general` now swept, a stray `mission-` topic there would otherwise get
-    an error posted into it on every sweep, and agforge's own `create-` topics
-    in `#FreeForge` are none of autolab's business.
+    Every `run-` topic still comes here from anywhere, but `serve_run` is what
+    decides whether it is bound to a task: one outside a `work-` channel, or
+    without a `run-task<N>-…` name, gets one explanatory reply instead of a
+    run. `mission-` and `create-` topics still need a `pj-*` channel and are
+    silently ignored elsewhere: with `#general` now swept, a stray `mission-`
+    topic there would otherwise get an error posted into it on every sweep,
+    and agforge's own `create-` topics in `#FreeForge` are none of autolab's
+    business.
     """
     if topic.startswith(RUN_TOPIC_PREFIX):
         handle_run(client, channel, topic)

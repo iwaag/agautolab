@@ -100,6 +100,7 @@ __all__ = [
     "MissionError",
     "NO_SERIAL",
     "PlaneConfig",
+    "RunTarget",
     "TaskChange",
     "Work",
     "add_comment",
@@ -123,6 +124,7 @@ __all__ = [
     "next_work",
     "reconcile_task_files",
     "report_work",
+    "run_target",
     "split_document",
     "starting_state_id",
     "state_groups",
@@ -428,6 +430,76 @@ def next_work() -> Work | None:
         project_id,
         str(issue["id"]),
         bool(asset_id) and asset_id in {str(value) for value in (issue.get("labels") or [])},
+    )
+
+
+# --- the Sub-Work one run- topic is bound to -------------------------------
+
+
+@dataclass(frozen=True)
+class RunTarget:
+    """The Sub-Work a `run-` topic serves, and the gate in front of it.
+
+    `blocked_by` is the label of the immediately preceding task when that one
+    is not in a `completed` state — the handler answers with it and never
+    launches an agent. Serial 1 has no predecessor and is never blocked.
+
+    `mission_label` and `mission_title` come along for the devlog: a task's
+    record is filed under its mission, and the directory is named at the first
+    write from both.
+    """
+
+    work: Work
+    label: str
+    serial: int
+    mission_label: str
+    mission_title: str
+    blocked_by: str | None = None
+
+
+def run_target(project: str, channel: str, topic: str, serial: int) -> RunTarget:
+    """Look up task `serial` of the mission Work keyed `<channel>/<topic>`.
+
+    Reads the whole issue list once and answers both the task and its gate
+    from it: Plane CE ignores a `?parent=` filter, so children are found
+    client-side anyway.
+    """
+    config, plane_project, project_id = _prepare(project)
+    issue = find_issue_by_external(config, project_id, work_key(channel, topic))
+    if not issue:
+        raise MissionError(f"no Work is registered for {channel}/{topic}")
+    issues = list_issues(config, project_id)
+    issue = next((row for row in issues if str(row.get("id")) == str(issue["id"])), issue)
+    groups = state_groups(config, project_id)
+    by_serial = {
+        sub_work_serial(child.get("external_id")): child
+        for child in sub_works(issues, str(issue["id"]), groups)
+    }
+    task = by_serial.get(serial)
+    if task is None:
+        raise MissionError(f"{channel}/{topic} has no live task {serial}")
+
+    blocked_by = None
+    if previous := by_serial.get(serial - 1):
+        if groups.get(str(previous.get("state") or "")) != "completed":
+            blocked_by = issue_label(plane_project, previous)
+
+    asset_id = labels_by_name(config, project_id).get(ASSET_LABEL.lower())
+    work = Work(
+        project,
+        str(task.get("name", "")),
+        html_to_text(task.get("description_html")),
+        project_id,
+        str(task["id"]),
+        bool(asset_id) and asset_id in {str(value) for value in (task.get("labels") or [])},
+    )
+    return RunTarget(
+        work,
+        issue_label(plane_project, task),
+        serial,
+        issue_label(plane_project, issue),
+        str(issue.get("name", "")),
+        blocked_by,
     )
 
 
