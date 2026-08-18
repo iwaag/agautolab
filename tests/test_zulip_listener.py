@@ -539,6 +539,38 @@ def test_cancelling_a_mission_that_never_got_a_channel_is_quiet(monkeypatch, tmp
     assert not any(call[0] == "archive" for call in calls)
 
 
+def test_a_mission_serving_opens_one_run_topic_per_task(monkeypatch, tmp_path):
+    """End to end through the skeleton: planning a mission leaves a work-
+    channel holding one topic per task, each carrying its task content."""
+    calls = []
+    client = Client(calls)
+    wire(monkeypatch, tmp_path, calls)
+    changes = [
+        zulip_listener.TaskChange(1, "created", "First", "# First\n\na\n", "PD-5"),
+        zulip_listener.TaskChange(2, "created", "Second", "# Second\n\nb\n", "PD-6"),
+    ]
+    wire_response(monkeypatch, tmp_path, calls, changes=changes)
+    monkeypatch.setattr(
+        zulip_listener,
+        "run_superdirector",
+        lambda prompt, cwd: (
+            (superdirector_dir(tmp_path) / "plan.md").write_text(PLAN_TEXT) and "" or "planned"
+        ),
+    )
+
+    zulip_listener.handle_topic(client, CHANNEL, TOPIC)
+
+    created = next(call for call in calls if call[0] == "create-channel")
+    assert created[1] == "work-pd-4"
+    assert [call[2:] for call in calls if call[0] == "post"] == [
+        ("run-task1-pd-4", "# First\n\na\n"),
+        ("run-task2-pd-4", "# Second\n\nb\n"),
+    ]
+    reply = [call for call in calls if call[0] == "write"][-1][2]
+    assert "opened work-pd-4/run-task1-pd-4" in reply
+    assert "opened work-pd-4/run-task2-pd-4" in reply
+
+
 def test_handle_topic_resolves_the_topic_after_the_final_reply(monkeypatch, tmp_path):
     calls = []
     client = Client(calls)

@@ -618,3 +618,73 @@ def test_write_mission_workspace_without_a_work_writes_nothing(tmp_path, monkeyp
     workspace_plane(monkeypatch, issue=None, issues=[], groups={})
     assert mission.write_mission_workspace(tmp_path, "demo", "pj-demo", "mission-x") is False
     assert list(tmp_path.iterdir()) == []
+
+
+# --- the Sub-Work a run- topic is bound to ---------------------------------
+
+
+def test_run_target_reads_the_task_at_a_serial_and_its_mission(plane):
+    work = plane.add(name="Fix title screen", external_id=WORK_KEY)
+    plane.add(name="First", external_id=f"{WORK_KEY}#1", parent=work["id"], state="done-id")
+    plane.add(name="Second", external_id=f"{WORK_KEY}#2", parent=work["id"],
+              description_html="<p>do that</p>")
+
+    target = mission.run_target("demo", CHANNEL, TOPIC, 2)
+
+    assert (target.label, target.serial) == ("PD-6", 2)
+    assert (target.mission_label, target.mission_title) == ("PD-4", "Fix title screen")
+    assert target.work.name == "Second"
+    assert target.work.description == "do that"
+    assert target.work.issue_id == "issue-3"
+    assert target.work.is_asset is False
+    # The previous task is Done, so nothing blocks.
+    assert target.blocked_by is None
+
+
+def test_run_target_blocks_on_an_unfinished_previous_task(plane):
+    work = plane.add(name="Work", external_id=WORK_KEY)
+    plane.add(name="First", external_id=f"{WORK_KEY}#1", parent=work["id"], state="started-id")
+    plane.add(name="Second", external_id=f"{WORK_KEY}#2", parent=work["id"])
+
+    assert mission.run_target("demo", CHANNEL, TOPIC, 2).blocked_by == "PD-5"
+
+
+def test_the_first_task_has_no_gate(plane):
+    work = plane.add(name="Work", external_id=WORK_KEY)
+    plane.add(name="First", external_id=f"{WORK_KEY}#1", parent=work["id"])
+
+    assert mission.run_target("demo", CHANNEL, TOPIC, 1).blocked_by is None
+
+
+def test_run_target_reads_the_asset_label_off_the_task(plane):
+    plane.labels.extend([{"id": "auto-id", "name": "AUTO"}, {"id": "asset-id", "name": "asset"}])
+    work = plane.add(name="Work", external_id=WORK_KEY)
+    plane.add(name="Sprite sheet", external_id=f"{WORK_KEY}#1", parent=work["id"],
+              labels=["auto-id", "asset-id"])
+
+    assert mission.run_target("demo", CHANNEL, TOPIC, 1).work.is_asset is True
+
+
+def test_run_target_names_a_serial_that_is_not_there(plane):
+    plane.add(name="Work", external_id=WORK_KEY)
+    with pytest.raises(mission.MissionError) as error:
+        mission.run_target("demo", CHANNEL, TOPIC, 3)
+    assert "task 3" in str(error.value)
+
+
+def test_run_target_requires_the_mission_work(plane):
+    with pytest.raises(mission.MissionError):
+        mission.run_target("demo", CHANNEL, TOPIC, 1)
+
+
+def test_a_cancelled_task_is_not_a_gate_and_not_a_target(plane):
+    """`sub_works` drops cancelled children, so a cancelled task 1 neither
+    blocks task 2 nor answers as a target itself."""
+    work = plane.add(name="Work", external_id=WORK_KEY)
+    plane.add(name="First", external_id=f"{WORK_KEY}#1", parent=work["id"],
+              state="cancelled-id")
+    plane.add(name="Second", external_id=f"{WORK_KEY}#2", parent=work["id"])
+
+    assert mission.run_target("demo", CHANNEL, TOPIC, 2).blocked_by is None
+    with pytest.raises(mission.MissionError):
+        mission.run_target("demo", CHANNEL, TOPIC, 1)
