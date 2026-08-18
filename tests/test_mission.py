@@ -161,8 +161,11 @@ def plane(monkeypatch):
 
 def test_upsert_work_updates_an_existing_work_in_place(plane):
     work = plane.add(name="Old title", external_id=WORK_KEY)
-    line = mission.upsert_work("demo", CHANNEL, TOPIC, "New title", "New body & more")
+    line, label = mission.upsert_work("demo", CHANNEL, TOPIC, "New title", "New body & more")
     assert line == 'updated PD-4 "New title"'
+    # The label travels back: the caller names `work-pd-4` and its
+    # `run-task<N>-pd-4` topics after it.
+    assert label == "PD-4"
     assert plane.patches == [
         (work["id"], {"name": "New title", "description_html": "<p>New body &amp; more</p>"})
     ]
@@ -170,8 +173,8 @@ def test_upsert_work_updates_an_existing_work_in_place(plane):
 
 
 def test_upsert_work_creates_the_first_work(plane):
-    line = mission.upsert_work("demo", CHANNEL, TOPIC, "Build it", "Body")
-    assert line == 'created PD-4 "Build it"'
+    line, label = mission.upsert_work("demo", CHANNEL, TOPIC, "Build it", "Body")
+    assert (line, label) == ('created PD-4 "Build it"', "PD-4")
     assert plane.creates[0]["external_id"] == WORK_KEY
     assert plane.creates[0]["state"] == "ready-id"
 
@@ -210,26 +213,125 @@ def test_state_id_for_group_names_the_missing_group(plane):
     assert "no-such-group" in str(error.value)
 
 
-def test_register_task_files_keys_sub_works_with_the_generation(plane, tmp_path):
+def test_reconcile_registers_a_first_split_keyed_by_serial(plane, tmp_path):
     work = plane.add(name="Work", external_id=WORK_KEY)
     (tmp_path / "task1.md").write_text("# First\ndo this")
     (tmp_path / "task2.md").write_text("# Second\ndo that")
     (tmp_path / "new_mission.md").write_text("# Work\nbody")
 
-    lines = mission.register_task_files("demo", CHANNEL, TOPIC, tmp_path, rev=3)
+    lines, changes = mission.reconcile_task_files("demo", CHANNEL, TOPIC, tmp_path)
 
     assert lines == ['created sub-work PD-5 "First"', 'created sub-work PD-6 "Second"']
     first, second = plane.creates
-    assert first["external_id"] == f"{WORK_KEY}@3#1"
-    assert second["external_id"] == f"{WORK_KEY}@3#2"
+    # No `@<rev>` generation marker any more: one key per serial, for the life
+    # of the mission, is what lets a re-plan update instead of re-create.
+    assert first["external_id"] == f"{WORK_KEY}#1"
+    assert second["external_id"] == f"{WORK_KEY}#2"
     assert first["parent"] == work["id"]
     assert first["state"] == "ready-id"
+    # The changes are what the Zulip side mirrors, one to one.
+    assert [(c.serial, c.action, c.title) for c in changes] == [
+        (1, "created", "First"), (2, "created", "Second")
+    ]
+    assert changes[0].document == "# First\n\ndo this\n"
+    assert changes[0].label == "PD-5"
 
 
-def test_register_task_files_reports_an_empty_split(plane, tmp_path):
+def test_reconcile_reports_an_empty_split(plane, tmp_path):
     plane.add(name="Work", external_id=WORK_KEY)
-    lines = mission.register_task_files("demo", CHANNEL, TOPIC, tmp_path, rev=1)
+    lines, changes = mission.reconcile_task_files("demo", CHANNEL, TOPIC, tmp_path)
     assert lines == ["the superdirector wrote no task files; the mission has no sub-work"]
+    assert changes == []
+
+
+def test_reconcile_updates_a_serial_in_place_and_leaves_its_state(plane, tmp_path):
+    """The whole point of the reconcile: a task that is Done stays Done, which
+    is what keeps the run- gate meaningful across a re-plan."""
+    work = plane.add(name="Work", external_id=WORK_KEY)
+    done = plane.add(name="First", external_id=f"{WORK_KEY}#1", parent=work["id"],
+                     state="done-id", description_html="<p>do this</p>")
+    (tmp_path / "task1.md").write_text("# First, rewritten\ndo this instead")
+
+    lines, changes = mission.reconcile_task_files("demo", CHANNEL, TOPIC, tmp_path)
+
+    assert plane.patches == [
+        (done["id"], {"name": "First, rewritten",
+                      "description_html": "<p>do this instead</p>"})
+    ]
+    assert plane.creates == []
+    assert plane.issues[done["id"]]["state"] == "done-id"
+    assert lines == ['changed-after-done sub-work PD-5 "First, rewritten"']
+    assert [(c.serial, c.action) for c in changes] == [(1, "changed-after-done")]
+
+
+def test_reconcile_updates_a_live_serial_without_touching_its_state(plane, tmp_path):
+    work = plane.add(name="Work", external_id=WORK_KEY)
+    live = plane.add(name="First", external_id=f"{WORK_KEY}#1", parent=work["id"],
+                     state="started-id", description_html="<p>do this</p>")
+    (tmp_path / "task1.md").write_text("# First\ndo this differently")
+
+    lines, changes = mission.reconcile_task_files("demo", CHANNEL, TOPIC, tmp_path)
+
+    assert plane.issues[live["id"]]["state"] == "started-id"
+    assert lines == ['updated sub-work PD-5 "First"']
+    assert [c.action for c in changes] == ["updated"]
+
+
+def test_reconcile_says_nothing_changed_and_writes_nothing(plane, tmp_path):
+    work = plane.add(name="Work", external_id=WORK_KEY)
+    plane.add(name="First", external_id=f"{WORK_KEY}#1", parent=work["id"],
+              description_html="<p>do this</p>")
+    (tmp_path / "task1.md").write_text("# First\ndo this")
+
+    lines, changes = mission.reconcile_task_files("demo", CHANNEL, TOPIC, tmp_path)
+
+    assert plane.patches == [] and plane.creates == []
+    assert lines == ['unchanged sub-work PD-5 "First"']
+    assert [c.action for c in changes] == ["unchanged"]
+
+
+def test_reconcile_cancels_a_serial_that_disappeared(plane, tmp_path):
+    work = plane.add(name="Work", external_id=WORK_KEY)
+    plane.add(name="First", external_id=f"{WORK_KEY}#1", parent=work["id"],
+              description_html="<p>do this</p>")
+    gone = plane.add(name="Second", external_id=f"{WORK_KEY}#2", parent=work["id"])
+    (tmp_path / "task1.md").write_text("# First\ndo this")
+
+    lines, changes = mission.reconcile_task_files("demo", CHANNEL, TOPIC, tmp_path)
+
+    assert plane.patches == [(gone["id"], {"state": "cancelled-id"})]
+    assert lines == ['unchanged sub-work PD-5 "First"', 'cancelled sub-work PD-6 "Second"']
+    assert [(c.serial, c.action) for c in changes] == [(1, "unchanged"), (2, "cancelled")]
+
+
+def test_a_legacy_generation_keyed_child_still_matches_by_serial(plane, tmp_path):
+    """`<channel>/<topic>@<rev>#<N>` keys live in Plane forever; the reconcile
+    reads the `#<N>` tail, so they need no migration."""
+    work = plane.add(name="Work", external_id=WORK_KEY)
+    legacy = plane.add(name="First", external_id=f"{WORK_KEY}@2#1", parent=work["id"],
+                       description_html="<p>do this</p>")
+    (tmp_path / "task1.md").write_text("# First\ndo it better")
+
+    lines, _ = mission.reconcile_task_files("demo", CHANNEL, TOPIC, tmp_path)
+
+    assert plane.creates == []
+    assert plane.patches == [
+        (legacy["id"], {"name": "First", "description_html": "<p>do it better</p>"})
+    ]
+    assert lines == ['updated sub-work PD-5 "First"']
+
+
+def test_reconcile_leaves_a_child_nobody_serialised(plane, tmp_path):
+    """A hand-made sub-issue is not a planner's child and is not cancelled."""
+    work = plane.add(name="Work", external_id=WORK_KEY)
+    plane.add(name="By hand", parent=work["id"])
+    (tmp_path / "task1.md").write_text("# First\ndo this")
+
+    lines, changes = mission.reconcile_task_files("demo", CHANNEL, TOPIC, tmp_path)
+
+    assert [call[1] for call in plane.patches] == []
+    assert lines == ['created sub-work PD-6 "First"']
+    assert [c.action for c in changes] == ["created"]
 
 
 @pytest.mark.parametrize(
@@ -247,14 +349,14 @@ def test_strip_asset_marker_only_matches_the_tail(text, stripped, is_asset):
     assert mission.strip_asset_marker(text) == (stripped, is_asset)
 
 
-def test_register_task_files_labels_an_asset_sub_work(plane, tmp_path):
+def test_reconcile_labels_an_asset_sub_work(plane, tmp_path):
     """The marker never reaches Plane; the label does, and that label is what
-    `handle_run` dispatches on."""
+    the `run-` serving dispatches on."""
     plane.add(name="Work", external_id=WORK_KEY)
     (tmp_path / "task1.md").write_text("# Sprite sheet\nA 32x32 hero.\n\n[Asset]\n")
     (tmp_path / "task2.md").write_text("# Movement\nWire the input.\n")
 
-    lines = mission.register_task_files("demo", CHANNEL, TOPIC, tmp_path, rev=1)
+    lines, _ = mission.reconcile_task_files("demo", CHANNEL, TOPIC, tmp_path)
 
     assert lines == [
         'created sub-work PD-5 "Sprite sheet" [asset]',
@@ -268,9 +370,9 @@ def test_register_task_files_labels_an_asset_sub_work(plane, tmp_path):
     assert asset["description_html"] == "<p>A 32x32 hero.</p>"
 
 
-def test_register_task_files_requires_the_work(plane, tmp_path):
+def test_reconcile_requires_the_work(plane, tmp_path):
     with pytest.raises(mission.MissionError):
-        mission.register_task_files("demo", CHANNEL, TOPIC, tmp_path, rev=1)
+        mission.reconcile_task_files("demo", CHANNEL, TOPIC, tmp_path)
 
 
 def test_ensure_label_creates_once_and_is_cached(plane):

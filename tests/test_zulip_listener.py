@@ -44,6 +44,41 @@ class Client:
     def resolve_topic(self, message_id, topic):
         self.calls.append(("resolve", message_id, topic))
 
+    # --- the work- channel surface (run rework Step 2) ---------------------
+
+    #: The realm as these tests see it: one project channel, in no folder
+    #: unless a test says otherwise.
+    channels_list = [{"name": CHANNEL, "stream_id": 7, "folder_id": None}]
+
+    def channels(self):
+        self.calls.append(("channels",))
+        return [dict(row) for row in self.channels_list]
+
+    def channel_subscribers(self, stream_id):
+        self.calls.append(("subscribers", stream_id))
+        return [HUMAN_ID, BOT_ID]
+
+    def create_channel(self, name, description, principals, folder_id=None):
+        self.calls.append(("create-channel", name, description, principals, folder_id))
+        return {"subscribed": {}}
+
+    def send_to_channel(self, channel, topic, content):
+        self.calls.append(("send", channel, topic, content))
+        return 42
+
+    def archive_channel(self, stream_id):
+        self.calls.append(("archive", stream_id))
+        return {}
+
+    def stream_id(self, name):
+        return next(row["stream_id"] for row in self.channels_list if row["name"] == name)
+
+    def channel_topics(self, stream_id):
+        self.calls.append(("topics", stream_id))
+        return self.topic_names
+
+    topic_names: list[str] = []
+
 
 def wire(monkeypatch, tmp_path, calls, *, plane_files=False, superdirector="planner says hi"):
     monkeypatch.setattr(zulip_listener, "TOPICS_ROOT", tmp_path / "topics")
@@ -79,17 +114,22 @@ PROJECT = "demo-project"
 PLAN_TEXT = "# The plan\n\nStep one, step two."
 
 
-def wire_response(monkeypatch, tmp_path, calls, *, cancelled=0):
+TASK_CHANGES = [
+    zulip_listener.TaskChange(1, "created", "First", "# First\n\ndo this\n", "PD-5"),
+]
+
+
+def wire_response(monkeypatch, tmp_path, calls, *, cancelled=0, changes=None):
     """Stub everything `handle_superdirector_response` reaches beyond the
-    filesystem — the run itself already happened; the handler only acts on
-    the files it left in the serving workspace."""
+    filesystem and Zulip — the run itself already happened; the handler only
+    acts on the files it left in the serving workspace."""
     monkeypatch.setattr(zulip_listener, "PROJECTS_ROOT", tmp_path / "projects")
     monkeypatch.setattr(
         zulip_listener,
         "upsert_work",
         lambda project, channel, topic, title, description: (
             calls.append(("upsert", project, channel, topic, title, description))
-            or f'updated PD-4 "{title}"'
+            or (f'updated PD-4 "{title}"', "PD-4")
         ),
     )
     monkeypatch.setattr(
@@ -99,15 +139,24 @@ def wire_response(monkeypatch, tmp_path, calls, *, cancelled=0):
     )
     monkeypatch.setattr(
         zulip_listener,
-        "register_task_files",
-        lambda project, channel, topic, plan_dir, rev: (
-            calls.append(("register", plan_dir, rev)) or [f"created sub-work rev {rev}"]
+        "reconcile_task_files",
+        lambda project, channel, topic, plan_dir: (
+            calls.append(("reconcile", plan_dir))
+            or (["created sub-work PD-5 \"First\""],
+                TASK_CHANGES if changes is None else changes)
         ),
     )
     monkeypatch.setattr(
         zulip_listener,
         "transition_work",
         lambda project, channel, topic, group: calls.append(("transition", group)) or "PD-4",
+    )
+    monkeypatch.setattr(
+        zulip_listener,
+        "topic_write",
+        lambda topic, text, **kwargs: (
+            calls.append(("post", kwargs.get("channel"), topic, text)) or "success"
+        ),
     )
 
 
@@ -230,31 +279,126 @@ def test_an_empty_topic_costs_no_agent_run(monkeypatch, tmp_path):
     assert calls[-1][2] == zulip_listener.EMPTY_REPLY
 
 
-def test_a_plan_is_registered_from_the_serving_workspace(monkeypatch, tmp_path):
+def test_a_plan_reconciles_the_split_and_builds_the_run_surfaces(monkeypatch, tmp_path):
     calls = []
-    wire_response(monkeypatch, tmp_path, calls, cancelled=2)
+    client = Client(calls)
+    wire_response(monkeypatch, tmp_path, calls)
     workspace = superdirector_dir(tmp_path)
     workspace.mkdir(parents=True)
     (workspace / "plan.md").write_text(PLAN_TEXT)
     (workspace / "task1.md").write_text("# First\ndo this")
 
     sections, resolve_after = zulip_listener.handle_superdirector_response(
-        CHANNEL, TOPIC, PROJECT, workspace, 1
+        client, CHANNEL, TOPIC, PROJECT, workspace
     )
 
-    assert [call[0] for call in calls] == ["upsert", "cancel-subs", "register"]
+    assert [call[0] for call in calls] == [
+        "upsert", "reconcile", "channels", "subscribers", "create-channel", "post",
+    ]
     # Title and description both from the plan — the whole file, heading
-    # included, because Step 6 reads it back as `plan.md`.
+    # included, because the asset answer flow reads it back as `plan.md`.
     assert calls[0][4:6] == ("The plan", PLAN_TEXT)
-    assert calls[2][1] == workspace
-    # The Sub-Work generation key is the generation number itself.
-    assert calls[2][2] == 1
+    assert calls[1][1] == workspace
+    # The channel is named after the Work label, carries the parent channel's
+    # subscribers, and remembers the binding a run- serving needs back.
+    assert calls[4][1:] == (
+        "work-pd-4",
+        "[AUTO] project: demo-project; mission: pj-demo-project/mission-one",
+        [HUMAN_ID, BOT_ID],
+        None,
+    )
+    # The task content is posted by the bot, so the topic waits quietly for a
+    # human instead of being swept the moment it exists.
+    assert calls[5][1:] == ("work-pd-4", "run-task1-pd-4", "# First\n\ndo this\n")
     assert sections == [
         'updated PD-4 "The plan"',
-        "cancelled 2 existing sub-work(s)",
-        "created sub-work rev 1",
+        'created sub-work PD-5 "First"',
+        "work channel work-pd-4 is ready",
+        "opened work-pd-4/run-task1-pd-4",
     ]
     assert resolve_after is False
+
+
+def test_the_work_channel_follows_the_project_channels_folder(monkeypatch, tmp_path):
+    """Whatever folder the `pj-` channel sits in — including none. This is not
+    the place to invent a folder structure."""
+    calls = []
+    client = Client(calls)
+    client.channels_list = [{"name": CHANNEL, "stream_id": 7, "folder_id": 3}]
+    wire_response(monkeypatch, tmp_path, calls)
+    workspace = superdirector_dir(tmp_path)
+    workspace.mkdir(parents=True)
+    (workspace / "plan.md").write_text(PLAN_TEXT)
+
+    zulip_listener.handle_superdirector_response(client, CHANNEL, TOPIC, PROJECT, workspace)
+
+    assert next(call for call in calls if call[0] == "create-channel")[4] == 3
+
+
+def test_a_replan_mirrors_each_change_onto_its_own_run_topic(monkeypatch, tmp_path):
+    """One to one with the Plane reconcile: updated tasks are re-posted,
+    cancelled ones are told and resolved, and an unchanged task is left
+    silent so a re-plan of task 3 does not disturb tasks 1 and 2."""
+    calls = []
+    client = Client(calls)
+    changes = [
+        zulip_listener.TaskChange(1, "unchanged", "First", "# First\n\na\n", "PD-5"),
+        zulip_listener.TaskChange(2, "updated", "Second", "# Second\n\nb\n", "PD-6"),
+        zulip_listener.TaskChange(3, "created", "Third", "# Third\n\nc\n", "PD-7"),
+        zulip_listener.TaskChange(4, "cancelled", "Fourth", "", "PD-8"),
+    ]
+    wire_response(monkeypatch, tmp_path, calls, changes=changes)
+    workspace = superdirector_dir(tmp_path)
+    workspace.mkdir(parents=True)
+    (workspace / "plan.md").write_text(PLAN_TEXT)
+
+    sections, _ = zulip_listener.handle_superdirector_response(
+        client, CHANNEL, TOPIC, PROJECT, workspace
+    )
+
+    posts = [call for call in calls if call[0] in {"post", "send", "resolve"}]
+    assert posts == [
+        ("post", "work-pd-4", "run-task2-pd-4", "Updated by planner.\n\n# Second\n\nb\n"),
+        ("post", "work-pd-4", "run-task3-pd-4", "# Third\n\nc\n"),
+        ("send", "work-pd-4", "run-task4-pd-4", "Cancelled by planner."),
+        ("resolve", 42, "run-task4-pd-4"),
+    ]
+    assert sections[-3:] == [
+        "updated work-pd-4/run-task2-pd-4",
+        "opened work-pd-4/run-task3-pd-4",
+        "cancelled and resolved work-pd-4/run-task4-pd-4",
+    ]
+
+
+def test_a_task_changed_after_completion_only_gets_a_note(monkeypatch, tmp_path):
+    """Whether to redo it is the mission conversation's call, not this
+    handler's; the resolved topic is left as it is."""
+    calls = []
+    client = Client(calls)
+    client.channels_list = [
+        {"name": CHANNEL, "stream_id": 7, "folder_id": None},
+        {"name": "work-pd-4", "stream_id": 8, "folder_id": None},
+    ]
+    client.topic_names = ["\u2714 run-task1-pd-4"]
+    changes = [
+        zulip_listener.TaskChange(1, "changed-after-done", "First", "# First\n\na\n", "PD-5"),
+    ]
+    wire_response(monkeypatch, tmp_path, calls, changes=changes)
+    workspace = superdirector_dir(tmp_path)
+    workspace.mkdir(parents=True)
+    (workspace / "plan.md").write_text(PLAN_TEXT)
+
+    sections, _ = zulip_listener.handle_superdirector_response(
+        client, CHANNEL, TOPIC, PROJECT, workspace
+    )
+
+    # Posted under the resolved name: a resolved topic is a renamed topic, so
+    # the bare name would open a second one beside it.
+    sent = next(call for call in calls if call[0] == "send")
+    assert sent[1:3] == ("work-pd-4", "\u2714 run-task1-pd-4")
+    assert sent[3] == zulip_listener.CHANGED_AFTER_DONE
+    assert not any(call[0] == "resolve" for call in calls)
+    assert sections[-1] == "noted a post-completion change in work-pd-4/run-task1-pd-4"
 
 
 def test_the_workspace_keeps_its_evidence_after_registration(monkeypatch, tmp_path):
@@ -268,26 +412,30 @@ def test_the_workspace_keeps_its_evidence_after_registration(monkeypatch, tmp_pa
     (workspace / "task1.md").write_text("# First\na")
     (workspace / "task2.md").write_text("# Second\nb")
 
-    zulip_listener.handle_superdirector_response(CHANNEL, TOPIC, PROJECT, workspace, 1)
+    zulip_listener.handle_superdirector_response(
+        Client(calls), CHANNEL, TOPIC, PROJECT, workspace
+    )
 
     remaining = sorted(path.name for path in workspace.iterdir())
     assert remaining == ["plan.md", "task1.md", "task2.md"]
 
 
-def test_a_failed_registration_is_reported_not_swallowed(monkeypatch, tmp_path):
+def test_a_failed_reconcile_is_reported_not_swallowed(monkeypatch, tmp_path):
     calls = []
     wire_response(monkeypatch, tmp_path, calls)
 
-    def explode(project, channel, topic, plan_dir, rev):
+    def explode(project, channel, topic, plan_dir):
         raise zulip_listener.ListenerError("plane is down")
 
-    monkeypatch.setattr(zulip_listener, "register_task_files", explode)
+    monkeypatch.setattr(zulip_listener, "reconcile_task_files", explode)
     workspace = superdirector_dir(tmp_path)
     workspace.mkdir(parents=True)
     (workspace / "plan.md").write_text(PLAN_TEXT)
 
     with pytest.raises(zulip_listener.ListenerError):
-        zulip_listener.handle_superdirector_response(CHANNEL, TOPIC, PROJECT, workspace, 1)
+        zulip_listener.handle_superdirector_response(
+            Client(calls), CHANNEL, TOPIC, PROJECT, workspace
+        )
 
 
 def test_a_run_that_wrote_nothing_changes_nothing(monkeypatch, tmp_path):
@@ -298,7 +446,7 @@ def test_a_run_that_wrote_nothing_changes_nothing(monkeypatch, tmp_path):
     workspace.mkdir(parents=True)
 
     sections, resolve_after = zulip_listener.handle_superdirector_response(
-        CHANNEL, TOPIC, PROJECT, workspace, 1
+        Client(calls), CHANNEL, TOPIC, PROJECT, workspace
     )
 
     assert calls == []
@@ -306,19 +454,27 @@ def test_a_run_that_wrote_nothing_changes_nothing(monkeypatch, tmp_path):
     assert resolve_after is False
 
 
-def test_the_sub_work_key_follows_the_generation(monkeypatch, tmp_path):
-    """A later generation's split must not collide with a cancelled one's
-    keys, which live in Plane forever."""
+def test_replanning_reuses_the_work_channel(monkeypatch, tmp_path):
+    """`create_channel` is subscribe-based and idempotent, which is what makes
+    a second planning round safe — the channel is joined, not duplicated."""
     calls = []
+    client = Client(calls)
     wire_response(monkeypatch, tmp_path, calls)
     for number in (1, 4):
         workspace = superdirector_dir(tmp_path, number)
         workspace.mkdir(parents=True)
         (workspace / "plan.md").write_text(PLAN_TEXT)
         zulip_listener.handle_superdirector_response(
-            CHANNEL, TOPIC, PROJECT, workspace, number
+            client, CHANNEL, TOPIC, PROJECT, workspace
         )
-    assert [call[2] for call in calls if call[0] == "register"] == [1, 4]
+
+    names = [call[1] for call in calls if call[0] == "create-channel"]
+    assert names == ["work-pd-4", "work-pd-4"]
+    # The Sub-Work keys no longer carry the generation, so nothing has to be
+    # kept clear of a cancelled generation's keys any more.
+    assert [call[1] for call in calls if call[0] == "reconcile"] == [
+        superdirector_dir(tmp_path, 1), superdirector_dir(tmp_path, 4)
+    ]
 
 
 def test_start_flag_moves_the_work_to_in_progress(monkeypatch, tmp_path):
@@ -329,7 +485,7 @@ def test_start_flag_moves_the_work_to_in_progress(monkeypatch, tmp_path):
     (workspace / "start.flag").touch()
 
     sections, resolve_after = zulip_listener.handle_superdirector_response(
-        CHANNEL, TOPIC, PROJECT, workspace, 1
+        Client(calls), CHANNEL, TOPIC, PROJECT, workspace
     )
 
     assert calls == [("transition", "started")]
@@ -337,20 +493,49 @@ def test_start_flag_moves_the_work_to_in_progress(monkeypatch, tmp_path):
     assert resolve_after is False
 
 
-def test_cancel_flag_cancels_everything_and_requests_resolution(monkeypatch, tmp_path):
+def test_cancel_flag_cancels_everything_and_archives_the_work_channel(monkeypatch, tmp_path):
+    """Mission cancel is the only remaining cancel-everything path, and the
+    only thing that retires a work- channel. Nothing is re-created after it,
+    so the archived channel's retained name cannot collide."""
     calls = []
+    client = Client(calls)
+    client.channels_list = [
+        {"name": CHANNEL, "stream_id": 7, "folder_id": None},
+        {"name": "work-pd-4", "stream_id": 8, "folder_id": None},
+    ]
     wire_response(monkeypatch, tmp_path, calls, cancelled=3)
     workspace = superdirector_dir(tmp_path)
     workspace.mkdir(parents=True)
     (workspace / "cancel.flag").touch()
 
     sections, resolve_after = zulip_listener.handle_superdirector_response(
-        CHANNEL, TOPIC, PROJECT, workspace, 1
+        client, CHANNEL, TOPIC, PROJECT, workspace
     )
 
-    assert calls == [("cancel-subs",), ("transition", "cancelled")]
-    assert sections == ["mission PD-4 is cancelled along with 3 sub-work(s); resolving this topic"]
+    assert [call[0] for call in calls] == [
+        "cancel-subs", "transition", "channels", "archive"
+    ]
+    assert calls[-1] == ("archive", 8)
+    assert sections == [
+        "mission PD-4 is cancelled along with 3 sub-work(s); resolving this topic",
+        "archived work-pd-4",
+    ]
     assert resolve_after is True
+
+
+def test_cancelling_a_mission_that_never_got_a_channel_is_quiet(monkeypatch, tmp_path):
+    calls = []
+    wire_response(monkeypatch, tmp_path, calls)
+    workspace = superdirector_dir(tmp_path)
+    workspace.mkdir(parents=True)
+    (workspace / "cancel.flag").touch()
+
+    sections, _ = zulip_listener.handle_superdirector_response(
+        Client(calls), CHANNEL, TOPIC, PROJECT, workspace
+    )
+
+    assert sections[-1] == "no work-pd-4 channel to archive"
+    assert not any(call[0] == "archive" for call in calls)
 
 
 def test_handle_topic_resolves_the_topic_after_the_final_reply(monkeypatch, tmp_path):

@@ -8,9 +8,16 @@ arrived during the run.
 
 Each serving cuts a new generation directory `<N>/`, the way agforge's create
 topics do. Before that, one stable directory was reused forever, so a
-continued conversation ran on top of the previous run's leftovers and a
-separate `generation` counter file had to keep Sub-Work keys apart. `N` is now
-both the workspace and that key.
+continued conversation ran on top of the previous run's leftovers. `N` is the
+workspace guard only: Sub-Work keys are one-per-serial for the life of the
+mission, so a re-plan updates the issue behind a serial instead of cancelling
+a generation and minting a new one — which is what lets a completed task stay
+completed.
+
+Planning also builds the surfaces the work is then done on: a `work-<label>`
+channel per mission Work, holding one `run-task<N>-<label>` topic per
+Sub-Work, in the folder of the project's own `pj-` channel and with its
+subscribers.
 
 The superdirector serves the topic alone — there is no front relay. It runs
 in the persistent project folder, where `main/`, `direction/` and `devlog/`
@@ -48,6 +55,7 @@ from agag.topics import (
     topic_workspace as shared_topic_workspace,
 )
 from agag.zulip import (
+    RESOLVED_TOPIC_PREFIX,
     ZulipClient,
     ZulipError,
     log,
@@ -57,6 +65,7 @@ from agag.zulip import (
 
 from .mission import (
     ASSET_TOPIC_PREFIX,
+    TaskChange,
     Work,
     asset_answer_context,
     asset_order,
@@ -65,7 +74,7 @@ from .mission import (
     compose_document,
     description_html,
     next_work,
-    register_task_files,
+    reconcile_task_files,
     report_work,
     split_document,
     transition_work,
@@ -93,7 +102,18 @@ RUN_TOPIC_PREFIX = "run-"
 CREATE_TOPIC_PREFIX = "create-"
 BMINING_TOPIC_PREFIX = "bmining-"
 PROJECT_CHANNEL_PREFIX = "pj-"
+# One channel per mission Work, named after that Work's Plane label:
+# `work-pa-12`. Its `run-task<N>-pa-12` topics are one conversation per task.
+WORK_CHANNEL_PREFIX = "work-"
 HISTORY_MESSAGES = 1000
+
+# The channel description carries the binding a `run-` serving needs back.
+# Parsing `work-pa-12` recovers the Work label and nothing else — not the
+# project slug, not which mission topic planned it — so both travel here.
+WORK_CHANNEL_BINDING = re.compile(
+    r"project:\s*(?P<slug>\S+?)\s*;\s*mission:\s*(?P<channel>[^/;]+)/(?P<topic>[^;]+?)\s*$"
+)
+RUN_TOPIC_NAME = re.compile(r"^run-task(?P<serial>\d+)-(?P<work>.+)$")
 
 ACK_TEXT = "Message received. Please wait for the reply."
 EMPTY_REPLY = "There is nothing in this topic to answer yet."
@@ -161,6 +181,7 @@ DIRECTOR_TIMEOUT_SECONDS = WORK_TIMEOUT_SECONDS
 
 __all__ = [
     "RunProgress",
+    "archive_work_channel",
     "ZULIP_ENV",
     "aesthetics_text",
     "answer_prompt",
@@ -169,6 +190,8 @@ __all__ = [
     "bmining_prompt",
     "bmining_work_directory",
     "direction_directory",
+    "ensure_work_channel",
+    "find_channel",
     "dispatch",
     "find_asset_key",
     "format_chatlog",
@@ -179,11 +202,15 @@ __all__ = [
     "handle_run",
     "handle_superdirector_response",
     "handle_topic",
+    "live_topic_name",
+    "mirror_task_changes",
     "main",
     "mentions_us",
     "next_record_path",
+    "prepare_run_surfaces",
     "progress_line",
     "run_answer",
+    "run_topic",
     "project_channel",
     "project_directory",
     "resign",
@@ -194,6 +221,8 @@ __all__ = [
     "run_work",
     "serve",
     "topic_workspace",
+    "work_channel",
+    "work_channel_description",
     "work_directory",
     "work_prompt",
 ]
@@ -292,7 +321,7 @@ def serve(context) -> TopicResult:
 
     context.step = "response handling"
     response_sections, resolve_after = handle_superdirector_response(
-        context.channel, context.topic, project, workspace, number
+        context.client, context.channel, context.topic, project, workspace
     )
     sections.extend(response_sections)
     return TopicResult(sections, resolve_after=resolve_after)
@@ -334,8 +363,154 @@ def run_superdirector(prompt: str, cwd: Path) -> str:
     return output.strip() or NO_CLOSING_MESSAGE
 
 
+# --- the mission's run surfaces --------------------------------------------
+#
+# Planning a mission builds the surfaces the work is then done on: one
+# `work-<label>` channel per mission Work, and one `run-task<N>-<label>` topic
+# in it per Sub-Work. The autolab bot posts the task content itself and is
+# therefore the topic's last poster, which keeps the sweep quiet — the topic
+# waits, by design, until a human posts into it.
+
+UPDATED_BY_PLANNER = "Updated by planner."
+CANCELLED_BY_PLANNER = "Cancelled by planner."
+CHANGED_AFTER_DONE = (
+    "This task was changed by the planner after it had been completed. The "
+    "topic is left as it is; whether to redo it is the mission's call."
+)
+
+
+def work_channel(label: str) -> str:
+    """`work-pa-12` — one channel per mission Work, named after its label."""
+    return f"{WORK_CHANNEL_PREFIX}{label.lower()}"
+
+
+def run_topic(serial: int, label: str) -> str:
+    """`run-task3-pa-12` — one topic per Sub-Work serial."""
+    return f"{RUN_TOPIC_PREFIX}task{serial}-{label.lower()}"
+
+
+def work_channel_description(slug: str, channel: str, topic: str) -> str:
+    """The binding a `run-` serving reads back out of the channel.
+
+    The channel name gives back the Work label and nothing else, so the
+    project slug and the mission topic that planned it travel here. `[AUTO]`
+    marks the channel as one this system made.
+    """
+    return f"{AUTO_MARKER} project: {slug}; mission: {channel}/{topic}"
+
+
+def find_channel(client: ZulipClient, name: str) -> dict | None:
+    return next((row for row in client.channels() if str(row.get("name")) == name), None)
+
+
+def ensure_work_channel(
+    client: ZulipClient, slug: str, channel: str, topic: str, label: str
+) -> str:
+    """Create (or re-join) the mission's `work-` channel and return its name.
+
+    Its members are the parent `pj-` channel's subscribers, so the developer
+    and this bot are both in it without anyone deciding again who the work
+    goes to. Its folder is the parent channel's folder — whatever that is,
+    including none: this is not the place to invent a folder structure.
+
+    `create_channel` is subscribe-based and therefore idempotent, which is
+    what makes re-planning safe.
+    """
+    name = work_channel(label)
+    parent = find_channel(client, project_channel(slug))
+    principals: list[int] = []
+    folder_id = None
+    if parent and parent.get("stream_id") is not None:
+        principals = client.channel_subscribers(int(parent["stream_id"]))
+        raw_folder = parent.get("folder_id")
+        folder_id = int(raw_folder) if raw_folder is not None else None
+    client.create_channel(
+        name,
+        work_channel_description(slug, channel, topic),
+        principals,
+        folder_id=folder_id,
+    )
+    return name
+
+
+def live_topic_name(client: ZulipClient, channel: str, topic: str) -> str:
+    """`topic`, or its resolved `\u2714 ` name when that is what exists.
+
+    A resolved topic is a *renamed* topic, so posting under the bare name
+    would open a second, unresolved one beside it.
+    """
+    resolved = f"{RESOLVED_TOPIC_PREFIX}{topic}"
+    try:
+        names = client.channel_topics(client.stream_id(channel))
+    except Exception as error:  # noqa: BLE001 - a note is never worth a failure
+        log(f"could not list topics of {channel!r}: {error!r}")
+        return topic
+    return resolved if resolved in names and topic not in names else topic
+
+
+def mirror_task_changes(
+    client: ZulipClient, channel: str, label: str, changes: list[TaskChange]
+) -> list[str]:
+    """Mirror one re-plan onto the mission's `run-` topics, one to one.
+
+    Created and updated tasks get their content posted; a cancelled one is
+    told so and resolved; a task the planner changed *after* it was completed
+    gets a note and nothing else — redoing it is the mission conversation's
+    decision, not this handler's. An unchanged task is left silent, so a
+    re-plan that only touched task 3 does not disturb tasks 1 and 2.
+    """
+    lines: list[str] = []
+    for change in changes:
+        topic = run_topic(change.serial, label)
+        if change.action == "created":
+            topic_write(topic, change.document, channel=channel, client=client)
+            lines.append(f"opened {channel}/{topic}")
+        elif change.action == "updated":
+            topic_write(
+                topic,
+                f"{UPDATED_BY_PLANNER}\n\n{change.document}",
+                channel=channel,
+                client=client,
+            )
+            lines.append(f"updated {channel}/{topic}")
+        elif change.action == "cancelled":
+            message_id = client.send_to_channel(channel, topic, CANCELLED_BY_PLANNER)
+            client.resolve_topic(int(message_id), topic)
+            lines.append(f"cancelled and resolved {channel}/{topic}")
+        elif change.action == "changed-after-done":
+            client.send_to_channel(
+                channel, live_topic_name(client, channel, topic), CHANGED_AFTER_DONE
+            )
+            lines.append(f"noted a post-completion change in {channel}/{topic}")
+    return lines
+
+
+def prepare_run_surfaces(
+    client: ZulipClient, slug: str, channel: str, topic: str, label: str,
+    changes: list[TaskChange],
+) -> list[str]:
+    """The whole Zulip side of one planning round."""
+    name = ensure_work_channel(client, slug, channel, topic, label)
+    return [f"work channel {name} is ready", *mirror_task_changes(client, name, label, changes)]
+
+
+def archive_work_channel(client: ZulipClient, label: str) -> str:
+    """Retire a cancelled mission's channel. One report line.
+
+    Mission cancel is the only path that ever gets here and nothing is ever
+    re-created after it, so the archived channel's retained name cannot
+    collide with a later one.
+    """
+    name = work_channel(label)
+    existing = find_channel(client, name)
+    if not existing or existing.get("stream_id") is None:
+        return f"no {name} channel to archive"
+    client.archive_channel(int(existing["stream_id"]))
+    return f"archived {name}"
+
+
 def handle_superdirector_response(
-    channel: str, topic: str, project: str, workspace: Path, number: int
+    client: ZulipClient, channel: str, topic: str, project: str, workspace: Path
 ) -> tuple[list[str], bool]:
     """Act on what the superdirector wrote: `plan.md`, then the flags.
 
@@ -343,28 +518,38 @@ def handle_superdirector_response(
     after the final reply.
 
     The workspace is a fresh generation `<N>/` and nothing in it is deleted —
-    the generation number is the guard, and the leftovers stay as evidence of
-    what that run was told. `N` is also the Sub-Work generation key, so keys
-    from a cancelled generation (which live in Plane forever) cannot be
-    reused. A run that wrote no `plan.md` and no flag asked a question
-    instead; nothing changes state.
+    the generation number is the workspace's double-act guard, and the
+    leftovers stay as evidence of what that run was told. It no longer
+    appears in any Plane key: a re-plan reconciles the Sub-Works onto their
+    serials instead of cancelling a generation and minting a new one, which
+    is what lets a completed task stay completed.
+
+    A `plan.md` also builds the mission's run surfaces — the `work-<label>`
+    channel and one `run-task<N>-<label>` topic per Sub-Work — so the
+    conversation about doing the work has somewhere to happen.
+
+    A run that wrote no `plan.md` and no flag asked a question instead;
+    nothing changes state.
     """
     sections: list[str] = []
     resolve_after = False
+    label: str | None = None
 
     plan = workspace / PLAN_FILE
     if plan.is_file():
         # Title and description both from the plan: the Work is what the
-        # superdirector decided the mission means. Step 6 reads the
-        # description back as `plan.md`, so the whole file travels, heading
-        # included.
+        # superdirector decided the mission means. The asset answer flow
+        # reads the description back as `plan.md`, so the whole file travels,
+        # heading included.
         plan_text = plan.read_text(encoding="utf-8")
         title, _ = split_document(plan_text)
-        sections.append(upsert_work(project, channel, topic, title, plan_text))
-        cancelled = cancel_sub_works(project, channel, topic)
-        if cancelled:
-            sections.append(f"cancelled {cancelled} existing sub-work(s)")
-        sections.extend(register_task_files(project, channel, topic, workspace, number))
+        line, label = upsert_work(project, channel, topic, title, plan_text)
+        sections.append(line)
+        lines, changes = reconcile_task_files(project, channel, topic, workspace)
+        sections.extend(lines)
+        sections.extend(
+            prepare_run_surfaces(client, project, channel, topic, label, changes)
+        )
 
     start_flag = workspace / "start.flag"
     if start_flag.is_file():
@@ -373,10 +558,13 @@ def handle_superdirector_response(
 
     cancel_flag = workspace / "cancel.flag"
     if cancel_flag.is_file():
+        # The only remaining cancel-everything path: the mission is over, so
+        # its live Sub-Works are cancelled and its whole channel is retired.
         cancelled = cancel_sub_works(project, channel, topic)
         label = transition_work(project, channel, topic, "cancelled")
         suffix = f" along with {cancelled} sub-work(s)" if cancelled else ""
         sections.append(f"mission {label} is cancelled{suffix}; resolving this topic")
+        sections.append(archive_work_channel(client, label))
         resolve_after = True
 
     return sections, resolve_after

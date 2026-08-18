@@ -6,16 +6,22 @@ is autolab's own policy on top of it:
 - the `AUTO` label, which is what makes an issue eligible for automatic
   execution (`next_work`), and the `[AUTO]` project marker that decides which
   projects are scanned at all
-- Sub-Work generation keys (`<channel>/<topic>@<rev>#<N>`), because cancelled
-  generations keep their keys in Plane forever
+- Sub-Work keys (`<channel>/<topic>#<N>`), one per task serial for the life of
+  the mission: re-planning updates the issue behind a serial rather than
+  cancelling it, which is what lets a completed task stay completed. Legacy
+  keys carry an `@<rev>` generation marker before the `#<N>` tail; they still
+  match, because matching reads the serial, not the whole key
 - which Work to execute next, and how a finished one is reported back
 
 Both directions still live here. Reading, a topic's Work becomes `mission.md`
 and its live Sub-Works `task1.md`, `task2.md`, … in the serving workspace's
 `current/` mirror (`write_mission_workspace`). Writing, the superdirector's
-`plan.md` updates or creates the Work (`upsert_work`), obsolete Sub-Works are
-cancelled — never deleted (`cancel_sub_works`) — and its `task[N].md` files
-are registered as a new generation of Sub-Works (`register_task_files`).
+`plan.md` updates or creates the Work (`upsert_work`) and its `task[N].md`
+files are reconciled against the live Sub-Works by serial
+(`reconcile_task_files`): a serial that exists is updated in place with its
+**state untouched**, a new serial is created, a disappeared one is cancelled.
+Sub-Works are never deleted. Only a mission-level cancel still cancels
+everything at once (`cancel_sub_works`).
 
 Works are keyed on Plane's own `external_source`/`external_id` pair, so a key
 survives a wiped `.local/`.
@@ -76,6 +82,10 @@ ASSET_TOPIC_PREFIX = "create-asset_"
 
 TASK_FILE = re.compile(r"^task(?P<number>\d+)\.md$")
 SUB_WORK_SERIAL = re.compile(r"#(?P<number>\d+)\s*$")
+# What `sub_work_serial` answers for a key that carries no `#<N>` tail: a
+# Work, or an issue somebody made by hand. It sorts last, and the reconcile
+# leaves such a child alone rather than cancelling it.
+NO_SERIAL = 1 << 30
 
 _LABEL_CACHE: dict[tuple[str, str], str] = {}
 
@@ -88,7 +98,9 @@ __all__ = [
     "EXTERNAL_SOURCE",
     "TITLE_LIMIT",
     "MissionError",
+    "NO_SERIAL",
     "PlaneConfig",
+    "TaskChange",
     "Work",
     "add_comment",
     "asset_answer_context",
@@ -109,13 +121,14 @@ __all__ = [
     "list_plane_projects",
     "load_plane_config",
     "next_work",
-    "register_task_files",
+    "reconcile_task_files",
     "report_work",
     "split_document",
     "starting_state_id",
     "state_groups",
     "state_id_for_group",
     "strip_asset_marker",
+    "sub_work_key",
     "sub_work_serial",
     "sub_works",
     "task_files",
@@ -134,10 +147,16 @@ def work_key(channel: str, topic: str) -> str:
     return f"{channel}/{topic}"
 
 
-def sub_work_key(channel: str, topic: str, rev: int, number: int) -> str:
-    """The generation marker keeps new keys clear of cancelled generations',
-    whose external ids live in Plane forever."""
-    return f"{channel}/{topic}@{rev}#{number}"
+def sub_work_key(channel: str, topic: str, number: int) -> str:
+    """One key per task serial, for the life of the mission.
+
+    Re-planning reconciles onto these keys instead of minting a new
+    generation, so a Sub-Work that is already Done keeps its identity and its
+    state. Keys written before that decision carry an `@<rev>` marker between
+    the topic and the `#<N>` tail; `sub_work_serial` reads the tail, so old
+    children still match their serial without any migration.
+    """
+    return f"{channel}/{topic}#{number}"
 
 
 def find_issue_by_external(config: PlaneConfig, project_id: str, external_id: str) -> dict | None:
@@ -325,7 +344,7 @@ def sub_work_serial(external_id: str | None) -> int:
     creation timestamp, which is all this number is used for.
     """
     match = SUB_WORK_SERIAL.search(str(external_id or ""))
-    return int(match.group("number")) if match else 1 << 30
+    return int(match.group("number")) if match else NO_SERIAL
 
 
 def eligible_works(issues: list[dict], groups: dict[str, str], label_id: str) -> list[dict]:
@@ -513,9 +532,19 @@ def _prepare(project: str) -> tuple[PlaneConfig, dict, str]:
     return config, plane_project, str(plane_project["id"])
 
 
-def upsert_work(project: str, channel: str, topic: str, title: str, description: str) -> str:
+def upsert_work(
+    project: str, channel: str, topic: str, title: str, description: str
+) -> tuple[str, str]:
     """Update the topic's Work with the new title/description, creating it if
-    this is the topic's first mission. Returns one report line."""
+    this is the topic's first mission.
+
+    Returns `(report line, work label)`. The label travels because the caller
+    names the mission's Zulip channel and its `run-` topics after it
+    (`work-pa-12`, `run-task1-pa-12`), and re-looking the Work up would be a
+    second round trip for something this call already holds. It is the label
+    rather than the issue because composing one needs the Plane *project* row
+    too, and that row only exists in here.
+    """
     config, plane_project, project_id = _prepare(project)
     key = work_key(channel, topic)
     if existing := find_issue_by_external(config, project_id, key):
@@ -525,7 +554,8 @@ def upsert_work(project: str, channel: str, topic: str, title: str, description:
             str(existing["id"]),
             {"name": title.strip(), "description_html": description_html(description)},
         )
-        return f'updated {issue_label(plane_project, existing)} "{title}"'
+        label = issue_label(plane_project, existing)
+        return f'updated {label} "{title}"', label
     issue, _ = ensure_issue(
         config,
         project_id,
@@ -534,7 +564,8 @@ def upsert_work(project: str, channel: str, topic: str, title: str, description:
         state=starting_state_id(config, project_id),
         external_id=key,
     )
-    return f'created {issue_label(plane_project, issue)} "{title}"'
+    label = issue_label(plane_project, issue)
+    return f'created {label} "{title}"', label
 
 
 def cancel_sub_works(project: str, channel: str, topic: str) -> int:
@@ -566,39 +597,122 @@ def transition_work(project: str, channel: str, topic: str, group: str) -> str:
     return issue_label(plane_project, issue)
 
 
-def register_task_files(
-    project: str, channel: str, topic: str, plan_dir: Path, rev: int
-) -> list[str]:
-    """Register every `task[N].md` in `plan_dir` as a Sub-Work of the topic's
-    Work, keyed `<channel>/<topic>@<rev>#<N>`.
+@dataclass(frozen=True)
+class TaskChange:
+    """What one re-plan did to one task serial, for the Zulip side to mirror.
+
+    `document` is the task as the developer should read it — the same
+    `# title\n\nbody` shape the superdirector wrote, minus the `[Asset]`
+    marker, which was addressed to this registration and never travels on.
+    """
+
+    serial: int
+    #: `created` | `updated` | `unchanged` | `cancelled` | `changed-after-done`
+    action: str
+    title: str
+    document: str
+    label: str
+    is_asset: bool = False
+
+
+def reconcile_task_files(
+    project: str, channel: str, topic: str, plan_dir: Path
+) -> tuple[list[str], list[TaskChange]]:
+    """Reconcile the topic's live Sub-Works against the `task[N].md` set.
+
+    Matching is by **serial** — the `#<N>` tail of the external id, which old
+    `@<rev>`-keyed children carry too, so no migration is needed:
+
+    - the serial exists → title and description are updated in place and the
+      **state is left alone**, which is what keeps a completed task completed
+      and the `run-` gate meaningful;
+    - the serial is new → the Sub-Work is created, keyed `<channel>/<topic>#<N>`;
+    - the serial disappeared from the split → that Sub-Work is cancelled.
+
+    A child carrying no serial was not written by a planner (a hand-made
+    sub-issue); it is left alone rather than cancelled.
+
+    Returns `(report lines, changes)`. The changes are what
+    `handle_superdirector_response` mirrors onto the mission's `run-` topics,
+    one to one.
 
     A task file ending in `[Asset]` needs a media asset before it can be
     coded. The marker is stripped from the description and becomes the
-    `asset` label on the issue, which is what `handle_run` dispatches on.
+    `asset` label on the issue, which is what the `run-` serving dispatches on.
     """
     config, plane_project, project_id = _prepare(project)
     issue = find_issue_by_external(config, project_id, work_key(channel, topic))
     if not issue:
         raise MissionError(f"no Work is registered for {channel}/{topic}")
+    groups = state_groups(config, project_id)
+    children = sub_works(list_issues(config, project_id), str(issue["id"]), groups)
+
+    live: dict[int, dict] = {}
+    stale: list[dict] = []
+    for child in children:
+        serial = sub_work_serial(child.get("external_id"))
+        if serial == NO_SERIAL:
+            continue  # not a planner's child; not this function's business
+        if serial in live:
+            # Two live children on one serial can only come from an older
+            # cancel+recreate generation that half survived; the newest wins.
+            stale.append(live[serial])
+        live[serial] = child
+
     state = starting_state_id(config, project_id)
-    tasks = task_files(plan_dir)
     lines: list[str] = []
-    for number, path in tasks:
+    changes: list[TaskChange] = []
+    seen: set[int] = set()
+
+    for number, path in task_files(plan_dir):
+        seen.add(number)
         text, is_asset = strip_asset_marker(path.read_text(encoding="utf-8"))
         sub_title, sub_description = split_document(text)
-        sub_issue, sub_created = ensure_issue(
-            config,
-            project_id,
-            name=sub_title,
-            description=sub_description,
-            state=state,
-            external_id=sub_work_key(channel, topic, rev, number),
-            parent=str(issue["id"]),
-            labels=[ASSET_LABEL] if is_asset else None,
-        )
-        verb = "created sub-work" if sub_created else "already registered sub-work"
+        document = compose_document(sub_title, description_html(sub_description))
+        existing = live.get(number)
+        if existing is None:
+            sub_issue, _ = ensure_issue(
+                config,
+                project_id,
+                name=sub_title,
+                description=sub_description,
+                state=state,
+                external_id=sub_work_key(channel, topic, number),
+                parent=str(issue["id"]),
+                labels=[ASSET_LABEL] if is_asset else None,
+            )
+            label = issue_label(plane_project, sub_issue)
+            action = "created"
+        else:
+            label = issue_label(plane_project, existing)
+            unchanged = (
+                str(existing.get("name", "")) == sub_title
+                and html_to_text(existing.get("description_html")) == sub_description
+            )
+            done = groups.get(str(existing.get("state") or "")) == "completed"
+            if unchanged:
+                action = "unchanged"
+            else:
+                update_issue(
+                    config,
+                    project_id,
+                    str(existing["id"]),
+                    {"name": sub_title, "description_html": description_html(sub_description)},
+                )
+                action = "changed-after-done" if done else "updated"
         suffix = " [asset]" if is_asset else ""
-        lines.append(f'{verb} {issue_label(plane_project, sub_issue)} "{sub_title}"{suffix}')
-    if not tasks:
+        lines.append(f'{action} sub-work {label} "{sub_title}"{suffix}')
+        changes.append(TaskChange(number, action, sub_title, document, label, is_asset))
+
+    cancelled = state_id_for_group(config, project_id, "cancelled")
+    for child in [*stale, *(live[serial] for serial in sorted(set(live) - seen))]:
+        update_issue(config, project_id, str(child["id"]), {"state": cancelled})
+        label = issue_label(plane_project, child)
+        title = str(child.get("name", ""))
+        serial = sub_work_serial(child.get("external_id"))
+        lines.append(f'cancelled sub-work {label} "{title}"')
+        changes.append(TaskChange(serial, "cancelled", title, "", label))
+
+    if not lines:
         lines.append("the superdirector wrote no task files; the mission has no sub-work")
-    return lines
+    return lines, changes
