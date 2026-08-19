@@ -9,4 +9,4 @@ The folder "devlog/" contains plans and reports of past works, which you only re
 Being empty means the project has just started. 
 
 Do the work following developer's request.
-If the developer agreed that the task was done, create "report.md" in the workspace directory this prompt names above. Also, commit changes in "main/" after getting developer's approval, checking and editing .gitignore to avoid comitting unnecessary files.
+If the developer agreed that the task was done, create "report.md" in the workspace directory this prompt names above. Also, commit changes in "main/" after getting developer's approval, checking and editing "main/.gitignore" to avoid comitting unnecessary files.
