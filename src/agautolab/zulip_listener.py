@@ -90,6 +90,7 @@ from .project_init import (
     init_project,
     load_gitea_config,
 )
+from .instance import instance_name
 from .role_run import run_role
 
 AGAUTOLAB_ROOT = Path(__file__).resolve().parents[2]
@@ -103,6 +104,14 @@ WORKRUN_TOPIC_PREFIX = "workrun-"
 ASSETPLAN_TOPIC_PREFIX = "assetplan-"
 BMINING_TOPIC_PREFIX = "bmining-"
 PROJECT_CHANNEL_PREFIX = "pj-"
+# What this listener answers, wherever it is subscribed. Its own channel is
+# swept whole instead (see `topic_filter`).
+SWEEP_PREFIXES = (
+    WORKPLAN_TOPIC_PREFIX,
+    WORKRUN_TOPIC_PREFIX,
+    ASSETPLAN_TOPIC_PREFIX,
+    BMINING_TOPIC_PREFIX,
+)
 # One channel per mission Work, named after that Work's Plane label:
 # `work-pa-12`. Its `workrun-task<N>-pa-12` topics are one conversation
 # per task.
@@ -199,6 +208,7 @@ __all__ = [
     "ensure_work_channel",
     "find_channel",
     "dispatch",
+    "entrance_reply",
     "find_asset_key",
     "format_chatlog",
     "generation_dir",
@@ -233,6 +243,7 @@ __all__ = [
     "serve_run",
     "supercoder_prompt",
     "title_slug",
+    "topic_filter",
     "topic_workspace",
     "work_channel",
     "work_channel_binding",
@@ -1210,19 +1221,51 @@ def observe_topic(channel: str, topic: str) -> None:
     log(f"observed sweep match {channel!r}/{topic!r}")
 
 
+def topic_filter(channel: str, topic: str) -> bool:
+    """Sweep every topic in this instance's own channel, prefixes elsewhere."""
+    return channel == instance_name() or topic.startswith(SWEEP_PREFIXES)
+
+
+def entrance_reply() -> str:
+    """The placeholder answer at this instance's own channel.
+
+    Its whole job is to be a *redirect*: the work itself happens in a
+    project's `pj-<slug>` channel, because that channel is what says which
+    project the work is for. Saying so here is cheaper than guessing.
+    """
+    name = instance_name()
+    return (
+        f"This is {name}, a development agent: it plans and carries out work "
+        f"on projects it has been given.\n\n"
+        f"This channel is for questions about the instance. To ask for "
+        f"development work, open a `workplan-…` topic in the project's own "
+        f"`pj-<slug>` channel — the channel is what says which project the "
+        f"work is for, so there is nothing to plan against here. If you do "
+        f"not know which projects exist, ask in this channel."
+    )
+
+
 def dispatch(client: ZulipClient, channel: str, topic: str) -> None:
     """Route one swept topic to its handler.
 
-    Every `workrun-` topic still comes here from anywhere, but `serve_run`
-    is what decides whether it is bound to a task: one outside a `work-`
-    channel, or without a `workrun-task<N>-…` name, gets one explanatory
-    reply instead of a run. `workplan-` and `assetplan-` topics still need a
-    `pj-*` channel and are
+    This instance's own channel comes first and never executes anything: it
+    is an entrance, and every topic in it gets the redirect reply. Because
+    the shared sweep skips a topic whose last post is this bot's own, that
+    reply is also the loop guard.
+
+    Every `workrun-` topic elsewhere still comes here from anywhere, but
+    `serve_run` is what decides whether it is bound to a task: one outside a
+    `work-` channel, or without a `workrun-task<N>-…` name, gets one
+    explanatory reply instead of a run. `workplan-` and `assetplan-` topics
+    still need a `pj-*` channel and are
     silently ignored elsewhere: with `#general` now swept, a stray `workplan-`
     topic there would otherwise get an error posted into it on every sweep,
     and agforge's own `assetplan-` topics in `#FreeForge` are none of autolab's
     business.
     """
+    if channel == instance_name():
+        client.send_to_channel(channel, topic, entrance_reply())
+        return
     if topic.startswith(WORKRUN_TOPIC_PREFIX):
         handle_workrun(client, channel, topic)
         return
@@ -1250,15 +1293,13 @@ def main() -> None:
     # the project creator's decision about who the work goes to, not something
     # a listener may widen on its own. See pyagag's README, "Subscription is
     # the routing decision".
-    prefixes = (
-        WORKPLAN_TOPIC_PREFIX,
-        WORKRUN_TOPIC_PREFIX,
-        ASSETPLAN_TOPIC_PREFIX,
-        BMINING_TOPIC_PREFIX,
+    log(
+        "agautolab zulip listener starting "
+        f"(pull sweep: all topics in {instance_name()!r}, "
+        f"prefixes {SWEEP_PREFIXES} elsewhere)"
     )
-    log(f"agautolab zulip listener starting (pull sweep, prefixes {prefixes})")
     try:
-        sweep_serve(client, handler, topic_filter=prefixes)
+        sweep_serve(client, handler, topic_filter=topic_filter)
     except KeyboardInterrupt:
         log("stopped")
 

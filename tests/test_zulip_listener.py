@@ -1497,3 +1497,43 @@ def test_run_progress_logs_a_failed_post_and_keeps_going(monkeypatch):
     # Dropped, not requeued: a Zulip outage must not grow `pending` for the
     # rest of a twenty-minute run.
     assert progress.pending == []
+
+
+def test_topic_filter_sweeps_the_whole_own_channel_and_prefixes_elsewhere(monkeypatch):
+    monkeypatch.setattr(zulip_listener, "instance_name", lambda: "autolab-here1")
+
+    assert zulip_listener.topic_filter("autolab-here1", "how-do-i-ask")
+    assert zulip_listener.topic_filter(CHANNEL, "workplan-thing")
+    assert zulip_listener.topic_filter("work-pa-12", "workrun-task1-pa-12")
+    assert not zulip_listener.topic_filter("general", "just-chatting")
+
+
+def test_the_own_channel_only_redirects_and_never_executes(monkeypatch):
+    monkeypatch.setattr(zulip_listener, "instance_name", lambda: "autolab-here1")
+    for name in ("handle_workrun", "handle_topic", "handle_bmining", "handle_assetplan"):
+        monkeypatch.setattr(
+            zulip_listener, name,
+            lambda *a, **k: pytest.fail("the entrance must not execute anything"),
+        )
+    sent = []
+
+    class Client:
+        def send_to_channel(self, channel, topic, text):
+            sent.append((channel, topic, text))
+
+    for topic in ("how-do-i-ask", "workplan-here", "workrun-here"):
+        zulip_listener.dispatch(Client(), "autolab-here1", topic)
+
+    assert [(c, t) for c, t, _ in sent] == [
+        ("autolab-here1", "how-do-i-ask"),
+        ("autolab-here1", "workplan-here"),
+        ("autolab-here1", "workrun-here"),
+    ]
+
+
+def test_the_entrance_reply_names_the_instance_and_the_workplan_contract(monkeypatch):
+    monkeypatch.setattr(zulip_listener, "instance_name", lambda: "autolab-here1")
+    reply = zulip_listener.entrance_reply()
+    assert "autolab-here1" in reply
+    assert "workplan-" in reply
+    assert "pj-" in reply
