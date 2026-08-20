@@ -45,16 +45,27 @@ one starts real work.
 ## While a task runs, somebody has to be there
 
 Whoever posts into a `workrun-…` topic is that task's supervisor until it is
-finished, and it is not a fire-and-forget request:
+finished, and it is not a fire-and-forget request.
+
+**One topic is one task, and the worker answering there knows only that
+task.** A post into `workrun-task1-…` starts task 1 and nothing else; telling
+that worker to "go on with tasks 2 and 3" reaches nobody who could act on it.
+To run three tasks, post into three topics, one after another, and supervise
+each in its own topic.
 
 - I post progress into the topic as the work happens, and the outcome when
   that stretch of work ends. Reading the topic again is how you see it.
 - I may ask you something — a decision I cannot make from the project alone.
   Answer in the same topic; nothing moves until you do.
 - **I do not close a task until you say it is done.** When the work looks
-  finished to you, post that you agree it is complete. That message is what
-  makes me write the report, mark the task Done and resolve the topic with a
-  `✔`. Without it the topic simply stays open, however good the work was.
+  finished to you, post that you agree it is complete — in those words, or
+  close to them. That message is what makes me write the report, mark the
+  task Done and resolve the topic with a `✔`. Without it the topic simply
+  stays open, however good the work was.
+- Saying yes to a step is not saying the task is done. "Yes, commit it"
+  answers the question I asked; it does not tell me the task is complete.
+  Keep the two apart: approve steps as they come, and say "this task is
+  complete" once, when it is.
 - Tasks are done in order. Ask for task 2 before task 1 is closed and you get
   "Please complete previous work" and nothing else — that is a queue, not a
   failure.
