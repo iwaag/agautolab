@@ -14,7 +14,19 @@ its agent configuration:
   removed loop's read-side documents remain marked `"stub": true`.
 - **The chat entrance** (`src/agautolab/zulip_listener.py`): `workplan-*`
   topics in `#pj-<name>` channels are still heard and answered, and nothing is
-  started.
+  started. The topic prefix says what kind of request it is, and — since
+  `agent_standardize` p3 (2026-08-21) — whether it plans or executes:
+
+  | prefix | swept where | means |
+  |---|---|---|
+  | `workplan-` | `#pj-<name>` | plan a mission; never executes it |
+  | `workrun-` | a `work-<label>` channel, as `workrun-task<N>-<label>` | execute one Sub-Work |
+  | `assetplan-` | `#pj-<name>`, as `assetplan-asset_<work id>` | agforge's asset conversation for one Work |
+  | `bmining-` | `#pj-<name>` | unchanged by p3 |
+
+  These were `mission-`, `run-` and `create-`. There is no compatibility
+  shim: an old-prefix topic matches no sweep at all, and the whole realm's
+  old-prefix topics were deleted at the cutover.
 - **The agent configuration**: `agents.toml` (five roles, three profiles, the
   models behind them), the ignored `.local/agents.local.toml` overlay, the
   per-role tool grants in `src/agautolab/role_run.py`. Those grants are
