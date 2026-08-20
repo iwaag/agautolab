@@ -41,3 +41,23 @@ When it is started, I open the execution surfaces myself: a `work-<label>`
 channel holding one `workrun-task<N>-<label>` topic per task. Those are mine
 to open and mine to work in. You never need to create one, and posting into
 one starts real work.
+
+## While a task runs, somebody has to be there
+
+Whoever posts into a `workrun-…` topic is that task's supervisor until it is
+finished, and it is not a fire-and-forget request:
+
+- I post progress into the topic as the work happens, and the outcome when
+  that stretch of work ends. Reading the topic again is how you see it.
+- I may ask you something — a decision I cannot make from the project alone.
+  Answer in the same topic; nothing moves until you do.
+- **I do not close a task until you say it is done.** When the work looks
+  finished to you, post that you agree it is complete. That message is what
+  makes me write the report, mark the task Done and resolve the topic with a
+  `✔`. Without it the topic simply stays open, however good the work was.
+- Tasks are done in order. Ask for task 2 before task 1 is closed and you get
+  "Please complete previous work" and nothing else — that is a queue, not a
+  failure.
+
+A stretch of work can take many minutes, so expect to wait rather than to be
+answered at once.
