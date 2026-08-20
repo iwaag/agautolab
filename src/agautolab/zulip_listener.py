@@ -1,4 +1,4 @@
-"""Pull mission topics from Zulip into topic workspaces and the superdirector.
+"""Pull workplan topics from Zulip into topic workspaces and the superdirector.
 
 `agag.zulip.sweep_serve` finds every unresolved `workplan-*` topic whose last
 poster is not this bot, and `agag.topics.serve_topic` serves each one — the
@@ -111,7 +111,7 @@ HISTORY_MESSAGES = 1000
 
 # The channel description carries the binding a `workrun-` serving needs back.
 # Parsing `work-pa-12` recovers the Work label and nothing else — not the
-# project slug, not which mission topic planned it — so both travel here.
+# project slug, not which workplan topic planned it — so both travel here.
 WORK_CHANNEL_BINDING = re.compile(
     r"project:\s*(?P<slug>\S+?)\s*;\s*mission:\s*(?P<channel>[^/;]+)/(?P<topic>[^;]+?)\s*$"
 )
@@ -246,7 +246,9 @@ class ListenerError(RuntimeError):
 
 def project_from_channel(channel: str) -> str:
     if not channel.startswith(PROJECT_CHANNEL_PREFIX):
-        raise ListenerError(f"mission topic is not in a {PROJECT_CHANNEL_PREFIX} channel: {channel}")
+        raise ListenerError(
+            f"workplan topic is not in a {PROJECT_CHANNEL_PREFIX} channel: {channel}"
+        )
     project = channel.removeprefix(PROJECT_CHANNEL_PREFIX)
     if not PROJECT_NAME.fullmatch(project):
         raise ListenerError(f"channel does not contain a valid project name: {channel}")
@@ -342,8 +344,8 @@ def serve(context) -> TopicResult:
 
 
 def handle_topic(client: ZulipClient, channel: str, topic: str) -> None:
-    """Serve one awaiting mission topic through the shared skeleton."""
-    log(f"mission topic {channel!r}/{topic!r}")
+    """Serve one awaiting workplan topic through the shared skeleton."""
+    log(f"workplan topic {channel!r}/{topic!r}")
     serve_topic(client, channel, topic, serve, ack_text=ACK_TEXT, empty_reply=EMPTY_REPLY)
 
 
@@ -408,7 +410,7 @@ def work_channel_description(slug: str, channel: str, topic: str) -> str:
     """The binding a `workrun-` serving reads back out of the channel.
 
     The channel name gives back the Work label and nothing else, so the
-    project slug and the mission topic that planned it travel here. `[AUTO]`
+    project slug and the workplan topic that planned it travel here. `[AUTO]`
     marks the channel as one this system made.
     """
     return f"{AUTO_MARKER} project: {slug}; mission: {channel}/{topic}"
@@ -832,10 +834,11 @@ def remove_work_directory(work_dir: Path) -> None:
 
 REPORT_FILE = "report.md"
 WRONG_PLACE_REPLY = (
-    "This `workrun-` topic is not bound to any task. A run topic is created "
-    "by planning a mission: it is named `workrun-task<N>-<work label>` and "
-    "lives in that mission's `work-<work label>` channel. Post in the "
-    "mission topic to plan or re-plan, and the topics will appear."
+    "This `workrun-` topic is not bound to any task. A workrun topic is "
+    "created by planning a mission: it is named "
+    "`workrun-task<N>-<work label>` and lives in that mission's "
+    "`work-<work label>` channel. Post in the workplan topic to plan or "
+    "re-plan, and the topics will appear."
 )
 PREVIOUS_WORK_REPLY = "Please complete previous work"
 
@@ -855,7 +858,7 @@ def parse_run_topic(channel: str, topic: str) -> int | None:
 
 
 def work_channel_binding(client: ZulipClient, channel: str) -> tuple[str, str, str]:
-    """`(project slug, mission channel, mission topic)` from the channel's
+    """`(project slug, workplan channel, workplan topic)` from the channel's
     description, which `ensure_work_channel` wrote when it planned."""
     existing = find_channel(client, channel)
     if not existing:
@@ -1012,7 +1015,7 @@ def serve_run(context) -> TopicResult:
 
 def handle_workrun(client: ZulipClient, channel: str, topic: str) -> None:
     """Serve one awaiting `workrun-` topic through the shared skeleton."""
-    log(f"run topic {channel!r}/{topic!r}")
+    log(f"workrun topic {channel!r}/{topic!r}")
     serve_topic(client, channel, topic, serve_run, ack_text=ACK_TEXT, empty_reply=EMPTY_REPLY)
 
 
@@ -1073,7 +1076,7 @@ def handle_assetplan(client: ZulipClient, channel: str, topic: str) -> None:
     the handler returns without posting: it is then still not the last poster,
     so the sweep will look again next time, at the price of one history read.
     """
-    log(f"create topic {channel!r}/{topic!r}")
+    log(f"assetplan topic {channel!r}/{topic!r}")
     if not topic.startswith(ASSET_TOPIC_PREFIX):
         log(f"ignoring {topic!r}: not an asset topic")
         return
