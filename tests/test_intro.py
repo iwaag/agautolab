@@ -20,5 +20,7 @@ def test_main_posts_the_committed_markdown_to_the_shared_board(monkeypatch):
 
     (channel, topic, text) = sent[0]
     assert (channel, topic) == ("agents", "intro-autolab-agstudio1")
-    assert text.startswith(intro.INTRO_PATH.read_text(encoding="utf-8").rstrip())
+    body = intro.INTRO_PATH.read_text(encoding="utf-8").rstrip()
+    assert text.startswith(body.replace("{instance}", "autolab-agstudio1"))
+    assert "{instance}" not in text
     assert "\nPosted: " in text and "\nRevision: `" in text
