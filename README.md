@@ -12,7 +12,7 @@ its agent configuration:
   the real front agent with the request text unchanged. Existing `/status`,
   `/jobs`, and `/projects` consumers retain their response surfaces; the
   removed loop's read-side documents remain marked `"stub": true`.
-- **The chat entrance** (`src/agautolab/zulip_listener.py`): `mission-*`
+- **The chat entrance** (`src/agautolab/zulip_listener.py`): `workplan-*`
   topics in `#pj-<name>` channels are still heard and answered, and nothing is
   started.
 - **The agent configuration**: `agents.toml` (five roles, three profiles, the

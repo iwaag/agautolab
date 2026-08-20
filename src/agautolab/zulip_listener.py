@@ -1,6 +1,6 @@
 """Pull mission topics from Zulip into topic workspaces and the superdirector.
 
-`agag.zulip.sweep_serve` finds every unresolved `mission-*` topic whose last
+`agag.zulip.sweep_serve` finds every unresolved `workplan-*` topic whose last
 poster is not this bot, and `agag.topics.serve_topic` serves each one — the
 skeleton shared with agforge: ack, generation workspace, chatlog, the steps,
 always reply naming the failed step, then re-check for human posts that
@@ -15,7 +15,7 @@ a generation and minting a new one — which is what lets a completed task stay
 completed.
 
 Planning also builds the surfaces the work is then done on: a `work-<label>`
-channel per mission Work, holding one `run-task<N>-<label>` topic per
+channel per mission Work, holding one `workrun-task<N>-<label>` topic per
 Sub-Work, in the folder of the project's own `pj-` channel and with its
 subscribers.
 
@@ -24,7 +24,7 @@ in the persistent project folder, where `main/`, `direction/` and `devlog/`
 are real directories (symlinking them into the workspace was tried first, and
 harness file tools do not follow directory symlinks), and the serving's own
 generation workspace is handed to it by absolute path — the same shape as the
-create-topic answer flow. The chatlog and Plane mirror are read from there,
+assetplan-topic answer flow. The chatlog and Plane mirror are read from there,
 and `plan.md`, the task split and the flags are written back there, so
 everything one run wrote stays behind in its own generation as evidence and
 can never be acted on twice.
@@ -98,23 +98,24 @@ TOPICS_ROOT = AGAUTOLAB_ROOT / ".local" / "topics"
 GUIDES = AGAUTOLAB_ROOT / "agent" / "guides"
 RECORDS_ROOT = AGAUTOLAB_ROOT / ".local" / "agent"
 
-MISSION_TOPIC_PREFIX = "mission-"
-RUN_TOPIC_PREFIX = "run-"
-CREATE_TOPIC_PREFIX = "create-"
+WORKPLAN_TOPIC_PREFIX = "workplan-"
+WORKRUN_TOPIC_PREFIX = "workrun-"
+ASSETPLAN_TOPIC_PREFIX = "assetplan-"
 BMINING_TOPIC_PREFIX = "bmining-"
 PROJECT_CHANNEL_PREFIX = "pj-"
 # One channel per mission Work, named after that Work's Plane label:
-# `work-pa-12`. Its `run-task<N>-pa-12` topics are one conversation per task.
+# `work-pa-12`. Its `workrun-task<N>-pa-12` topics are one conversation
+# per task.
 WORK_CHANNEL_PREFIX = "work-"
 HISTORY_MESSAGES = 1000
 
-# The channel description carries the binding a `run-` serving needs back.
+# The channel description carries the binding a `workrun-` serving needs back.
 # Parsing `work-pa-12` recovers the Work label and nothing else — not the
 # project slug, not which mission topic planned it — so both travel here.
 WORK_CHANNEL_BINDING = re.compile(
     r"project:\s*(?P<slug>\S+?)\s*;\s*mission:\s*(?P<channel>[^/;]+)/(?P<topic>[^;]+?)\s*$"
 )
-RUN_TOPIC_NAME = re.compile(r"^run-task(?P<serial>\d+)-(?P<work>.+)$")
+WORKRUN_TOPIC_NAME = re.compile(r"^workrun-task(?P<serial>\d+)-(?P<work>.+)$")
 
 ACK_TEXT = "Message received. Please wait for the reply."
 EMPTY_REPLY = "There is nothing in this topic to answer yet."
@@ -152,10 +153,10 @@ RESIGN_TIMEOUT_SECONDS = 30
 # The project's art direction, quoted into every asset order.
 AESTHETICS_FILE = "aesthetics.md"
 
-# --- answering agforge on a create- topic ----------------------------------
+# --- answering agforge on an assetplan- topic ---------------------------
 #
 # The mention gate is the loop breaker between the two bots. agforge reacts to
-# any `create-` post that is not its own; autolab reacts only when the last
+# any `assetplan-` post that is not its own; autolab reacts only when the last
 # message mentions it by name. Without that asymmetry the two would answer
 # each other forever, one paid agent run per lap.
 CHATLOG_FILE = "chatlog.md"
@@ -203,8 +204,8 @@ __all__ = [
     "generation_dir",
     "guide",
     "handle_bmining",
-    "handle_create",
-    "handle_run",
+    "handle_assetplan",
+    "handle_workrun",
     "handle_superdirector_response",
     "handle_topic",
     "devlog_directory",
@@ -218,7 +219,7 @@ __all__ = [
     "parse_run_topic",
     "progress_line",
     "run_answer",
-    "run_supercoder",
+    "workrun_supercoder",
     "run_topic",
     "project_channel",
     "project_directory",
@@ -240,7 +241,7 @@ __all__ = [
 
 
 class ListenerError(RuntimeError):
-    """One mission-topic workflow could not complete."""
+    """One workplan-topic workflow could not complete."""
 
 
 def project_from_channel(channel: str) -> str:
@@ -292,7 +293,9 @@ def superdirector_prompt(bot_name: str, workspace: Path, plane_files: bool) -> s
         f'the flags — into "{workspace}".'
     )
     lines.append("Your working directory is the project itself.")
-    return prompt_with_guide(lines, guide("mission_superdirector", "guide.md"))
+    return prompt_with_guide(
+        lines, guide("workplan_superdirector", "guide.md")
+    )
 
 
 def serve(context) -> TopicResult:
@@ -377,7 +380,8 @@ def run_superdirector(prompt: str, cwd: Path) -> str:
 # --- the mission's run surfaces --------------------------------------------
 #
 # Planning a mission builds the surfaces the work is then done on: one
-# `work-<label>` channel per mission Work, and one `run-task<N>-<label>` topic
+# `work-<label>` channel per mission Work, and one `workrun-task<N>-<label>`
+# topic
 # in it per Sub-Work. The autolab bot posts the task content itself and is
 # therefore the topic's last poster, which keeps the sweep quiet — the topic
 # waits, by design, until a human posts into it.
@@ -396,12 +400,12 @@ def work_channel(label: str) -> str:
 
 
 def run_topic(serial: int, label: str) -> str:
-    """`run-task3-pa-12` — one topic per Sub-Work serial."""
-    return f"{RUN_TOPIC_PREFIX}task{serial}-{label.lower()}"
+    """`workrun-task3-pa-12` — one topic per Sub-Work serial."""
+    return f"{WORKRUN_TOPIC_PREFIX}task{serial}-{label.lower()}"
 
 
 def work_channel_description(slug: str, channel: str, topic: str) -> str:
-    """The binding a `run-` serving reads back out of the channel.
+    """The binding a `workrun-` serving reads back out of the channel.
 
     The channel name gives back the Work label and nothing else, so the
     project slug and the mission topic that planned it travel here. `[AUTO]`
@@ -462,7 +466,7 @@ def live_topic_name(client: ZulipClient, channel: str, topic: str) -> str:
 def mirror_task_changes(
     client: ZulipClient, channel: str, label: str, changes: list[TaskChange]
 ) -> list[str]:
-    """Mirror one re-plan onto the mission's `run-` topics, one to one.
+    """Mirror one re-plan onto the mission's `workrun-` topics, one to one.
 
     Created and updated tasks get their content posted; a cancelled one is
     told so and resolved; a task the planner changed *after* it was completed
@@ -536,7 +540,7 @@ def handle_superdirector_response(
     is what lets a completed task stay completed.
 
     A `plan.md` also builds the mission's run surfaces — the `work-<label>`
-    channel and one `run-task<N>-<label>` topic per Sub-Work — so the
+    channel and one `workrun-task<N>-<label>` topic per Sub-Work — so the
     conversation about doing the work has somewhere to happen.
 
     A run that wrote no `plan.md` and no flag asked a question instead;
@@ -603,13 +607,13 @@ def supercoder_prompt(bot_name: str, workspace: Path, task: str,
         "",
         task.strip(),
     ]
-    guide_text = guide("run_supercoder", "guide.md")
+    guide_text = guide("workrun_supercoder", "guide.md")
     if asset_url:
         guide_text = f"{guide_text}{ASSET_PROMPT_NOTE}{asset_url}"
     return prompt_with_guide(lines, guide_text)
 
 
-def run_supercoder(prompt: str, cwd: Path,
+def workrun_supercoder(prompt: str, cwd: Path,
                    on_event: Callable[[dict], None] | None = None) -> str:
     """One task-serving run in the project folder, with its record.
 
@@ -633,7 +637,7 @@ def run_supercoder(prompt: str, cwd: Path,
     return output.strip() or NO_CLOSING_MESSAGE
 
 
-# --- live progress on run- topics -------------------------------------------
+# --- live progress on workrun- topics ----------------------------------------
 #
 # The harness streams its conversation events (run_harness `on_event`) while
 # the coding run is underway, and RunProgress turns them into topic posts.
@@ -671,7 +675,7 @@ def progress_line(block: dict) -> str | None:
 
 
 class RunProgress:
-    """Accumulate harness events and post them to the run- topic, throttled.
+    """Accumulate harness events, posted to the workrun- topic, throttled.
 
     `__call__` runs on run_harness's reader thread while the listener thread
     is blocked inside the run, and `flush` only after the run has returned
@@ -801,7 +805,7 @@ def asset_gate(client: ZulipClient, work: Work) -> tuple[list[str], str | None]:
         topic_write(topic, asset_order_text(work), channel=channel, client=client)
         return [f"asset ordered in {channel}/{topic}"], None
     if state != "done":
-        # No `runcreate-` post is emitted: the Omni Agent fires that by hand
+        # No `assetrun-` post is emitted: the Omni Agent fires that by hand
         # this episode (Deus Ex Machina, recorded in the episode doc).
         return [f"asset in progress in {channel}/{topic}"], None
 
@@ -818,9 +822,9 @@ def remove_work_directory(work_dir: Path) -> None:
     shutil.rmtree(work_dir, ignore_errors=True)
 
 
-# --- serving one task on a run- topic ---------------------------------------
+# --- serving one task on a workrun- topic ------------------------------------
 #
-# A `run-` topic is no longer a channel-agnostic button that picks whatever
+# A `workrun-` topic is no longer a channel-agnostic button that picks whatever
 # Work is next. It lives in one mission's `work-` channel, it is bound to one
 # Sub-Work by its own name, and it is a conversation: every human post
 # re-serves it, so finishing a task is something the developer and the
@@ -828,10 +832,10 @@ def remove_work_directory(work_dir: Path) -> None:
 
 REPORT_FILE = "report.md"
 WRONG_PLACE_REPLY = (
-    "This `run-` topic is not bound to any task. A run topic is created by "
-    "planning a mission: it is named `run-task<N>-<work label>` and lives in "
-    "that mission's `work-<work label>` channel. Post in the mission topic to "
-    "plan or re-plan, and the topics will appear."
+    "This `workrun-` topic is not bound to any task. A run topic is created "
+    "by planning a mission: it is named `workrun-task<N>-<work label>` and "
+    "lives in that mission's `work-<work label>` channel. Post in the "
+    "mission topic to plan or re-plan, and the topics will appear."
 )
 PREVIOUS_WORK_REPLY = "Please complete previous work"
 
@@ -841,12 +845,12 @@ def parse_run_topic(channel: str, topic: str) -> int | None:
 
     Both halves of the binding are checked: the topic name has to carry a
     serial, and it has to sit in a `work-` channel. `dispatch` still routes
-    every `run-` topic here, so this is what replaces the old any-channel
+    every `workrun-` topic here, so this is what replaces the old any-channel
     button.
     """
     if not channel.startswith(WORK_CHANNEL_PREFIX):
         return None
-    match = RUN_TOPIC_NAME.fullmatch(topic)
+    match = WORKRUN_TOPIC_NAME.fullmatch(topic)
     return int(match.group("serial")) if match else None
 
 
@@ -924,7 +928,7 @@ def record_task_in_devlog(target, workspace: Path, report: str) -> str:
 
 
 def serve_run(context) -> TopicResult:
-    """One serving of one `run-` topic: gate, agent, and — only if the run
+    """One serving of a `workrun-` topic: gate, agent, and — only if the run
     wrote a report — the close-out.
 
     The report file is the agreement signal the guide asks for ("if the
@@ -974,7 +978,7 @@ def serve_run(context) -> TopicResult:
     progress = RunProgress(context.client, context.channel, context.topic)
     try:
         sections.append(
-            run_supercoder(
+            workrun_supercoder(
                 supercoder_prompt(context.bot_name, workspace, task_text, asset_url),
                 project_directory(slug),
                 on_event=progress,
@@ -1006,13 +1010,13 @@ def serve_run(context) -> TopicResult:
     return TopicResult(sections, resolve_after=True)
 
 
-def handle_run(client: ZulipClient, channel: str, topic: str) -> None:
-    """Serve one awaiting `run-` topic through the shared skeleton."""
+def handle_workrun(client: ZulipClient, channel: str, topic: str) -> None:
+    """Serve one awaiting `workrun-` topic through the shared skeleton."""
     log(f"run topic {channel!r}/{topic!r}")
     serve_topic(client, channel, topic, serve_run, ack_text=ACK_TEXT, empty_reply=EMPTY_REPLY)
 
 
-# --- answering agforge's questions on create- topics -----------------------
+# --- answering agforge's questions on assetplan- topics ----------------------
 
 
 def mentions_us(content: str, bot_name: str, self_id: int) -> bool:
@@ -1037,7 +1041,7 @@ def answer_prompt(answer_dir: Path) -> str:
             f'Write your answer to "{answer_dir / ANSWER_FILE}".',
             "Your working directory is the project itself.",
         ],
-        guide("create_answer_superdirector", "guide.md"),
+        guide("assetplan_answer_superdirector", "guide.md"),
     )
 
 
@@ -1056,8 +1060,8 @@ def run_answer(answer_dir: Path, project_dir: Path) -> str:
     return output.strip()
 
 
-def handle_create(client: ZulipClient, channel: str, topic: str) -> None:
-    """Answer agforge's question on one `create-asset_<work_id>` topic.
+def handle_assetplan(client: ZulipClient, channel: str, topic: str) -> None:
+    """Answer agforge's question on one `assetplan-asset_<work_id>` topic.
 
     Deliberately not `serve_topic`-shaped: there is no ack. An ack would make
     autolab the topic's last poster, and agforge's sweep would resume the
@@ -1206,23 +1210,24 @@ def observe_topic(channel: str, topic: str) -> None:
 def dispatch(client: ZulipClient, channel: str, topic: str) -> None:
     """Route one swept topic to its handler.
 
-    Every `run-` topic still comes here from anywhere, but `serve_run` is what
-    decides whether it is bound to a task: one outside a `work-` channel, or
-    without a `run-task<N>-…` name, gets one explanatory reply instead of a
-    run. `mission-` and `create-` topics still need a `pj-*` channel and are
-    silently ignored elsewhere: with `#general` now swept, a stray `mission-`
+    Every `workrun-` topic still comes here from anywhere, but `serve_run`
+    is what decides whether it is bound to a task: one outside a `work-`
+    channel, or without a `workrun-task<N>-…` name, gets one explanatory
+    reply instead of a run. `workplan-` and `assetplan-` topics still need a
+    `pj-*` channel and are
+    silently ignored elsewhere: with `#general` now swept, a stray `workplan-`
     topic there would otherwise get an error posted into it on every sweep,
-    and agforge's own `create-` topics in `#FreeForge` are none of autolab's
+    and agforge's own `assetplan-` topics in `#FreeForge` are none of autolab's
     business.
     """
-    if topic.startswith(RUN_TOPIC_PREFIX):
-        handle_run(client, channel, topic)
+    if topic.startswith(WORKRUN_TOPIC_PREFIX):
+        handle_workrun(client, channel, topic)
         return
     if not channel.startswith(PROJECT_CHANNEL_PREFIX):
         log(f"ignoring {topic!r}: {channel!r} is not a project channel")
         return
-    if topic.startswith(CREATE_TOPIC_PREFIX):
-        handle_create(client, channel, topic)
+    if topic.startswith(ASSETPLAN_TOPIC_PREFIX):
+        handle_assetplan(client, channel, topic)
         return
     if topic.startswith(BMINING_TOPIC_PREFIX):
         handle_bmining(client, channel, topic)
@@ -1243,9 +1248,9 @@ def main() -> None:
     # a listener may widen on its own. See pyagag's README, "Subscription is
     # the routing decision".
     prefixes = (
-        MISSION_TOPIC_PREFIX,
-        RUN_TOPIC_PREFIX,
-        CREATE_TOPIC_PREFIX,
+        WORKPLAN_TOPIC_PREFIX,
+        WORKRUN_TOPIC_PREFIX,
+        ASSETPLAN_TOPIC_PREFIX,
         BMINING_TOPIC_PREFIX,
     )
     log(f"agautolab zulip listener starting (pull sweep, prefixes {prefixes})")

@@ -8,7 +8,7 @@ from agautolab import mission
 
 
 CHANNEL = "pj-demo-project"
-TOPIC = "mission-test"
+TOPIC = "workplan-test"
 WORK_KEY = f"{CHANNEL}/{TOPIC}"
 
 
@@ -164,7 +164,7 @@ def test_upsert_work_updates_an_existing_work_in_place(plane):
     line, label = mission.upsert_work("demo", CHANNEL, TOPIC, "New title", "New body & more")
     assert line == 'updated PD-4 "New title"'
     # The label travels back: the caller names `work-pd-4` and its
-    # `run-task<N>-pd-4` topics after it.
+    # `workrun-task<N>-pd-4` topics after it.
     assert label == "PD-4"
     assert plane.patches == [
         (work["id"], {"name": "New title", "description_html": "<p>New body &amp; more</p>"})
@@ -203,7 +203,7 @@ def test_transition_work_moves_the_work_by_state_group(plane):
     assert mission.transition_work("demo", CHANNEL, TOPIC, "started") == "PD-4"
     assert plane.patches == [(work["id"], {"state": "started-id"})]
     with pytest.raises(mission.MissionError):
-        mission.transition_work("demo", CHANNEL, "mission-unknown", "started")
+        mission.transition_work("demo", CHANNEL, "workplan-unknown", "started")
 
 
 def test_state_id_for_group_names_the_missing_group(plane):
@@ -246,7 +246,7 @@ def test_reconcile_reports_an_empty_split(plane, tmp_path):
 
 def test_reconcile_updates_a_serial_in_place_and_leaves_its_state(plane, tmp_path):
     """The whole point of the reconcile: a task that is Done stays Done, which
-    is what keeps the run- gate meaningful across a re-plan."""
+    is what keeps the workrun- gate meaningful across a re-plan."""
     work = plane.add(name="Work", external_id=WORK_KEY)
     done = plane.add(name="First", external_id=f"{WORK_KEY}#1", parent=work["id"],
                      state="done-id", description_html="<p>do this</p>")
@@ -351,7 +351,7 @@ def test_strip_asset_marker_only_matches_the_tail(text, stripped, is_asset):
 
 def test_reconcile_labels_an_asset_sub_work(plane, tmp_path):
     """The marker never reaches Plane; the label does, and that label is what
-    the `run-` serving dispatches on."""
+    the `workrun-` serving dispatches on."""
     plane.add(name="Work", external_id=WORK_KEY)
     (tmp_path / "task1.md").write_text("# Sprite sheet\nA 32x32 hero.\n\n[Asset]\n")
     (tmp_path / "task2.md").write_text("# Movement\nWire the input.\n")
@@ -402,8 +402,8 @@ def test_add_comment_escapes_like_a_description(plane):
 
 
 def test_sub_work_serial_reads_the_generation_tail():
-    assert mission.sub_work_serial("pj-demo/mission-x@2#3") == 3
-    assert mission.sub_work_serial("pj-demo/mission-x") > 1000
+    assert mission.sub_work_serial("pj-demo/workplan-x@2#3") == 3
+    assert mission.sub_work_serial("pj-demo/workplan-x") > 1000
     assert mission.sub_work_serial(None) > 1000
 
 
@@ -529,11 +529,11 @@ def test_next_work_skips_a_project_without_the_auto_label(monkeypatch):
 def test_asset_topic_and_key_name_one_topic_per_asset_work():
     """One topic per asset work is load-bearing: agforge keys one Work per
     `<channel>/<topic>`, so reuse would overwrite the ledger entry."""
-    assert mission.asset_topic("i9") == "create-asset_i9"
-    assert mission.asset_order_key("pj-demo", "i9") == "pj-demo/create-asset_i9"
-    # agforge's listener matches only the `create-` prefix, and the
-    # underscore keeps this clear of its own `create-<stamp>-<id>` names.
-    assert mission.asset_topic("i9").startswith("create-")
+    assert mission.asset_topic("i9") == "assetplan-asset_i9"
+    assert mission.asset_order_key("pj-demo", "i9") == "pj-demo/assetplan-asset_i9"
+    # agforge's listener matches only the `assetplan-` prefix, and the
+    # underscore keeps this clear of its own `assetplan-<stamp>-<id>` names.
+    assert mission.asset_topic("i9").startswith("assetplan-")
 
 
 def asset_plane(monkeypatch, *, issue, issues=(), groups=None):
@@ -556,7 +556,7 @@ def test_asset_order_is_absent_until_agforge_has_a_work(monkeypatch):
     seen = asset_plane(monkeypatch, issue=None)
     assert mission.asset_order("p1", "pj-demo", "i9") == ("absent", None)
     # Keyed under agforge's source, never autolab's.
-    assert seen == [("agforge", "pj-demo/create-asset_i9")]
+    assert seen == [("agforge", "pj-demo/assetplan-asset_i9")]
 
 
 def test_asset_order_is_working_while_agforge_has_not_finished(monkeypatch):
@@ -607,7 +607,7 @@ def test_write_mission_workspace_writes_mission_and_live_tasks(tmp_path, monkeyp
     workspace_plane(monkeypatch, issue={"id": "w1"}, issues=issues,
                     groups={"live": "unstarted", "gone": "cancelled"})
 
-    assert mission.write_mission_workspace(tmp_path, "demo", "pj-demo", "mission-x") is True
+    assert mission.write_mission_workspace(tmp_path, "demo", "pj-demo", "workplan-x") is True
     assert (tmp_path / "mission.md").read_text() == "# Build it\n\nWith A & B.\n"
     assert (tmp_path / "task1.md").read_text() == "# First\n\ndo this\n"
     assert (tmp_path / "task2.md").read_text() == "# Second\n\ndo that\n"
@@ -616,11 +616,11 @@ def test_write_mission_workspace_writes_mission_and_live_tasks(tmp_path, monkeyp
 
 def test_write_mission_workspace_without_a_work_writes_nothing(tmp_path, monkeypatch):
     workspace_plane(monkeypatch, issue=None, issues=[], groups={})
-    assert mission.write_mission_workspace(tmp_path, "demo", "pj-demo", "mission-x") is False
+    assert mission.write_mission_workspace(tmp_path, "demo", "pj-demo", "workplan-x") is False
     assert list(tmp_path.iterdir()) == []
 
 
-# --- the Sub-Work a run- topic is bound to ---------------------------------
+# --- the Sub-Work a workrun- topic is bound to ---------------------------------
 
 
 def test_run_target_reads_the_task_at_a_serial_and_its_mission(plane):

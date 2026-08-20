@@ -63,8 +63,8 @@ EXTERNAL_SOURCE = "agautolab"
 AUTO_LABEL = "AUTO"
 # A Sub-Work that needs a media asset before it can be coded. The marker is
 # the superdirector's, written at the very end of a `task[N].md`; the label is
-# what `handle_run` reads back off the issue, because Plane — not the file —
-# is the ledger from registration onwards.
+# what `handle_workrun` reads back off the issue, because Plane — not the
+# file — is the ledger from registration onwards.
 ASSET_LABEL = "asset"
 ASSET_MARKER = "[Asset]"
 
@@ -75,10 +75,10 @@ ASSET_MARKER = "[Asset]"
 # One topic per asset work is load-bearing: agforge keys one Plane Work per
 # `<channel>/<topic>`, so reusing a topic would overwrite the ledger entry and
 # mix two specs into one chatlog. The underscore keeps the name clear of
-# agforge's own `create-YYYYMMDD-HHMMSS-<id>` hyphenation, and agforge's
-# listener matches only the `create-` prefix — the rest is free.
+# agforge's own `assetplan-YYYYMMDD-HHMMSS-<id>` hyphenation, and agforge's
+# listener matches only the `assetplan-` prefix — the rest is free.
 AGFORGE_SOURCE = "agforge"
-ASSET_TOPIC_PREFIX = "create-asset_"
+ASSET_TOPIC_PREFIX = "assetplan-asset_"
 
 TASK_FILE = re.compile(r"^task(?P<number>\d+)\.md$")
 SUB_WORK_SERIAL = re.compile(r"#(?P<number>\d+)\s*$")
@@ -373,7 +373,7 @@ def eligible_works(issues: list[dict], groups: dict[str, str], label_id: str) ->
 
 @dataclass(frozen=True)
 class Work:
-    """One chosen Work, with everything a `run-` serving needs of it.
+    """One chosen Work, with everything a `workrun-` serving needs of it.
 
     `is_asset` is read off the issue's labels, not off any file: the
     `task[N].md` that carried the `[Asset]` marker was deleted the moment
@@ -433,12 +433,12 @@ def next_work() -> Work | None:
     )
 
 
-# --- the Sub-Work one run- topic is bound to -------------------------------
+# --- the Sub-Work one workrun- topic is bound to ---------------------------
 
 
 @dataclass(frozen=True)
 class RunTarget:
-    """The Sub-Work a `run-` topic serves, and the gate in front of it.
+    """The Sub-Work a `workrun-` topic serves, and the gate in front of it.
 
     `blocked_by` is the label of the immediately preceding task when that one
     is not in a `completed` state — the handler answers with it and never
@@ -507,7 +507,7 @@ def run_target(project: str, channel: str, topic: str, serial: int) -> RunTarget
 
 
 def asset_topic(issue_id: str) -> str:
-    """The `create-` topic one asset Work is ordered and answered in."""
+    """The `assetplan-` topic one asset Work is ordered and answered in."""
     return f"{ASSET_TOPIC_PREFIX}{issue_id}"
 
 
@@ -611,10 +611,10 @@ def upsert_work(
     this is the topic's first mission.
 
     Returns `(report line, work label)`. The label travels because the caller
-    names the mission's Zulip channel and its `run-` topics after it
-    (`work-pa-12`, `run-task1-pa-12`), and re-looking the Work up would be a
-    second round trip for something this call already holds. It is the label
-    rather than the issue because composing one needs the Plane *project* row
+    names the mission's Zulip channel and its `workrun-` topics after it
+    (`work-pa-12`, `workrun-task1-pa-12`), and re-looking the Work up would
+    be a second round trip for something this call already holds. It is the
+    label rather than the issue because composing one needs the Plane *project* row
     too, and that row only exists in here.
     """
     config, plane_project, project_id = _prepare(project)
@@ -697,7 +697,7 @@ def reconcile_task_files(
 
     - the serial exists → title and description are updated in place and the
       **state is left alone**, which is what keeps a completed task completed
-      and the `run-` gate meaningful;
+      and the `workrun-` gate meaningful;
     - the serial is new → the Sub-Work is created, keyed `<channel>/<topic>#<N>`;
     - the serial disappeared from the split → that Sub-Work is cancelled.
 
@@ -705,12 +705,13 @@ def reconcile_task_files(
     sub-issue); it is left alone rather than cancelled.
 
     Returns `(report lines, changes)`. The changes are what
-    `handle_superdirector_response` mirrors onto the mission's `run-` topics,
-    one to one.
+    `handle_superdirector_response` mirrors onto the mission's `workrun-`
+    topics, one to one.
 
     A task file ending in `[Asset]` needs a media asset before it can be
     coded. The marker is stripped from the description and becomes the
-    `asset` label on the issue, which is what the `run-` serving dispatches on.
+    `asset` label on the issue, which is what the `workrun-` serving
+    dispatches on.
     """
     config, plane_project, project_id = _prepare(project)
     issue = find_issue_by_external(config, project_id, work_key(channel, topic))

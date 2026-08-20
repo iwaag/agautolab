@@ -118,7 +118,7 @@ def test_resolution_checks_harness_availability(monkeypatch, tmp_path):
 
 
 def test_supercoder_is_a_configured_role_with_the_working_grant():
-    """A run- serving resolves `supercoder`; without an allowlist entry
+    """A workrun- serving resolves `supercoder`; without an allowlist entry
     claude_code would omit `--allowedTools` and wait for an interactive
     permission answer until the timeout."""
     from agautolab.agent_settings import resolve_project_role
