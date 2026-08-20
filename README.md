@@ -27,6 +27,32 @@ its agent configuration:
   These were `mission-`, `run-` and `create-`. There is no compatibility
   shim: an old-prefix topic matches no sweep at all, and the whole realm's
   old-prefix topics were deleted at the cutover.
+- **The instance and its own channel** (`agent_standardize` p4, 2026-08-21).
+  The placement that runs this listener has a name — `.local/instance.toml`,
+  one `name` key, `instance.example.toml` for the shape — and the Zulip
+  channel of that name is its entrance. Every topic there is swept, and
+  **none of them executes anything**: the entrance answers with a redirect to
+  the project's `pj-<slug>` channel, because that channel is the only thing
+  that says which project the work is for. The prefixes above still apply in
+  every other subscribed channel.
+
+  A placement with no Zulip listener — the agautolab1 node — is deliberately
+  left unnamed: it owns no channel and answers nothing, so a name would
+  advertise an entrance that does not exist.
+- **The introduction** (`params/intro.md`). autolab's self-description, and
+  the contract another agent reads to learn all of the above. Post it with:
+
+  ```bash
+  uv run python -m agautolab.intro
+  ```
+
+  It appends to `#agents` under `intro-<instance>`, stamped with the date and
+  the checked-out revision; nothing deduplicates, so the newest post is the
+  current contract. `{instance}` in the file is filled in as it is posted, so
+  the tracked file carries no host label. **Re-post it whenever the behavior
+  it describes changes** — an agent that reads a stale introduction will act
+  on it. Proven in p4: agfront reached this agent for the first time knowing
+  nothing but that post.
 - **The agent configuration**: `agents.toml` (five roles, three profiles, the
   models behind them), the ignored `.local/agents.local.toml` overlay, the
   per-role tool grants in `src/agautolab/role_run.py`. Those grants are
