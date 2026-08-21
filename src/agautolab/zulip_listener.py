@@ -38,6 +38,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from agag.intro import agents_file_path, write_agents_md
+from agag.participation import home_for, remotes_for_home
 from agag.topics import (
     TopicResult,
     chatlog_path,
@@ -48,7 +49,9 @@ from agag.topics import (
     next_record_path as shared_next_record_path,
     prompt_with_guide,
     serve_topic,
+    threads_placement,
     topic_workspace as shared_topic_workspace,
+    write_threads,
 )
 from agag.zulip import (
     RESOLVED_TOPIC_PREFIX,
@@ -83,7 +86,7 @@ from .project_init import (
     load_gitea_config,
 )
 from .instance import instance_name
-from .role_run import run_role
+from .role_run import AGENTCHAT_LEDGER, run_role
 
 AGAUTOLAB_ROOT = Path(__file__).resolve().parents[2]
 ZULIP_ENV = AGAUTOLAB_ROOT / ".local" / "zulip.env"
@@ -143,14 +146,13 @@ CHATLOG_FILE = "chatlog.md"
 # single-threaded and serial, so this is also the delay before the next
 # matching topic is looked at (events keep queueing meanwhile).
 #
-# 3600, not 1200, since `agent_standardize` p6 — the p5 precedent, where
-# `FRONT_TIMEOUT_SECONDS` went 360 → 3600 for the same reason. A task that
-# delegates spends most of its run waiting for another agent, and the other
-# agent's own path can be the sum of several of its runs. A supercoder that
-# gets killed mid-wait is a supervision that stopped, and the topic history is
-# what a re-triggered run reads to resume, so the ceiling is a cost, not a
-# correctness boundary — but paying it once beats resuming three times.
-WORK_TIMEOUT_SECONDS = 3600
+# 1200 again since `agent_standardize` p7. p6 raised it to 3600 on the p5
+# precedent, reasoning that a delegating task waits out forge's whole path.
+# It was never the binding constraint — the supercoder that failed used 254 s
+# of the 3600 and ended its own run on purpose. A delegating task now posts,
+# finishes, and is served again when the answer names this instance, so no
+# single run has anybody to wait for.
+WORK_TIMEOUT_SECONDS = 1200
 # The superdirector reads the whole project — `main/`, `direction/` and
 # `devlog/` — and the chatlog before it plans. It does not wait on anyone, so
 # it keeps the pre-p6 ceiling.
@@ -174,6 +176,7 @@ __all__ = [
     "generation_dir",
     "guide",
     "handle_bmining",
+    "handle_mention",
     "handle_workrun",
     "handle_superdirector_response",
     "handle_topic",
@@ -557,7 +560,7 @@ def handle_superdirector_response(
     return sections, resolve_after
 
 
-def supercoder_prompt(bot_name: str, workspace: Path, task: str) -> str:
+def supercoder_prompt(bot_name: str, workspace: Path, task: str, threads=()) -> str:
     """The placement lines, the task, then the guide — `superdirector_prompt`'s
     shape: read from and write to the workspace by absolute path, work in the
     project itself.
@@ -570,6 +573,12 @@ def supercoder_prompt(bot_name: str, workspace: Path, task: str) -> str:
     lines = [
         f'The conversation with the developer ("{CHATLOG_FILE}") is placed in '
         f'"{workspace}". You are {bot_name!r} in the chatlog.',
+    ]
+    if placement := threads_placement(threads):
+        # Absolute, like every other path in this prompt: the run's working
+        # directory is the project, not the workspace.
+        lines.append(placement)
+    lines += [
         f'The other agents\' own introductions are placed in '
         f'"{agents_file_path(workspace)}".',
         f'Write "{REPORT_FILE}" — and any other file this guide asks for — '
@@ -584,11 +593,16 @@ def supercoder_prompt(bot_name: str, workspace: Path, task: str) -> str:
 
 
 def workrun_supercoder(prompt: str, cwd: Path,
-                   on_event: Callable[[dict], None] | None = None) -> str:
+                   on_event: Callable[[dict], None] | None = None,
+                   home: tuple[str, str] | None = None) -> str:
     """One task-serving run in the project folder, with its record.
 
     Like the superdirector it runs where `main/`, `direction/` and `devlog/`
     are real directories, and its serving workspace travels by absolute path.
+
+    `home` is the `workrun-` conversation this task is. A request this run
+    posts to another agent is recorded against it, so the answer brings the
+    task back rather than being waited for inside this run.
     """
     record = next_record_path(RECORDS_ROOT / "supercoder")
     output, _, exit_code = run_role(
@@ -597,6 +611,7 @@ def workrun_supercoder(prompt: str, cwd: Path,
         cwd=cwd,
         timeout=WORK_TIMEOUT_SECONDS,
         record=record,
+        home=home,
         on_event=on_event,
     )
     if exit_code != 0:
@@ -845,6 +860,19 @@ def serve_run(context) -> TopicResult:
         format_chatlog(context.history, context.self_id), encoding="utf-8"
     )
 
+    context.step = "threads"
+    threads = write_threads(
+        context.client,
+        workspace,
+        [
+            conversation.as_pair()
+            for conversation in remotes_for_home(
+                AGENTCHAT_LEDGER, context.channel, context.topic
+            )
+        ],
+        context.self_id,
+    )
+
     context.step = "harvest"
     write_agents_md(context.client, workspace)
 
@@ -852,13 +880,16 @@ def serve_run(context) -> TopicResult:
     task_text = compose_document(
         target.work.name, description_html(target.work.description)
     )
+    # Into the task's own topic, whichever conversation this serving answers
+    # in: progress belongs where the task lives.
     progress = RunProgress(context.client, context.channel, context.topic)
     try:
         sections.append(
             workrun_supercoder(
-                supercoder_prompt(context.bot_name, workspace, task_text),
+                supercoder_prompt(context.bot_name, workspace, task_text, threads),
                 project_directory(slug),
                 on_event=progress,
+                home=(context.channel, context.topic),
             )
         )
     finally:
@@ -887,10 +918,16 @@ def serve_run(context) -> TopicResult:
     return TopicResult(sections, resolve_after=True)
 
 
-def handle_workrun(client: ZulipClient, channel: str, topic: str) -> None:
+def handle_workrun(
+    client: ZulipClient, channel: str, topic: str,
+    reply_to: tuple[str, str] | None = None,
+) -> None:
     """Serve one awaiting `workrun-` topic through the shared skeleton."""
     log(f"workrun topic {channel!r}/{topic!r}")
-    serve_topic(client, channel, topic, serve_run, ack_text=ACK_TEXT, empty_reply=EMPTY_REPLY)
+    serve_topic(
+        client, channel, topic, serve_run,
+        ack_text=ACK_TEXT, empty_reply=EMPTY_REPLY, reply_to=reply_to,
+    )
 
 
 # --- brain-mining discussion on bmining- topics -----------------------------
@@ -980,6 +1017,31 @@ def handle_bmining(client: ZulipClient, channel: str, topic: str) -> None:
     serve_topic(client, channel, topic, serve_bmining, ack_text=ACK_TEXT, empty_reply=EMPTY_REPLY)
 
 
+def handle_mention(client: ZulipClient, channel: str, topic: str) -> None:
+    """This instance was named in a topic it does not own: serve the task it
+    was speaking for.
+
+    A `workrun-` task that delegates posts into another agent's topic and
+    ends. When that agent answers and names this instance, the ledger says
+    which task the request was made for; that task is served again — its
+    workspace, its chatlog, its Plane Sub-Work, the remote thread beside them
+    — and the reply goes back into the topic that asked, because that is
+    where the conversation is.
+
+    Only `workrun-` topics delegate today, so a participation recorded for
+    anything else is logged and dropped rather than guessed at.
+    """
+    home = home_for(AGENTCHAT_LEDGER, channel, topic)
+    if home is None:
+        log(f"mention in {channel!r}/{topic!r} matches no participation; ignoring")
+        return
+    if not home.topic.startswith(WORKRUN_TOPIC_PREFIX):
+        log(f"mention in {channel!r}/{topic!r} is for {home}, which is not a task; ignoring")
+        return
+    log(f"mention in {channel!r}/{topic!r} serves {home}")
+    handle_workrun(client, home.channel, home.topic, reply_to=(channel, topic))
+
+
 def observe_topic(channel: str, topic: str) -> None:
     """Passive handler (`AUTOLAB_ZULIP_LOG_ONLY=1`): log sweep matches, never act."""
     log(f"observed sweep match {channel!r}/{topic!r}")
@@ -1044,21 +1106,29 @@ def main() -> None:
     client = ZulipClient.from_env(ZULIP_ENV)
     if os.environ.get("AUTOLAB_ZULIP_LOG_ONLY") == "1":
         handler = observe_topic
+        mention_handler = observe_topic
     else:
         def handler(channel: str, topic: str) -> None:
             dispatch(client, channel, topic)
 
-    # No subscription reconciliation: what this listener is subscribed to is
-    # the project creator's decision about who the work goes to, not something
-    # a listener may widen on its own. See pyagag's README, "Subscription is
-    # the routing decision".
+        def mention_handler(channel: str, topic: str) -> None:
+            handle_mention(client, channel, topic)
+
+    # No subscription reconciliation here: what this listener is subscribed to
+    # is the project creator's decision about who the work goes to, not
+    # something a listener may widen on its own. The one thing that does widen
+    # it is a run posting somewhere — `agentchat send` joins the channel it
+    # posts into, because being in the room is what makes the answer arrive.
+    # Posting *is* the routing decision; a listener guessing is not.
     log(
         "agautolab zulip listener starting "
         f"(pull sweep: all topics in {instance_name()!r}, "
-        f"prefixes {SWEEP_PREFIXES} elsewhere)"
+        f"prefixes {SWEEP_PREFIXES} elsewhere, plus mentions)"
     )
     try:
-        sweep_serve(client, handler, topic_filter=topic_filter)
+        sweep_serve(
+            client, handler, topic_filter=topic_filter, on_mention=mention_handler
+        )
     except KeyboardInterrupt:
         log("stopped")
 

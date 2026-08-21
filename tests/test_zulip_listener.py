@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from agag import topics
+from agag import participation, topics
 from agag.topics import GuideError
 
 from agautolab import zulip_listener
@@ -201,7 +201,9 @@ def test_handle_topic_acks_then_runs_the_steps_in_order(monkeypatch, tmp_path):
     # The trailing history read is the post-run re-check for human messages
     # that arrived during the run (none here, so the handler leaves).
     assert [call[0] for call in calls] == [
-        "whoami", "write", "history", "init", "plane", "superdirector", "write", "history",
+        "whoami", "write", "history", "init", "plane", "superdirector",
+        # the handoff lookup, the reply, then the post-run re-check
+        "history", "write", "history",
     ]
     # The ack is the first post, before any work: it makes the bot the last
     # poster so a later sweep skips the topic while this run is in flight.
@@ -216,7 +218,7 @@ def test_handle_topic_acks_then_runs_the_steps_in_order(monkeypatch, tmp_path):
     assert calls[5][2] == project_dir(tmp_path)
     assert str(workspace) in calls[5][1]
     assert "currently registered mission" not in calls[5][1]
-    assert calls[6][1:3] == (TOPIC, "planner says hi")
+    assert calls[7][1:3] == (TOPIC, HANDOFF + "planner says hi")
 
 
 def test_each_serving_cuts_a_new_generation(monkeypatch, tmp_path):
@@ -644,8 +646,11 @@ def test_handle_topic_reprocesses_when_a_human_posted_during_the_run(monkeypatch
     class ScriptedClient(Client):
         def __init__(self):
             super().__init__(calls)
-            # chatlog read, re-check (fresh human post), chatlog read, re-check
-            self.scripts = [[first], [first, mid_run], [first, mid_run], [first, mid_run]]
+            # per round: chatlog read, handoff lookup, re-check — twice.
+            self.scripts = [
+                [first], [first], [first, mid_run],
+                [first, mid_run], [first, mid_run], [first, mid_run],
+            ]
 
         def topic_history(self, channel, topic, num_before):
             calls.append(("history", channel, topic, num_before))
@@ -724,8 +729,16 @@ def last_reply(calls):
     return calls_of(calls, "write")[-1][2]
 
 
+#: What `serve_topic` prefixes every reply with: the last other speaker, so
+#: their next turn happens. In these suites that is always the Developer.
+HANDOFF = "@**Developer**\n\n"
+
+
 def wire_run(monkeypatch, tmp_path, calls, *, target=TARGET, report=None,
-             output="work done", pushed=True):
+             output="work done", pushed=True, ledger=None):
+    monkeypatch.setattr(
+        zulip_listener, "AGENTCHAT_LEDGER", ledger or (tmp_path / "ledger.jsonl")
+    )
     monkeypatch.setattr(zulip_listener, "PROJECTS_ROOT", tmp_path / "projects")
     monkeypatch.setattr(zulip_listener, "TOPICS_ROOT", tmp_path / "topics")
     monkeypatch.setattr(zulip_listener, "RECORDS_ROOT", tmp_path / "records")
@@ -750,8 +763,8 @@ def wire_run(monkeypatch, tmp_path, calls, *, target=TARGET, report=None,
         lambda topic, text, **kwargs: calls.append(("write", topic, text, kwargs)) or "success",
     )
 
-    def supercoder(prompt, cwd, on_event=None):
-        calls.append(("supercoder", prompt, cwd))
+    def supercoder(prompt, cwd, on_event=None, home=None):
+        calls.append(("supercoder", prompt, cwd, home))
         workspace = Path(re.search(r'is placed in "([^"]+)"', prompt).group(1))
         if report is not None:
             (workspace / "report.md").write_text(report)
@@ -798,7 +811,7 @@ def test_a_run_topic_that_is_not_bound_to_a_task_is_explained(monkeypatch, tmp_p
     zulip_listener.handle_workrun(RunClient(calls), channel, topic)
 
     assert not any(call[0] in {"target", "supercoder"} for call in calls)
-    assert last_reply(calls) == zulip_listener.WRONG_PLACE_REPLY
+    assert last_reply(calls) == HANDOFF + zulip_listener.WRONG_PLACE_REPLY
 
 
 def test_the_previous_task_gate_answers_before_any_cost(monkeypatch, tmp_path):
@@ -810,7 +823,7 @@ def test_the_previous_task_gate_answers_before_any_cost(monkeypatch, tmp_path):
     zulip_listener.handle_workrun(RunClient(calls), WORK_CHANNEL, WORKRUN_TOPIC)
 
     assert not any(call[0] in {"init", "supercoder"} for call in calls)
-    assert last_reply(calls) == f"{zulip_listener.PREVIOUS_WORK_REPLY} (PD-5)"
+    assert last_reply(calls) == HANDOFF + f"{zulip_listener.PREVIOUS_WORK_REPLY} (PD-5)"
 
 
 def test_a_serving_runs_the_supercoder_in_the_project_with_its_workspace(monkeypatch, tmp_path):
@@ -825,7 +838,12 @@ def test_a_serving_runs_the_supercoder_in_the_project_with_its_workspace(monkeyp
     # The serial comes from the topic name, the project and mission key from
     # the channel description.
     assert calls_of(calls, "target")[0][1:] == ("demo-project", CHANNEL, "workplan-one", 2)
-    prompt, cwd = next((call[1], call[2]) for call in calls if call[0] == "supercoder")
+    prompt, cwd, home = next(
+        (call[1], call[2], call[3]) for call in calls if call[0] == "supercoder"
+    )
+    # The run posts as this task. Whatever it asks another agent is recorded
+    # against this topic, so the answer brings the task back.
+    assert home == (WORK_CHANNEL, WORKRUN_TOPIC)
     workspace = supercoder_dir(tmp_path)
     assert cwd == tmp_path / "projects" / "demo-project"
     assert str(workspace) in prompt
@@ -836,7 +854,7 @@ def test_a_serving_runs_the_supercoder_in_the_project_with_its_workspace(monkeyp
     assert (workspace / "chatlog.md").read_text() == "[Developer] Build it\n"
     # No report: the conversation is simply not finished. Nothing closes.
     assert not any(call[0] in {"report", "push"} for call in calls)
-    assert last_reply(calls) == "work done"
+    assert last_reply(calls) == HANDOFF + "work done"
 
 
 def test_each_serving_of_a_run_topic_cuts_a_new_generation(monkeypatch, tmp_path):
@@ -914,7 +932,7 @@ def test_a_failed_supercoder_run_is_reported_into_the_topic(monkeypatch, tmp_pat
     calls = []
     wire_run(monkeypatch, tmp_path, calls)
 
-    def explode(prompt, cwd, on_event=None):
+    def explode(prompt, cwd, on_event=None, home=None):
         raise zulip_listener.ListenerError("claude_code timed out")
 
     monkeypatch.setattr(zulip_listener, "workrun_supercoder", explode)
@@ -1110,7 +1128,7 @@ def test_handle_bmining_places_chatlog_runs_director_and_replies(monkeypatch, tm
     assert directed[2] == direction
     assert "BMINING GUIDE" in directed[1]
     assert '".local/work/chatlog.md"' in directed[1]
-    assert last_reply(calls) == "director says hi"
+    assert last_reply(calls) == HANDOFF + "director says hi"
 
 
 def test_bmining_work_directory_is_removed_after_the_reply(monkeypatch, tmp_path):
@@ -1227,7 +1245,7 @@ def test_a_serving_posts_the_progress_tail_before_the_outcome(monkeypatch, tmp_p
     calls = []
     wire_run(monkeypatch, tmp_path, calls)
 
-    def streaming_run(prompt, cwd, on_event=None):
+    def streaming_run(prompt, cwd, on_event=None, home=None):
         on_event({"type": "assistant", "message": {"role": "assistant", "content": [
             {"type": "tool_use", "id": "t1", "name": "Bash",
              "input": {"command": "uv run pytest"}}]}})
@@ -1324,3 +1342,89 @@ def test_the_entrance_reply_names_the_instance_and_the_workplan_contract(monkeyp
     assert "autolab-here1" in reply
     assert "workplan-" in reply
     assert "pj-" in reply
+
+
+# --- the callback: a delegation that outlives its run ----------------------
+
+
+FORGE_CHANNEL = "agforge-agstudio1"
+FORGE_TOPIC = "assetplan-enemy-sprite"
+
+
+class DelegatingClient(RunClient):
+    """A `RunClient` that also holds the remote conversation."""
+
+    def __init__(self, calls, remote_history=None):
+        super().__init__(calls)
+        self.remote_history = remote_history or [
+            history_message(sender_id=13, name="Forge", content="Work registered as F2-9.")
+        ]
+
+    def topic_history(self, channel, topic, num_before):
+        if channel == FORGE_CHANNEL:
+            self.calls.append(("history", channel, topic, num_before))
+            return list(self.remote_history)
+        return super().topic_history(channel, topic, num_before)
+
+
+def record_delegation(ledger, home_topic=WORKRUN_TOPIC):
+    participation.record(
+        ledger,
+        remote=participation.Conversation(FORGE_CHANNEL, FORGE_TOPIC),
+        home=participation.Conversation(WORK_CHANNEL, home_topic),
+        message_id=77,
+    )
+
+
+def test_a_mention_serves_the_task_the_request_was_made_for(monkeypatch, tmp_path):
+    """p7's whole shape for autolab: the run that delegated is long over, and
+    forge's answer is what starts the next one."""
+    calls = []
+    ledger = tmp_path / "ledger.jsonl"
+    wire_run(monkeypatch, tmp_path, calls, ledger=ledger)
+    record_delegation(ledger)
+
+    zulip_listener.handle_mention(DelegatingClient(calls), FORGE_CHANNEL, FORGE_TOPIC)
+
+    prompt, _, home = next(
+        (call[1], call[2], call[3]) for call in calls if call[0] == "supercoder"
+    )
+    # The task is the subject: same workspace, same chatlog, same Plane target.
+    assert home == (WORK_CHANNEL, WORKRUN_TOPIC)
+    assert calls_of(calls, "target")[0][1:] == ("demo-project", CHANNEL, "workplan-one", 2)
+    workspace = supercoder_dir(tmp_path)
+    assert (workspace / "chatlog.md").read_text() == "[Developer] Build it\n"
+    # forge's conversation is a file beside it, and the prompt says where.
+    thread = workspace / "threads" / FORGE_CHANNEL / f"{FORGE_TOPIC}.md"
+    assert "Work registered as F2-9." in thread.read_text()
+    assert f'"{thread}"' in prompt
+    # Everything posted went back to forge's topic; the task's own topic got
+    # only what RunProgress puts there.
+    assert {call[3].get("channel") for call in calls_of(calls, "write")} == {FORGE_CHANNEL}
+    assert last_reply(calls) == "@**Forge**\n\nwork done"
+
+
+def test_a_mention_no_task_delegated_to_costs_no_run(monkeypatch, tmp_path):
+    calls = []
+    wire_run(monkeypatch, tmp_path, calls)
+    zulip_listener.handle_mention(RunClient(calls), FORGE_CHANNEL, FORGE_TOPIC)
+    assert calls == []
+
+
+def test_a_participation_that_is_not_a_task_is_not_guessed_at(monkeypatch, tmp_path):
+    """Only `workrun-` topics delegate today. A ledger line pointing anywhere
+    else is logged and dropped rather than routed by guesswork."""
+    calls = []
+    ledger = tmp_path / "ledger.jsonl"
+    wire_run(monkeypatch, tmp_path, calls, ledger=ledger)
+    record_delegation(ledger, home_topic="bmining-idea")
+    zulip_listener.handle_mention(RunClient(calls), FORGE_CHANNEL, FORGE_TOPIC)
+    assert calls == []
+
+
+def test_a_task_with_no_delegation_gets_no_threads_sentence(monkeypatch, tmp_path):
+    calls = []
+    wire_run(monkeypatch, tmp_path, calls)
+    zulip_listener.handle_workrun(RunClient(calls), WORK_CHANNEL, WORKRUN_TOPIC)
+    prompt = next(call[1] for call in calls if call[0] == "supercoder")
+    assert "threads" not in prompt
