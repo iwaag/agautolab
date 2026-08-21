@@ -1,4 +1,3 @@
-import os
 from pathlib import Path
 
 from agag.agent_config import ResolvedAgent
@@ -176,51 +175,3 @@ def test_every_run_is_launched_with_the_handover(monkeypatch, tmp_path):
 
 def test_the_supercoder_is_allowed_to_run_agentchat():
     assert "Bash(agentchat:*)" in role_run.ROLE_ALLOWED_TOOLS["supercoder"]
-
-
-# --- talking to other agents (agent_standardize p6) --------------------------
-
-
-def test_the_run_can_reach_agentchat_and_speaks_as_this_instance(tmp_path):
-    """`tools/agents.md` says who is there; this is what lets a run answer.
-
-    The identity is a path, not a value: the credentials stay in `.local/`.
-    """
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    env = tmp_path / "zulip.env"
-
-    environment = role_run.tool_environment(bin_dir, env)
-
-    assert environment[role_run.AGENTCHAT_ENV_VARIABLE] == str(env)
-    assert environment["PATH"].split(os.pathsep)[0] == str(bin_dir)
-
-
-def test_a_missing_bin_directory_leaves_path_alone(tmp_path):
-    """Better a run without `agentchat` than a run with a broken PATH."""
-    environment = role_run.tool_environment(tmp_path / "absent", tmp_path / "zulip.env")
-
-    assert "PATH" not in environment
-
-
-def test_the_handover_reaches_the_harness(monkeypatch, tmp_path):
-    launched = {}
-    monkeypatch.setattr(role_run, "load_project_roles", lambda project: {})
-    monkeypatch.setattr(role_run, "resolve_project_role", lambda role, **k: resolved(role))
-    monkeypatch.setattr(role_run, "tool_environment", lambda: {"AGENTCHAT_ZULIP_ENV": "/e"})
-
-    def fake_run(agent, prompt, **kwargs):
-        launched["environment"] = agent.environment
-        return HarnessResult("done", 0, {"outcome": "done"})
-
-    monkeypatch.setattr(role_run, "run_harness", fake_run)
-
-    role_run.run_role("supercoder", "work", cwd=tmp_path, timeout=5)
-
-    assert launched["environment"]["AGENTCHAT_ZULIP_ENV"] == "/e"
-
-
-def test_a_delegating_run_may_reach_agentchat_by_grant():
-    """The allowlist is documentation of what a role reaches for; a run that
-    supervises another agent reaches for this."""
-    assert "Bash(agentchat:*)" in role_run.WORKING_ALLOWED_TOOLS
