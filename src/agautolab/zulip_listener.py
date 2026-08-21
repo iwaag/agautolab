@@ -18,6 +18,24 @@ channel per mission Work, holding one `workrun-task<N>-<label>` topic per
 Sub-Work, in the folder of the project's own `pj-` channel and with its
 subscribers.
 
+Since `agent_standardize` p9 a `workrun-` topic **says what it is for**: it is
+opened with a `[selfnote][rootchat]` note naming the mission conversation and
+a `[selfnote][work]` note naming its Plane Sub-Work (`anchor.py`), before the
+visible task description, so the description stays the topic's last real post
+and opening a topic fires nothing. A serving reads its project and its task
+off those notes instead of out of the topic's name and its channel's
+description. The description is still written, for a human opening the
+channel; it is no longer what the code reads.
+
+The same phase moved delegation onto the chat. A task that asks another agent
+posts, ends, and is served again when the answer names this instance — and
+that serving **replies at home**, in the task's own topic, with the topic
+that answered placed beside the chatlog as a thread. Speaking to the other
+agent is a deliberate `agentchat send` inside the run. There is no
+participation ledger; the memory is the root note `agentchat send` wrote, and
+a callback that has been answered is marked with a `[selfnote][served]` note
+so a listener restart does not run the supercoder again.
+
 The superdirector serves the topic alone — there is no front relay. It runs
 in the persistent project folder, where `main/`, `direction/` and `devlog/`
 are real directories (symlinking them into the workspace was tried first, and
@@ -38,7 +56,6 @@ from collections.abc import Callable
 from pathlib import Path
 
 from agag.intro import agents_file_path, write_agents_md
-from agag.participation import home_for, remotes_for_home
 from agag.topics import (
     TopicResult,
     chatlog_path,
@@ -58,9 +75,14 @@ from agag.zulip import (
     ZulipClient,
     ZulipError,
     log,
+    note_served,
+    remotes_for_home,
+    rootchat_home,
     sweep_serve,
     topic_write,
 )
+
+from .anchor import Conversation, own_rootchat, own_work, rootchat_note, work_note
 
 from .mission import (
     RunTarget,
@@ -86,7 +108,7 @@ from .project_init import (
     load_gitea_config,
 )
 from .instance import instance_name
-from .role_run import AGENTCHAT_LEDGER, run_role
+from .role_run import run_role
 
 AGAUTOLAB_ROOT = Path(__file__).resolve().parents[2]
 ZULIP_ENV = AGAUTOLAB_ROOT / ".local" / "zulip.env"
@@ -111,13 +133,10 @@ SWEEP_PREFIXES = (
 WORK_CHANNEL_PREFIX = "work-"
 HISTORY_MESSAGES = 1000
 
-# The channel description carries the binding a `workrun-` serving needs back.
-# Parsing `work-pa-12` recovers the Work label and nothing else — not the
-# project slug, not which workplan topic planned it — so both travel here.
-WORK_CHANNEL_BINDING = re.compile(
-    r"project:\s*(?P<slug>\S+?)\s*;\s*mission:\s*(?P<channel>[^/;]+)/(?P<topic>[^;]+?)\s*$"
-)
-WORKRUN_TOPIC_NAME = re.compile(r"^workrun-task(?P<serial>\d+)-(?P<work>.+)$")
+# The channel description still carries the binding in human-readable form —
+# `project: …; mission: …` — because somebody opening `work-pa-12` should be
+# able to see what it is for. Since `agent_standardize` p9 the code reads the
+# topic's own selfnotes instead (`anchor.py`), so nothing parses this back.
 
 ACK_TEXT = "Message received. Please wait for the reply."
 EMPTY_REPLY = "There is nothing in this topic to answer yet."
@@ -187,7 +206,7 @@ __all__ = [
     "main",
     "next_record_path",
     "prepare_run_surfaces",
-    "parse_run_topic",
+    "run_binding",
     "progress_line",
     "workrun_supercoder",
     "run_topic",
@@ -205,7 +224,6 @@ __all__ = [
     "topic_filter",
     "topic_workspace",
     "work_channel",
-    "work_channel_binding",
     "work_channel_description",
 ]
 
@@ -311,7 +329,8 @@ def serve(context) -> TopicResult:
 
     context.step = "response handling"
     response_sections, resolve_after = handle_superdirector_response(
-        context.client, context.channel, context.topic, project, workspace
+        context.client, context.channel, context.topic, project, workspace,
+        context.self_id,
     )
     sections.extend(response_sections)
     return TopicResult(sections, resolve_after=resolve_after)
@@ -439,8 +458,38 @@ def live_topic_name(client: ZulipClient, channel: str, topic: str) -> str:
     return resolved if resolved in names and topic not in names else topic
 
 
+def anchor_run_topic(
+    client: ZulipClient,
+    channel: str,
+    topic: str,
+    mission: Conversation,
+    issue_id: str,
+    self_id: int,
+) -> None:
+    """Write the two selfnotes that say what this `workrun-` topic is for.
+
+    Before the visible task description, so the description stays the topic's
+    last real post and opening a topic fires nothing — a selfnote is never
+    somebody speaking. `agautolab.anchor` has the shape and the reasoning.
+
+    Idempotent by the work note: a topic already anchored is left alone, so a
+    re-plan that re-creates a serial does not write a second pair.
+    """
+    try:
+        history = client.topic_history(channel, topic, num_before=HISTORY_MESSAGES)
+    except ZulipError as error:
+        log(f"could not read {channel!r}/{topic!r} before anchoring: {error!r}")
+        history = []
+    if own_work(history, self_id) is not None:
+        return
+    topic_write(topic, rootchat_note(mission), channel=channel, client=client)
+    if issue_id:
+        topic_write(topic, work_note(issue_id), channel=channel, client=client)
+
+
 def mirror_task_changes(
-    client: ZulipClient, channel: str, label: str, changes: list[TaskChange]
+    client: ZulipClient, channel: str, label: str, changes: list[TaskChange],
+    mission: Conversation, self_id: int,
 ) -> list[str]:
     """Mirror one re-plan onto the mission's `workrun-` topics, one to one.
 
@@ -454,6 +503,7 @@ def mirror_task_changes(
     for change in changes:
         topic = run_topic(change.serial, label)
         if change.action == "created":
+            anchor_run_topic(client, channel, topic, mission, change.issue_id, self_id)
             topic_write(topic, change.document, channel=channel, client=client)
             lines.append(f"opened {channel}/{topic}")
         elif change.action == "updated":
@@ -478,11 +528,21 @@ def mirror_task_changes(
 
 def prepare_run_surfaces(
     client: ZulipClient, slug: str, channel: str, topic: str, label: str,
-    changes: list[TaskChange],
+    changes: list[TaskChange], self_id: int,
 ) -> list[str]:
-    """The whole Zulip side of one planning round."""
+    """The whole Zulip side of one planning round.
+
+    `channel`/`topic` is the mission conversation, and every task topic this
+    opens is anchored back to it — that root note is what a serving reads its
+    project and its mission off, and what the channel description used to
+    carry alone.
+    """
     name = ensure_work_channel(client, slug, channel, topic, label)
-    return [f"work channel {name} is ready", *mirror_task_changes(client, name, label, changes)]
+    mission = Conversation(channel, topic)
+    return [
+        f"work channel {name} is ready",
+        *mirror_task_changes(client, name, label, changes, mission, self_id),
+    ]
 
 
 def archive_work_channel(client: ZulipClient, label: str) -> str:
@@ -501,7 +561,8 @@ def archive_work_channel(client: ZulipClient, label: str) -> str:
 
 
 def handle_superdirector_response(
-    client: ZulipClient, channel: str, topic: str, project: str, workspace: Path
+    client: ZulipClient, channel: str, topic: str, project: str, workspace: Path,
+    self_id: int,
 ) -> tuple[list[str], bool]:
     """Act on what the superdirector wrote: `plan.md`, then the flags.
 
@@ -538,7 +599,9 @@ def handle_superdirector_response(
         lines, changes = reconcile_task_files(project, channel, topic, workspace)
         sections.extend(lines)
         sections.extend(
-            prepare_run_surfaces(client, project, channel, topic, label, changes)
+            prepare_run_surfaces(
+                client, project, channel, topic, label, changes, self_id
+            )
         )
 
     start_flag = workspace / "start.flag"
@@ -730,41 +793,36 @@ def remove_work_directory(work_dir: Path) -> None:
 REPORT_FILE = "report.md"
 WRONG_PLACE_REPLY = (
     "This `workrun-` topic is not bound to any task. A workrun topic is "
-    "created by planning a mission: it is named "
-    "`workrun-task<N>-<work label>` and lives in that mission's "
-    "`work-<work label>` channel. Post in the workplan topic to plan or "
-    "re-plan, and the topics will appear."
+    "opened by planning a mission, and says which task it runs; a topic made "
+    "by hand says nothing and runs nothing. Post in the workplan topic to "
+    "plan or re-plan, and the topics will appear."
 )
 PREVIOUS_WORK_REPLY = "Please complete previous work"
 
 
-def parse_run_topic(channel: str, topic: str) -> int | None:
-    """The task serial this topic serves, or None when it serves none.
+def run_binding(history: list[dict], self_id: int) -> tuple[str, str] | None:
+    """`(project slug, task issue id)` from this topic's own selfnotes.
 
-    Both halves of the binding are checked: the topic name has to carry a
-    serial, and it has to sit in a `work-` channel. `dispatch` still routes
-    every `workrun-` topic here, so this is what replaces the old any-channel
-    button.
+    The root note names the mission conversation, and its channel is the
+    project's — `pj-<slug>` is what says which project the work is for, which
+    is why the mission lives there in the first place. The work note names
+    the task. Both were written when the topic was opened
+    (`anchor_run_topic`); a topic carrying neither is not one of ours.
+
+    Until `agent_standardize` p9 this was parsed out of the `work-` channel's
+    description. That description is still written, for whoever opens the
+    channel and wants to know what it is; it is no longer what is read.
     """
-    if not channel.startswith(WORK_CHANNEL_PREFIX):
+    mission = own_rootchat(history, self_id)
+    issue_id = own_work(history, self_id)
+    if mission is None or issue_id is None:
         return None
-    match = WORKRUN_TOPIC_NAME.fullmatch(topic)
-    return int(match.group("serial")) if match else None
-
-
-def work_channel_binding(client: ZulipClient, channel: str) -> tuple[str, str, str]:
-    """`(project slug, workplan channel, workplan topic)` from the channel's
-    description, which `ensure_work_channel` wrote when it planned."""
-    existing = find_channel(client, channel)
-    if not existing:
-        raise ListenerError(f"no channel {channel!r} to read a binding from")
-    match = WORK_CHANNEL_BINDING.search(str(existing.get("description") or ""))
-    if not match:
-        raise ListenerError(
-            f"the description of {channel!r} carries no "
-            f"'project: <slug>; mission: <channel>/<topic>' binding"
-        )
-    return match.group("slug"), match.group("channel"), match.group("topic")
+    try:
+        slug = project_from_channel(mission.channel)
+    except ListenerError as error:
+        log(f"root note names {mission}, which is not a project conversation: {error}")
+        return None
+    return slug, issue_id
 
 
 def devlog_directory(slug: str) -> Path:
@@ -834,17 +892,14 @@ def serve_run(context) -> TopicResult:
     serving's own generation directory is what stops one report from being
     acted on twice.
     """
-    serial = parse_run_topic(context.channel, context.topic)
-    if serial is None:
-        return TopicResult([WRONG_PLACE_REPLY])
-
     context.step = "reading the binding"
-    slug, mission_channel, mission_topic = work_channel_binding(
-        context.client, context.channel
-    )
+    binding = run_binding(context.history, context.self_id)
+    if binding is None:
+        return TopicResult([WRONG_PLACE_REPLY])
+    slug, issue_id = binding
 
     context.step = "the previous-work gate"
-    target = run_target(slug, mission_channel, mission_topic, serial)
+    target = run_target(slug, issue_id)
     if target.blocked_by:
         # Handler-side, before any cost: no agent run happens behind a gate.
         return TopicResult([f"{PREVIOUS_WORK_REPLY} ({target.blocked_by})"])
@@ -867,7 +922,7 @@ def serve_run(context) -> TopicResult:
         [
             conversation.as_pair()
             for conversation in remotes_for_home(
-                AGENTCHAT_LEDGER, context.channel, context.topic
+                context.client, context.channel, context.topic
             )
         ],
         context.self_id,
@@ -918,15 +973,16 @@ def serve_run(context) -> TopicResult:
     return TopicResult(sections, resolve_after=True)
 
 
-def handle_workrun(
-    client: ZulipClient, channel: str, topic: str,
-    reply_to: tuple[str, str] | None = None,
-) -> None:
-    """Serve one awaiting `workrun-` topic through the shared skeleton."""
+def handle_workrun(client: ZulipClient, channel: str, topic: str) -> None:
+    """Serve one awaiting `workrun-` topic through the shared skeleton.
+
+    There is no `reply_to` any more: a serving brought back by a mention
+    answers here, in the task's own topic, like every other one.
+    """
     log(f"workrun topic {channel!r}/{topic!r}")
     serve_topic(
         client, channel, topic, serve_run,
-        ack_text=ACK_TEXT, empty_reply=EMPTY_REPLY, reply_to=reply_to,
+        ack_text=ACK_TEXT, empty_reply=EMPTY_REPLY,
     )
 
 
@@ -1022,24 +1078,40 @@ def handle_mention(client: ZulipClient, channel: str, topic: str) -> None:
     was speaking for.
 
     A `workrun-` task that delegates posts into another agent's topic and
-    ends. When that agent answers and names this instance, the ledger says
-    which task the request was made for; that task is served again — its
-    workspace, its chatlog, its Plane Sub-Work, the remote thread beside them
-    — and the reply goes back into the topic that asked, because that is
-    where the conversation is.
+    ends. The topic itself says which task that was — the root note
+    `agentchat send` wrote there before the first real post — so when the
+    answer names this instance, that task is served again: its workspace, its
+    chatlog, its Plane Sub-Work, and the topic that answered placed beside
+    them as a thread.
 
-    Only `workrun-` topics delegate today, so a participation recorded for
-    anything else is logged and dropped rather than guessed at.
+    **The reply goes home**, into the `workrun-` topic, which is
+    `agent_standardize` p9 for autolab and p8 everywhere else. Until now it
+    went back into the topic that asked, so every progress report was a post
+    in another agent's conversation — and a post in somebody's topic serves
+    them. Anything this instance wants to say to that agent is now a
+    deliberate `agentchat send` inside the run.
+
+    Afterwards the callback is marked served in the `workrun-` topic. Because
+    the reply went home, this bot never becomes the last poster where it was
+    named, so without the mark a listener restart would serve every finished
+    delegation again — and here that is a supercoder run against a live
+    repository, not a duplicate sentence.
+
+    Only `workrun-` topics delegate today, so a root note pointing anywhere
+    else is logged and dropped rather than guessed at.
     """
-    home = home_for(AGENTCHAT_LEDGER, channel, topic)
+    self_id = int(client.whoami()["user_id"])
+    home = rootchat_home(client, channel, topic, self_id)
     if home is None:
-        log(f"mention in {channel!r}/{topic!r} matches no participation; ignoring")
+        log(f"mention in {channel!r}/{topic!r} carries no root note of ours; ignoring")
         return
     if not home.topic.startswith(WORKRUN_TOPIC_PREFIX):
         log(f"mention in {channel!r}/{topic!r} is for {home}, which is not a task; ignoring")
         return
     log(f"mention in {channel!r}/{topic!r} serves {home}")
-    handle_workrun(client, home.channel, home.topic, reply_to=(channel, topic))
+    handle_workrun(client, home.channel, home.topic)
+    served = note_served(client, home, channel, topic)
+    log(f"marked {channel!r}/{topic!r} served up to {served} in {home}")
 
 
 def observe_topic(channel: str, topic: str) -> None:

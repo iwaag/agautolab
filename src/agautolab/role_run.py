@@ -7,10 +7,14 @@ The identity travels as a path, never as a value — the secret stays in
 `.local/`.
 
 Since `agent_standardize` p7 it also gets `AGENTCHAT_HOME`, the conversation
-it is serving, and `AGENTCHAT_LEDGER`, where `agentchat send` writes what it
-posted and on whose behalf. That pair is what makes delegation survive the
-end of the run: the answer, whenever it comes, names this instance, and the
-listener serves this topic again.
+it is serving. That is what makes delegation survive the end of the run:
+`agentchat send` writes a `[selfnote][rootchat]` note naming it into whatever
+topic the run posts in, so the answer, whenever it comes, resolves back to
+this task and the listener serves it again.
+
+Since p9 that note is the whole memory. There is no ledger file and no
+`AGENTCHAT_LEDGER` — `agag.participation` was deleted in p8, and this was the
+last consumer of it.
 """
 
 from __future__ import annotations
@@ -21,7 +25,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
-from agag import participation
+from agag import selfnote
 from agag.harness import run_harness, write_run_record
 
 from .agent_settings import PROJECT_ROOT, resolve_project_role
@@ -32,8 +36,6 @@ from .project_settings import load_project_roles, project_name_from_direction
 ZULIP_ENV = PROJECT_ROOT / ".local" / "zulip.env"
 #: `agag.chat.ENV_VARIABLE`, spelled here so the run and the CLI agree.
 AGENTCHAT_ENV_VARIABLE = "AGENTCHAT_ZULIP_ENV"
-#: This instance's participation ledger, in the ignored tree beside the rest.
-AGENTCHAT_LEDGER = PROJECT_ROOT / ".local" / "agentchat" / "participations.jsonl"
 
 # The working grant shared by the roles that actually do work. `front` runs
 # `uv run new_mission.py` in its own workspace, so it needs the same shell as
@@ -111,7 +113,6 @@ def tool_environment(
     bin_dir: Path | None = None,
     zulip_env: Path | None = None,
     home: tuple[str, str] | None = None,
-    ledger: Path | None = None,
 ) -> dict[str, str]:
     """The handover: `agentchat` reachable by name, speaking as this instance.
 
@@ -121,19 +122,17 @@ def tool_environment(
     `agentchat` console script is installed — so no deployment path is
     written down anywhere.
 
-    `home` is the conversation being served. Anything the run posts elsewhere
-    is recorded against it, which is how a delegation outlives the run that
-    made it: the answer names this instance, and this topic is served again.
+    `home` is the conversation being served. `agentchat send` writes it into
+    whatever topic the run posts in, as a root note, which is how a
+    delegation outlives the run that made it: the answer resolves back to
+    this topic, and it is served again.
     """
     directory = Path(sys.executable).parent if bin_dir is None else bin_dir
     environment = {
         AGENTCHAT_ENV_VARIABLE: str(zulip_env or ZULIP_ENV),
-        participation.LEDGER_VARIABLE: str(ledger or AGENTCHAT_LEDGER),
     }
     if home is not None:
-        environment[participation.HOME_VARIABLE] = str(
-            participation.Conversation(*home)
-        )
+        environment[selfnote.HOME_VARIABLE] = str(selfnote.Conversation(*home))
     if directory.is_dir():
         environment["PATH"] = os.pathsep.join(
             [str(directory), os.environ.get("PATH", "")]

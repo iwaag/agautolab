@@ -507,13 +507,15 @@ def test_write_mission_workspace_without_a_work_writes_nothing(tmp_path, monkeyp
 # --- the Sub-Work a workrun- topic is bound to ---------------------------------
 
 
-def test_run_target_reads_the_task_at_a_serial_and_its_mission(plane):
+def test_run_target_reads_the_task_by_its_issue_id_and_its_mission(plane):
+    """Since `agent_standardize` p9 the topic carries the task's Plane id in a
+    `[selfnote][work]` note, so nothing is counted out of a topic name."""
     work = plane.add(name="Fix title screen", external_id=WORK_KEY)
     plane.add(name="First", external_id=f"{WORK_KEY}#1", parent=work["id"], state="done-id")
-    plane.add(name="Second", external_id=f"{WORK_KEY}#2", parent=work["id"],
-              description_html="<p>do that</p>")
+    second = plane.add(name="Second", external_id=f"{WORK_KEY}#2", parent=work["id"],
+                       description_html="<p>do that</p>")
 
-    target = mission.run_target("demo", CHANNEL, TOPIC, 2)
+    target = mission.run_target("demo", second["id"])
 
     assert (target.label, target.serial) == ("PD-6", 2)
     assert (target.mission_label, target.mission_title) == ("PD-4", "Fix title screen")
@@ -527,38 +529,40 @@ def test_run_target_reads_the_task_at_a_serial_and_its_mission(plane):
 def test_run_target_blocks_on_an_unfinished_previous_task(plane):
     work = plane.add(name="Work", external_id=WORK_KEY)
     plane.add(name="First", external_id=f"{WORK_KEY}#1", parent=work["id"], state="started-id")
-    plane.add(name="Second", external_id=f"{WORK_KEY}#2", parent=work["id"])
+    second = plane.add(name="Second", external_id=f"{WORK_KEY}#2", parent=work["id"])
 
-    assert mission.run_target("demo", CHANNEL, TOPIC, 2).blocked_by == "PD-5"
+    assert mission.run_target("demo", second["id"]).blocked_by == "PD-5"
 
 
 def test_the_first_task_has_no_gate(plane):
     work = plane.add(name="Work", external_id=WORK_KEY)
-    plane.add(name="First", external_id=f"{WORK_KEY}#1", parent=work["id"])
+    first = plane.add(name="First", external_id=f"{WORK_KEY}#1", parent=work["id"])
 
-    assert mission.run_target("demo", CHANNEL, TOPIC, 1).blocked_by is None
+    assert mission.run_target("demo", first["id"]).blocked_by is None
 
 
-def test_run_target_names_a_serial_that_is_not_there(plane):
+def test_run_target_names_an_issue_that_is_not_there(plane):
     plane.add(name="Work", external_id=WORK_KEY)
     with pytest.raises(mission.MissionError) as error:
-        mission.run_target("demo", CHANNEL, TOPIC, 3)
-    assert "task 3" in str(error.value)
+        mission.run_target("demo", "issue-nope")
+    assert "issue-nope" in str(error.value)
 
 
-def test_run_target_requires_the_mission_work(plane):
+def test_run_target_requires_the_task_to_belong_to_a_mission(plane):
+    """A hand-made top-level issue is not a task of anything."""
+    loose = plane.add(name="Work", external_id=WORK_KEY)
     with pytest.raises(mission.MissionError):
-        mission.run_target("demo", CHANNEL, TOPIC, 1)
+        mission.run_target("demo", loose["id"])
 
 
 def test_a_cancelled_task_is_not_a_gate_and_not_a_target(plane):
-    """`sub_works` drops cancelled children, so a cancelled task 1 neither
-    blocks task 2 nor answers as a target itself."""
+    """`sub_works` drops cancelled children, so a cancelled task 1 does not
+    block task 2 — and a cancelled task is refused as a target outright."""
     work = plane.add(name="Work", external_id=WORK_KEY)
-    plane.add(name="First", external_id=f"{WORK_KEY}#1", parent=work["id"],
-              state="cancelled-id")
-    plane.add(name="Second", external_id=f"{WORK_KEY}#2", parent=work["id"])
+    first = plane.add(name="First", external_id=f"{WORK_KEY}#1", parent=work["id"],
+                      state="cancelled-id")
+    second = plane.add(name="Second", external_id=f"{WORK_KEY}#2", parent=work["id"])
 
-    assert mission.run_target("demo", CHANNEL, TOPIC, 2).blocked_by is None
+    assert mission.run_target("demo", second["id"]).blocked_by is None
     with pytest.raises(mission.MissionError):
-        mission.run_target("demo", CHANNEL, TOPIC, 1)
+        mission.run_target("demo", first["id"])

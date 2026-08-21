@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from agag import participation, topics
+from agag import topics
 from agag.topics import GuideError
 
 from agautolab import zulip_listener
@@ -99,6 +99,16 @@ class Client:
 
     topic_names: list[str] = []
 
+    #: What the `sender:me search:rootchat` narrow answers with — the topics
+    #: this bot has anchored elsewhere. Empty unless a test delegates.
+    rootchat_notes: list[dict] = []
+
+    def own_rootchat_notes(self, num_before=200):
+        return [dict(row) for row in self.rootchat_notes]
+
+    def own_served_notes(self, num_before=200):
+        return []
+
 
 def wire(monkeypatch, tmp_path, calls, *, plane_files=False, superdirector="planner says hi"):
     monkeypatch.setattr(zulip_listener, "TOPICS_ROOT", tmp_path / "topics")
@@ -135,7 +145,7 @@ PLAN_TEXT = "# The plan\n\nStep one, step two."
 
 
 TASK_CHANGES = [
-    zulip_listener.TaskChange(1, "created", "First", "# First\n\ndo this\n", "PD-5"),
+    zulip_listener.TaskChange(1, "created", "First", "# First\n\ndo this\n", "PD-5", "i5"),
 ]
 
 
@@ -311,11 +321,13 @@ def test_a_plan_reconciles_the_split_and_builds_the_run_surfaces(monkeypatch, tm
     (workspace / "task1.md").write_text("# First\ndo this")
 
     sections, resolve_after = zulip_listener.handle_superdirector_response(
-        client, CHANNEL, TOPIC, PROJECT, workspace
+        client, CHANNEL, TOPIC, PROJECT, workspace, BOT_ID
     )
 
     assert [call[0] for call in calls] == [
-        "upsert", "reconcile", "channels", "subscribers", "create-channel", "post",
+        "upsert", "reconcile", "channels", "subscribers", "create-channel",
+        # the anchor: read the new topic, then its two notes, then the task
+        "history", "post", "post", "post",
     ]
     # Title and description both from the plan — the whole file, heading
     # included, because Plane holds the plan verbatim.
@@ -329,9 +341,15 @@ def test_a_plan_reconciles_the_split_and_builds_the_run_surfaces(monkeypatch, tm
         [HUMAN_ID, BOT_ID],
         None,
     )
-    # The task content is posted by the bot, so the topic waits quietly for a
-    # human instead of being swept the moment it exists.
-    assert calls[5][1:] == ("work-pd-4", "workrun-task1-pd-4", "# First\n\ndo this\n")
+    # The topic says what it is for before it says anything visible: the two
+    # notes, then the task. A selfnote is not somebody speaking, so the task
+    # description is still the topic's last real post.
+    assert [call[1:] for call in calls[6:9]] == [
+        ("work-pd-4", "workrun-task1-pd-4",
+         "[selfnote][rootchat] pj-demo-project/workplan-one"),
+        ("work-pd-4", "workrun-task1-pd-4", "[selfnote][work] i5"),
+        ("work-pd-4", "workrun-task1-pd-4", "# First\n\ndo this\n"),
+    ]
     assert sections == [
         'updated PD-4 "The plan"',
         'created sub-work PD-5 "First"',
@@ -352,9 +370,37 @@ def test_the_work_channel_follows_the_project_channels_folder(monkeypatch, tmp_p
     workspace.mkdir(parents=True)
     (workspace / "plan.md").write_text(PLAN_TEXT)
 
-    zulip_listener.handle_superdirector_response(client, CHANNEL, TOPIC, PROJECT, workspace)
+    zulip_listener.handle_superdirector_response(client, CHANNEL, TOPIC, PROJECT, workspace, BOT_ID)
 
     assert next(call for call in calls if call[0] == "create-channel")[4] == 3
+
+
+def test_an_already_anchored_topic_is_not_anchored_twice(monkeypatch, tmp_path):
+    """A re-plan that re-creates a serial finds its topic already saying what
+    it is for, and adds nothing — the earliest note is the binding."""
+    calls = []
+
+    class Anchored(Client):
+        def topic_history(self, channel, topic, num_before):
+            self.calls.append(("history", channel, topic, num_before))
+            return [
+                history_message(sender_id=BOT_ID, name="Autolab",
+                                content="[selfnote][rootchat] pj-demo-project/workplan-one"),
+                history_message(sender_id=BOT_ID, name="Autolab",
+                                content="[selfnote][work] i5"),
+            ]
+
+    client = Anchored(calls)
+    wire_response(monkeypatch, tmp_path, calls)
+    workspace = superdirector_dir(tmp_path)
+    workspace.mkdir(parents=True)
+    (workspace / "plan.md").write_text(PLAN_TEXT)
+
+    zulip_listener.handle_superdirector_response(
+        client, CHANNEL, TOPIC, PROJECT, workspace, BOT_ID
+    )
+
+    assert [call[3] for call in calls if call[0] == "post"] == ["# First\n\ndo this\n"]
 
 
 def test_a_replan_mirrors_each_change_onto_its_own_run_topic(monkeypatch, tmp_path):
@@ -364,10 +410,10 @@ def test_a_replan_mirrors_each_change_onto_its_own_run_topic(monkeypatch, tmp_pa
     calls = []
     client = Client(calls)
     changes = [
-        zulip_listener.TaskChange(1, "unchanged", "First", "# First\n\na\n", "PD-5"),
-        zulip_listener.TaskChange(2, "updated", "Second", "# Second\n\nb\n", "PD-6"),
-        zulip_listener.TaskChange(3, "created", "Third", "# Third\n\nc\n", "PD-7"),
-        zulip_listener.TaskChange(4, "cancelled", "Fourth", "", "PD-8"),
+        zulip_listener.TaskChange(1, "unchanged", "First", "# First\n\na\n", "PD-5", "i5"),
+        zulip_listener.TaskChange(2, "updated", "Second", "# Second\n\nb\n", "PD-6", "i6"),
+        zulip_listener.TaskChange(3, "created", "Third", "# Third\n\nc\n", "PD-7", "i7"),
+        zulip_listener.TaskChange(4, "cancelled", "Fourth", "", "PD-8", "i8"),
     ]
     wire_response(monkeypatch, tmp_path, calls, changes=changes)
     workspace = superdirector_dir(tmp_path)
@@ -375,12 +421,16 @@ def test_a_replan_mirrors_each_change_onto_its_own_run_topic(monkeypatch, tmp_pa
     (workspace / "plan.md").write_text(PLAN_TEXT)
 
     sections, _ = zulip_listener.handle_superdirector_response(
-        client, CHANNEL, TOPIC, PROJECT, workspace
+        client, CHANNEL, TOPIC, PROJECT, workspace, BOT_ID
     )
 
     posts = [call for call in calls if call[0] in {"post", "send", "resolve"}]
     assert posts == [
         ("post", "work-pd-4", "workrun-task2-pd-4", "Updated by planner.\n\n# Second\n\nb\n"),
+        # only the created task is anchored; the others already are
+        ("post", "work-pd-4", "workrun-task3-pd-4",
+         "[selfnote][rootchat] pj-demo-project/workplan-one"),
+        ("post", "work-pd-4", "workrun-task3-pd-4", "[selfnote][work] i7"),
         ("post", "work-pd-4", "workrun-task3-pd-4", "# Third\n\nc\n"),
         ("send", "work-pd-4", "workrun-task4-pd-4", "Cancelled by planner."),
         ("resolve", 42, "workrun-task4-pd-4"),
@@ -403,7 +453,7 @@ def test_a_task_changed_after_completion_only_gets_a_note(monkeypatch, tmp_path)
     ]
     client.topic_names = ["\u2714 workrun-task1-pd-4"]
     changes = [
-        zulip_listener.TaskChange(1, "changed-after-done", "First", "# First\n\na\n", "PD-5"),
+        zulip_listener.TaskChange(1, "changed-after-done", "First", "# First\n\na\n", "PD-5", "i5"),
     ]
     wire_response(monkeypatch, tmp_path, calls, changes=changes)
     workspace = superdirector_dir(tmp_path)
@@ -411,7 +461,7 @@ def test_a_task_changed_after_completion_only_gets_a_note(monkeypatch, tmp_path)
     (workspace / "plan.md").write_text(PLAN_TEXT)
 
     sections, _ = zulip_listener.handle_superdirector_response(
-        client, CHANNEL, TOPIC, PROJECT, workspace
+        client, CHANNEL, TOPIC, PROJECT, workspace, BOT_ID
     )
 
     # Posted under the resolved name: a resolved topic is a renamed topic, so
@@ -435,7 +485,7 @@ def test_the_workspace_keeps_its_evidence_after_registration(monkeypatch, tmp_pa
     (workspace / "task2.md").write_text("# Second\nb")
 
     zulip_listener.handle_superdirector_response(
-        Client(calls), CHANNEL, TOPIC, PROJECT, workspace
+        Client(calls), CHANNEL, TOPIC, PROJECT, workspace, BOT_ID
     )
 
     remaining = sorted(path.name for path in workspace.iterdir())
@@ -456,7 +506,7 @@ def test_a_failed_reconcile_is_reported_not_swallowed(monkeypatch, tmp_path):
 
     with pytest.raises(zulip_listener.ListenerError):
         zulip_listener.handle_superdirector_response(
-            Client(calls), CHANNEL, TOPIC, PROJECT, workspace
+            Client(calls), CHANNEL, TOPIC, PROJECT, workspace, BOT_ID
         )
 
 
@@ -468,7 +518,7 @@ def test_a_run_that_wrote_nothing_changes_nothing(monkeypatch, tmp_path):
     workspace.mkdir(parents=True)
 
     sections, resolve_after = zulip_listener.handle_superdirector_response(
-        Client(calls), CHANNEL, TOPIC, PROJECT, workspace
+        Client(calls), CHANNEL, TOPIC, PROJECT, workspace, BOT_ID
     )
 
     assert calls == []
@@ -487,7 +537,7 @@ def test_replanning_reuses_the_work_channel(monkeypatch, tmp_path):
         workspace.mkdir(parents=True)
         (workspace / "plan.md").write_text(PLAN_TEXT)
         zulip_listener.handle_superdirector_response(
-            client, CHANNEL, TOPIC, PROJECT, workspace
+            client, CHANNEL, TOPIC, PROJECT, workspace, BOT_ID
         )
 
     names = [call[1] for call in calls if call[0] == "create-channel"]
@@ -507,7 +557,7 @@ def test_start_flag_moves_the_work_to_in_progress(monkeypatch, tmp_path):
     (workspace / "start.flag").touch()
 
     sections, resolve_after = zulip_listener.handle_superdirector_response(
-        Client(calls), CHANNEL, TOPIC, PROJECT, workspace
+        Client(calls), CHANNEL, TOPIC, PROJECT, workspace, BOT_ID
     )
 
     assert calls == [("transition", "started")]
@@ -531,7 +581,7 @@ def test_cancel_flag_cancels_everything_and_archives_the_work_channel(monkeypatc
     (workspace / "cancel.flag").touch()
 
     sections, resolve_after = zulip_listener.handle_superdirector_response(
-        client, CHANNEL, TOPIC, PROJECT, workspace
+        client, CHANNEL, TOPIC, PROJECT, workspace, BOT_ID
     )
 
     assert [call[0] for call in calls] == [
@@ -553,7 +603,7 @@ def test_cancelling_a_mission_that_never_got_a_channel_is_quiet(monkeypatch, tmp
     (workspace / "cancel.flag").touch()
 
     sections, _ = zulip_listener.handle_superdirector_response(
-        Client(calls), CHANNEL, TOPIC, PROJECT, workspace
+        Client(calls), CHANNEL, TOPIC, PROJECT, workspace, BOT_ID
     )
 
     assert sections[-1] == "no work-pd-4 channel to archive"
@@ -567,8 +617,8 @@ def test_a_mission_serving_opens_one_run_topic_per_task(monkeypatch, tmp_path):
     client = Client(calls)
     wire(monkeypatch, tmp_path, calls)
     changes = [
-        zulip_listener.TaskChange(1, "created", "First", "# First\n\na\n", "PD-5"),
-        zulip_listener.TaskChange(2, "created", "Second", "# Second\n\nb\n", "PD-6"),
+        zulip_listener.TaskChange(1, "created", "First", "# First\n\na\n", "PD-5", "i5"),
+        zulip_listener.TaskChange(2, "created", "Second", "# Second\n\nb\n", "PD-6", "i6"),
     ]
     wire_response(monkeypatch, tmp_path, calls, changes=changes)
     monkeypatch.setattr(
@@ -584,7 +634,11 @@ def test_a_mission_serving_opens_one_run_topic_per_task(monkeypatch, tmp_path):
     created = next(call for call in calls if call[0] == "create-channel")
     assert created[1] == "work-pd-4"
     assert [call[2:] for call in calls if call[0] == "post"] == [
+        ("workrun-task1-pd-4", "[selfnote][rootchat] pj-demo-project/workplan-one"),
+        ("workrun-task1-pd-4", "[selfnote][work] i5"),
         ("workrun-task1-pd-4", "# First\n\na\n"),
+        ("workrun-task2-pd-4", "[selfnote][rootchat] pj-demo-project/workplan-one"),
+        ("workrun-task2-pd-4", "[selfnote][work] i6"),
         ("workrun-task2-pd-4", "# Second\n\nb\n"),
     ]
     reply = [call for call in calls if call[0] == "write"][-1][2]
@@ -704,19 +758,39 @@ WORK_CHANNEL = "work-pd-4"
 WORKRUN_TOPIC = "workrun-task2-pd-4"
 BINDING = "[AUTO] project: demo-project; mission: pj-demo-project/workplan-one"
 
+#: What the topic says about itself since p9. The description above is still
+#: written for whoever opens the channel, and is no longer read.
+ROOT_NOTE = f"[selfnote][rootchat] {CHANNEL}/{TOPIC}"
+WORK_NOTE = "[selfnote][work] i1"
+
 TARGET = zulip_listener.RunTarget(
     zulip_listener.Work("demo-project", "Add the README", "Write it.", "p1", "i1"),
     "PD-6", 2, "PD-4", "Fix title screen",
 )
 
 
+def anchored(*extra):
+    """A `workrun-` topic as planning leaves it: two notes, then the task."""
+    return [
+        history_message(sender_id=BOT_ID, name="Autolab", content=ROOT_NOTE),
+        history_message(sender_id=BOT_ID, name="Autolab", content=WORK_NOTE),
+        history_message(sender_id=BOT_ID, name="Autolab", content="# Add the README"),
+        history_message(),
+        *extra,
+    ]
+
+
 class RunClient(Client):
-    """A client whose realm already holds the mission's work- channel."""
+    """A client whose realm already holds the mission's work- channel, and
+    whose `workrun-` topic is anchored the way planning leaves it."""
 
     channels_list = [
         {"name": CHANNEL, "stream_id": 7, "folder_id": None},
         {"name": WORK_CHANNEL, "stream_id": 8, "folder_id": None, "description": BINDING},
     ]
+
+    def __init__(self, calls, history=None, board=None):
+        super().__init__(calls, anchored() if history is None else history, board)
 
 
 def calls_of(calls, kind):
@@ -735,10 +809,7 @@ HANDOFF = "@**Developer**\n\n"
 
 
 def wire_run(monkeypatch, tmp_path, calls, *, target=TARGET, report=None,
-             output="work done", pushed=True, ledger=None):
-    monkeypatch.setattr(
-        zulip_listener, "AGENTCHAT_LEDGER", ledger or (tmp_path / "ledger.jsonl")
-    )
+             output="work done", pushed=True):
     monkeypatch.setattr(zulip_listener, "PROJECTS_ROOT", tmp_path / "projects")
     monkeypatch.setattr(zulip_listener, "TOPICS_ROOT", tmp_path / "topics")
     monkeypatch.setattr(zulip_listener, "RECORDS_ROOT", tmp_path / "records")
@@ -748,8 +819,8 @@ def wire_run(monkeypatch, tmp_path, calls, *, target=TARGET, report=None,
     monkeypatch.setattr(
         zulip_listener,
         "run_target",
-        lambda project, channel, topic, serial: (
-            calls.append(("target", project, channel, topic, serial)) or target
+        lambda project, issue_id: (
+            calls.append(("target", project, issue_id)) or target
         ),
     )
     monkeypatch.setattr(
@@ -797,19 +868,47 @@ def supercoder_dir(tmp_path, number=1):
 
 
 @pytest.mark.parametrize(
-    "channel,topic",
+    "history",
     [
-        ("general", "workrun-1"),               # the old any-channel button
-        (CHANNEL, "workrun-task1-pd-4"),        # right name, wrong channel
-        (WORK_CHANNEL, "workrun-something"),    # right channel, no serial
+        # a topic somebody made by hand: no notes at all
+        [history_message()],
+        # anchored to a mission, but nothing says which task
+        [history_message(sender_id=BOT_ID, name="Autolab", content=ROOT_NOTE),
+         history_message()],
+        # a task id, but no mission to say which project it is in
+        [history_message(sender_id=BOT_ID, name="Autolab", content=WORK_NOTE),
+         history_message()],
+        # somebody else's notes are not ours to act on
+        [history_message(sender_id=13, name="Forge", content=ROOT_NOTE),
+         history_message(sender_id=13, name="Forge", content=WORK_NOTE),
+         history_message()],
     ],
 )
 def test_a_run_topic_that_is_not_bound_to_a_task_is_explained(monkeypatch, tmp_path,
-                                                              channel, topic):
+                                                              history):
+    """The name and the channel decide nothing since p9: the notes do."""
     calls = []
     wire_run(monkeypatch, tmp_path, calls)
-    zulip_listener.handle_workrun(RunClient(calls), channel, topic)
+    zulip_listener.handle_workrun(RunClient(calls, history), WORK_CHANNEL, WORKRUN_TOPIC)
 
+    assert not any(call[0] in {"target", "supercoder"} for call in calls)
+    assert last_reply(calls) == HANDOFF + zulip_listener.WRONG_PLACE_REPLY
+
+
+def test_a_root_note_naming_a_conversation_of_no_project_is_not_a_binding(
+    monkeypatch, tmp_path
+):
+    """`pj-<slug>` is what says which project the work is for; a note naming
+    anything else is dropped rather than guessed at."""
+    calls = []
+    wire_run(monkeypatch, tmp_path, calls)
+    history = [
+        history_message(sender_id=BOT_ID, name="Autolab",
+                        content="[selfnote][rootchat] general/chat"),
+        history_message(sender_id=BOT_ID, name="Autolab", content=WORK_NOTE),
+        history_message(),
+    ]
+    zulip_listener.handle_workrun(RunClient(calls, history), WORK_CHANNEL, WORKRUN_TOPIC)
     assert not any(call[0] in {"target", "supercoder"} for call in calls)
     assert last_reply(calls) == HANDOFF + zulip_listener.WRONG_PLACE_REPLY
 
@@ -835,9 +934,9 @@ def test_a_serving_runs_the_supercoder_in_the_project_with_its_workspace(monkeyp
     assert [call[0] for call in calls if call[0] not in {"whoami", "history", "channels"}] == [
         "write", "target", "init", "supercoder", "write",
     ]
-    # The serial comes from the topic name, the project and mission key from
-    # the channel description.
-    assert calls_of(calls, "target")[0][1:] == ("demo-project", CHANNEL, "workplan-one", 2)
+    # The project comes from the root note's channel, the task from the work
+    # note. Neither the topic's name nor the channel's description is read.
+    assert calls_of(calls, "target")[0][1:] == ("demo-project", "i1")
     prompt, cwd, home = next(
         (call[1], call[2], call[3]) for call in calls if call[0] == "supercoder"
     )
@@ -851,7 +950,11 @@ def test_a_serving_runs_the_supercoder_in_the_project_with_its_workspace(monkeyp
     # The task travels in the prompt, read from Plane — the task[N].md the
     # superdirector wrote lives in another generation's directory.
     assert "# Add the README\n\nWrite it." in prompt
-    assert (workspace / "chatlog.md").read_text() == "[Developer] Build it\n"
+    # The anchoring notes are machine-to-machine and never reach the run; the
+    # task description autolab posted, and the developer's word, do.
+    assert (workspace / "chatlog.md").read_text() == (
+        "[Autolab (you)] # Add the README\n[Developer] Build it\n"
+    )
     # No report: the conversation is simply not finished. Nothing closes.
     assert not any(call[0] in {"report", "push"} for call in calls)
     assert last_reply(calls) == HANDOFF + "work done"
@@ -942,7 +1045,10 @@ def test_a_failed_supercoder_run_is_reported_into_the_topic(monkeypatch, tmp_pat
     assert not any(call[0] == "resolve" for call in calls)
 
 
-def test_a_work_channel_without_a_binding_is_reported(monkeypatch, tmp_path):
+def test_the_channel_description_is_no_longer_read(monkeypatch, tmp_path):
+    """It is still written, for a human opening the channel. A channel whose
+    description says nothing serves its anchored topics all the same — p9
+    moved the binding into the topic."""
     calls = []
     wire_run(monkeypatch, tmp_path, calls)
 
@@ -951,8 +1057,8 @@ def test_a_work_channel_without_a_binding_is_reported(monkeypatch, tmp_path):
 
     zulip_listener.handle_workrun(Bare(calls), WORK_CHANNEL, WORKRUN_TOPIC)
 
-    assert "failed during reading the binding" in last_reply(calls)
-    assert not any(call[0] == "supercoder" for call in calls)
+    assert calls_of(calls, "target")[0][1:] == ("demo-project", "i1")
+    assert any(call[0] == "supercoder" for call in calls)
 
 
 # --- the board reaches both runs (agent_standardize p6) ----------------------
@@ -1351,13 +1457,44 @@ FORGE_CHANNEL = "agforge-agstudio1"
 FORGE_TOPIC = "assetplan-enemy-sprite"
 
 
-class DelegatingClient(RunClient):
-    """A `RunClient` that also holds the remote conversation."""
+def delegation_note(home_topic=WORKRUN_TOPIC, message_id=5):
+    """The root note `agentchat send` wrote into forge's topic when the task
+    delegated. It is the whole memory of that delegation."""
+    return {
+        "id": message_id,
+        "type": "stream",
+        "sender_id": BOT_ID,
+        "sender_full_name": "Autolab",
+        "display_recipient": FORGE_CHANNEL,
+        "subject": FORGE_TOPIC,
+        "content": f"[selfnote][rootchat] {WORK_CHANNEL}/{home_topic}",
+    }
 
-    def __init__(self, calls, remote_history=None):
+
+def forge_answer(message_id=77):
+    return {
+        "id": message_id,
+        "type": "stream",
+        "sender_id": 13,
+        "sender_full_name": "Forge",
+        "display_recipient": FORGE_CHANNEL,
+        "subject": FORGE_TOPIC,
+        "content": "@**Autolab** Work registered as F2-9.",
+    }
+
+
+class DelegatingClient(RunClient):
+    """A `RunClient` whose task has delegated: forge's topic carries this
+    bot's root note, which is where the callback reads its home."""
+
+    def __init__(self, calls, remote_history=None, home_topic=WORKRUN_TOPIC):
         super().__init__(calls)
-        self.remote_history = remote_history or [
-            history_message(sender_id=13, name="Forge", content="Work registered as F2-9.")
+        self.remote_history = remote_history if remote_history is not None else [
+            delegation_note(home_topic), forge_answer(),
+        ]
+        self.rootchat_notes = [
+            row for row in self.remote_history
+            if str(row.get("content", "")).startswith("[selfnote][rootchat]")
         ]
 
     def topic_history(self, channel, topic, num_before):
@@ -1367,22 +1504,12 @@ class DelegatingClient(RunClient):
         return super().topic_history(channel, topic, num_before)
 
 
-def record_delegation(ledger, home_topic=WORKRUN_TOPIC):
-    participation.record(
-        ledger,
-        remote=participation.Conversation(FORGE_CHANNEL, FORGE_TOPIC),
-        home=participation.Conversation(WORK_CHANNEL, home_topic),
-        message_id=77,
-    )
-
-
 def test_a_mention_serves_the_task_the_request_was_made_for(monkeypatch, tmp_path):
-    """p7's whole shape for autolab: the run that delegated is long over, and
-    forge's answer is what starts the next one."""
+    """p7's whole shape for autolab, on p8's memory: the run that delegated is
+    long over, forge's answer is what starts the next one, and the topic that
+    named this instance is what says which task that was."""
     calls = []
-    ledger = tmp_path / "ledger.jsonl"
-    wire_run(monkeypatch, tmp_path, calls, ledger=ledger)
-    record_delegation(ledger)
+    wire_run(monkeypatch, tmp_path, calls)
 
     zulip_listener.handle_mention(DelegatingClient(calls), FORGE_CHANNEL, FORGE_TOPIC)
 
@@ -1391,35 +1518,52 @@ def test_a_mention_serves_the_task_the_request_was_made_for(monkeypatch, tmp_pat
     )
     # The task is the subject: same workspace, same chatlog, same Plane target.
     assert home == (WORK_CHANNEL, WORKRUN_TOPIC)
-    assert calls_of(calls, "target")[0][1:] == ("demo-project", CHANNEL, "workplan-one", 2)
+    assert calls_of(calls, "target")[0][1:] == ("demo-project", "i1")
     workspace = supercoder_dir(tmp_path)
-    assert (workspace / "chatlog.md").read_text() == "[Developer] Build it\n"
+    # The anchoring notes are machine-to-machine and never reach the run; the
+    # task description autolab posted, and the developer's word, do.
+    assert (workspace / "chatlog.md").read_text() == (
+        "[Autolab (you)] # Add the README\n[Developer] Build it\n"
+    )
     # forge's conversation is a file beside it, and the prompt says where.
     thread = workspace / "threads" / FORGE_CHANNEL / f"{FORGE_TOPIC}.md"
     assert "Work registered as F2-9." in thread.read_text()
     assert f'"{thread}"' in prompt
-    # Everything posted went back to forge's topic; the task's own topic got
-    # only what RunProgress puts there.
-    assert {call[3].get("channel") for call in calls_of(calls, "write")} == {FORGE_CHANNEL}
-    assert last_reply(calls) == "@**Forge**\n\nwork done"
+    # p9: the reply goes **home**, into the task's own topic. Nothing is said
+    # in forge's conversation unless the run decides to say it.
+    assert {call[3].get("channel") for call in calls_of(calls, "write")} == {WORK_CHANNEL}
+    assert last_reply(calls) == HANDOFF + "work done"
+
+
+def test_a_served_callback_is_marked_in_the_task_topic(monkeypatch, tmp_path):
+    """Answering at home means this bot is never the last poster where it was
+    named, so without the mark every restart would run the supercoder again."""
+    calls = []
+    wire_run(monkeypatch, tmp_path, calls)
+    zulip_listener.handle_mention(DelegatingClient(calls), FORGE_CHANNEL, FORGE_TOPIC)
+    assert calls_of(calls, "send")[-1] == (
+        "send", WORK_CHANNEL, WORKRUN_TOPIC,
+        f"[selfnote][served] {FORGE_CHANNEL}/{FORGE_TOPIC} 77",
+    )
 
 
 def test_a_mention_no_task_delegated_to_costs_no_run(monkeypatch, tmp_path):
+    """No root note of ours in that topic: it is somebody else's business."""
     calls = []
     wire_run(monkeypatch, tmp_path, calls)
-    zulip_listener.handle_mention(RunClient(calls), FORGE_CHANNEL, FORGE_TOPIC)
-    assert calls == []
+    client = DelegatingClient(calls, remote_history=[forge_answer()])
+    zulip_listener.handle_mention(client, FORGE_CHANNEL, FORGE_TOPIC)
+    assert not any(call[0] in {"target", "supercoder", "send"} for call in calls)
 
 
-def test_a_participation_that_is_not_a_task_is_not_guessed_at(monkeypatch, tmp_path):
-    """Only `workrun-` topics delegate today. A ledger line pointing anywhere
-    else is logged and dropped rather than routed by guesswork."""
+def test_a_root_note_that_is_not_a_task_is_not_guessed_at(monkeypatch, tmp_path):
+    """Only `workrun-` topics delegate today. A note pointing anywhere else is
+    logged and dropped rather than routed by guesswork."""
     calls = []
-    ledger = tmp_path / "ledger.jsonl"
-    wire_run(monkeypatch, tmp_path, calls, ledger=ledger)
-    record_delegation(ledger, home_topic="bmining-idea")
-    zulip_listener.handle_mention(RunClient(calls), FORGE_CHANNEL, FORGE_TOPIC)
-    assert calls == []
+    wire_run(monkeypatch, tmp_path, calls)
+    client = DelegatingClient(calls, home_topic="bmining-idea")
+    zulip_listener.handle_mention(client, FORGE_CHANNEL, FORGE_TOPIC)
+    assert not any(call[0] in {"target", "supercoder", "send"} for call in calls)
 
 
 def test_a_task_with_no_delegation_gets_no_threads_sentence(monkeypatch, tmp_path):

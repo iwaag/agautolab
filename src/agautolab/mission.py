@@ -406,27 +406,40 @@ class RunTarget:
     blocked_by: str | None = None
 
 
-def run_target(project: str, channel: str, topic: str, serial: int) -> RunTarget:
-    """Look up task `serial` of the mission Work keyed `<channel>/<topic>`.
+def run_target(project: str, issue_id: str) -> RunTarget:
+    """Look up the Sub-Work `issue_id` and the gate in front of it.
 
-    Reads the whole issue list once and answers both the task and its gate
-    from it: Plane CE ignores a `?parent=` filter, so children are found
+    The id comes off the `workrun-` topic's own `[selfnote][work]` note
+    (`agautolab.anchor`), written when the topic was opened. Before
+    `agent_standardize` p9 this took `(channel, topic, serial)` and counted
+    its way to the task through the mission Work's external id; the topic
+    now says which task it is, so nothing has to be reconstructed from a
+    name.
+
+    Reads the whole issue list once and answers the task, its mission and its
+    gate from it: Plane CE ignores a `?parent=` filter, so children are found
     client-side anyway.
     """
     config, plane_project, project_id = _prepare(project)
-    issue = find_issue_by_external(config, project_id, work_key(channel, topic))
-    if not issue:
-        raise MissionError(f"no Work is registered for {channel}/{topic}")
     issues = list_issues(config, project_id)
-    issue = next((row for row in issues if str(row.get("id")) == str(issue["id"])), issue)
+    task = next((row for row in issues if str(row.get("id")) == str(issue_id)), None)
+    if task is None:
+        raise MissionError(f"no issue {issue_id} in {project}")
+    parent_id = str(task.get("parent") or "")
+    issue = next((row for row in issues if str(row.get("id")) == parent_id), None)
+    if issue is None:
+        raise MissionError(f"issue {issue_id} belongs to no mission Work")
     groups = state_groups(config, project_id)
+    if groups.get(str(task.get("state") or "")) == "cancelled":
+        # The planner cancels a task and resolves its topic in one move, so
+        # this is unreachable through the sweep; it is here because a target
+        # nobody is meant to run must not be run by another route either.
+        raise MissionError(f"issue {issue_id} is cancelled")
     by_serial = {
         sub_work_serial(child.get("external_id")): child
-        for child in sub_works(issues, str(issue["id"]), groups)
+        for child in sub_works(issues, parent_id, groups)
     }
-    task = by_serial.get(serial)
-    if task is None:
-        raise MissionError(f"{channel}/{topic} has no live task {serial}")
+    serial = sub_work_serial(task.get("external_id"))
 
     blocked_by = None
     if previous := by_serial.get(serial - 1):
@@ -567,6 +580,10 @@ class TaskChange:
     title: str
     document: str
     label: str
+    #: The Plane issue this task is, so the topic opened for it can be
+    #: anchored to it (`agautolab.anchor`). Empty only for a change built by
+    #: hand in a test that does not care.
+    issue_id: str = ""
 
 
 def reconcile_task_files(
@@ -650,7 +667,10 @@ def reconcile_task_files(
                 )
                 action = "changed-after-done" if done else "updated"
         lines.append(f'{action} sub-work {label} "{sub_title}"')
-        changes.append(TaskChange(number, action, sub_title, document, label))
+        issue_id = str((sub_issue if existing is None else existing)["id"])
+        changes.append(
+            TaskChange(number, action, sub_title, document, label, issue_id)
+        )
 
     cancelled = state_id_for_group(config, project_id, "cancelled")
     for child in [*stale, *(live[serial] for serial in sorted(set(live) - seen))]:
@@ -659,7 +679,9 @@ def reconcile_task_files(
         title = str(child.get("name", ""))
         serial = sub_work_serial(child.get("external_id"))
         lines.append(f'cancelled sub-work {label} "{title}"')
-        changes.append(TaskChange(serial, "cancelled", title, "", label))
+        changes.append(
+            TaskChange(serial, "cancelled", title, "", label, str(child["id"]))
+        )
 
     if not lines:
         lines.append("the superdirector wrote no task files; the mission has no sub-work")
