@@ -71,9 +71,9 @@ from agag.topics import (
     write_threads,
 )
 from agag.zulip import (
-    RESOLVED_TOPIC_PREFIX,
     ZulipClient,
     ZulipError,
+    live_topic_name,
     log,
     note_served,
     remotes_for_home,
@@ -441,21 +441,6 @@ def ensure_work_channel(
         folder_id=folder_id,
     )
     return name
-
-
-def live_topic_name(client: ZulipClient, channel: str, topic: str) -> str:
-    """`topic`, or its resolved `\u2714 ` name when that is what exists.
-
-    A resolved topic is a *renamed* topic, so posting under the bare name
-    would open a second, unresolved one beside it.
-    """
-    resolved = f"{RESOLVED_TOPIC_PREFIX}{topic}"
-    try:
-        names = client.channel_topics(client.stream_id(channel))
-    except Exception as error:  # noqa: BLE001 - a note is never worth a failure
-        log(f"could not list topics of {channel!r}: {error!r}")
-        return topic
-    return resolved if resolved in names and topic not in names else topic
 
 
 def anchor_run_topic(
@@ -1119,7 +1104,10 @@ def handle_mention(client: ZulipClient, channel: str, topic: str) -> None:
     log(f"mention in {channel!r}/{topic!r} serves {home}")
     handle_workrun(client, home.channel, home.topic)
     served = note_served(client, home, channel, topic)
-    log(f"marked {channel!r}/{topic!r} served up to {served} in {home}")
+    if served is None:
+        log(f"nothing to mark served in {channel!r}/{topic!r}")
+    else:
+        log(f"marked {channel!r}/{topic!r} served up to {served} in {home}")
 
 
 def observe_topic(channel: str, topic: str) -> None:
