@@ -1,6 +1,6 @@
 """Plane mirror of one chat topic: its Work, Sub-Works, and their files.
 
-The Plane client itself is `agag.plane`, shared with agforge. What lives here
+The Plane client itself is `agag.plane`, shared machinery. What lives here
 is autolab's own policy on top of it:
 
 - the `AUTO` label, which is what makes an issue eligible for automatic
@@ -61,24 +61,6 @@ from .project_init import AUTO_MARKER, PLANE_ENV, PROJECT_NAME  # noqa: F401
 
 EXTERNAL_SOURCE = "agautolab"
 AUTO_LABEL = "AUTO"
-# A Sub-Work that needs a media asset before it can be coded. The marker is
-# the superdirector's, written at the very end of a `task[N].md`; the label is
-# what `handle_workrun` reads back off the issue, because Plane — not the
-# file — is the ledger from registration onwards.
-ASSET_LABEL = "asset"
-ASSET_MARKER = "[Asset]"
-
-# agforge's side of the asset ledger. Its Works are keyed on the requesting
-# `<channel>/<topic>` under its own external source, so one lookup answers
-# "has this asset been ordered, and is it finished" without any local state.
-#
-# One topic per asset work is load-bearing: agforge keys one Plane Work per
-# `<channel>/<topic>`, so reusing a topic would overwrite the ledger entry and
-# mix two specs into one chatlog. The underscore keeps the name clear of
-# agforge's own `assetplan-YYYYMMDD-HHMMSS-<id>` hyphenation, and agforge's
-# listener matches only the `assetplan-` prefix — the rest is free.
-AGFORGE_SOURCE = "agforge"
-ASSET_TOPIC_PREFIX = "assetplan-asset_"
 
 TASK_FILE = re.compile(r"^task(?P<number>\d+)\.md$")
 SUB_WORK_SERIAL = re.compile(r"#(?P<number>\d+)\s*$")
@@ -90,10 +72,6 @@ NO_SERIAL = 1 << 30
 _LABEL_CACHE: dict[tuple[str, str], str] = {}
 
 __all__ = [
-    "AGFORGE_SOURCE",
-    "ASSET_LABEL",
-    "ASSET_MARKER",
-    "ASSET_TOPIC_PREFIX",
     "AUTO_LABEL",
     "EXTERNAL_SOURCE",
     "TITLE_LIMIT",
@@ -104,10 +82,6 @@ __all__ = [
     "TaskChange",
     "Work",
     "add_comment",
-    "asset_answer_context",
-    "asset_order",
-    "asset_order_key",
-    "asset_topic",
     "cancel_sub_works",
     "compose_document",
     "description_html",
@@ -129,7 +103,6 @@ __all__ = [
     "starting_state_id",
     "state_groups",
     "state_id_for_group",
-    "strip_asset_marker",
     "sub_work_key",
     "sub_work_serial",
     "sub_works",
@@ -183,9 +156,8 @@ def ensure_issue(
     execution later (`next_work`).
 
     `labels` names further labels to attach, `AUTO` first and always. Names,
-    not ids: creating them on first use is `ensure_label`'s job, and the
-    caller that knows a Sub-Work is an asset should not have to know how a
-    Plane label comes into being.
+    not ids: creating them on first use is `ensure_label`'s job, so a caller
+    does not have to know how a Plane label comes into being.
     """
     names = [AUTO_LABEL, *(label for label in (labels or []) if label != AUTO_LABEL)]
     return shared_ensure_issue(
@@ -216,20 +188,6 @@ def task_files(directory: Path) -> list[tuple[int, Path]]:
             tasks.append((int(match.group("number")), path))
     tasks.sort(key=lambda item: item[0])
     return tasks
-
-
-def strip_asset_marker(text: str) -> tuple[str, bool]:
-    """`(text without a trailing `[Asset]` marker, whether it carried one)`.
-
-    The marker is a signal to this registration, not part of the task the
-    coding run will read, so it never reaches Plane. Matched
-    case-insensitively and only at the very end of the file, which is where
-    the superdirector guide puts it.
-    """
-    body = text.rstrip()
-    if not body.upper().endswith(ASSET_MARKER.upper()):
-        return text, False
-    return body[: -len(ASSET_MARKER)].rstrip() + "\n", True
 
 
 # --- projects --------------------------------------------------------------
@@ -373,19 +331,13 @@ def eligible_works(issues: list[dict], groups: dict[str, str], label_id: str) ->
 
 @dataclass(frozen=True)
 class Work:
-    """One chosen Work, with everything a `workrun-` serving needs of it.
-
-    `is_asset` is read off the issue's labels, not off any file: the
-    `task[N].md` that carried the `[Asset]` marker was deleted the moment
-    Plane accepted it (Step 2), so the label is the only surviving record.
-    """
+    """One chosen Work, with everything a `workrun-` serving needs of it."""
 
     slug: str
     name: str
     description: str
     project_id: str
     issue_id: str
-    is_asset: bool = False
 
 
 def next_work() -> Work | None:
@@ -405,7 +357,6 @@ def next_work() -> Work | None:
         label_id = labels.get(AUTO_LABEL.lower())
         if not label_id:
             continue  # no AUTO label in this project means no automatic work
-        asset_id = labels.get(ASSET_LABEL.lower())
         issues = list_issues(config, project_id)
         groups = state_groups(config, project_id)
         for issue in eligible_works(issues, groups, label_id):
@@ -416,20 +367,18 @@ def next_work() -> Work | None:
                      str(issue.get("id"))),
                     slug,
                     project_id,
-                    asset_id,
                     issue,
                 )
             )
     if not candidates:
         return None
-    _, slug, project_id, asset_id, issue = min(candidates, key=lambda item: item[0])
+    _, slug, project_id, issue = min(candidates, key=lambda item: item[0])
     return Work(
         slug,
         str(issue.get("name", "")),
         html_to_text(issue.get("description_html")),
         project_id,
         str(issue["id"]),
-        bool(asset_id) and asset_id in {str(value) for value in (issue.get("labels") or [])},
     )
 
 
@@ -484,14 +433,12 @@ def run_target(project: str, channel: str, topic: str, serial: int) -> RunTarget
         if groups.get(str(previous.get("state") or "")) != "completed":
             blocked_by = issue_label(plane_project, previous)
 
-    asset_id = labels_by_name(config, project_id).get(ASSET_LABEL.lower())
     work = Work(
         project,
         str(task.get("name", "")),
         html_to_text(task.get("description_html")),
         project_id,
         str(task["id"]),
-        bool(asset_id) and asset_id in {str(value) for value in (task.get("labels") or [])},
     )
     return RunTarget(
         work,
@@ -500,69 +447,6 @@ def run_target(project: str, channel: str, topic: str, serial: int) -> RunTarget
         issue_label(plane_project, issue),
         str(issue.get("name", "")),
         blocked_by,
-    )
-
-
-# --- the asset ledger, which is agforge's Work -----------------------------
-
-
-def asset_topic(issue_id: str) -> str:
-    """The `assetplan-` topic one asset Work is ordered and answered in."""
-    return f"{ASSET_TOPIC_PREFIX}{issue_id}"
-
-
-def asset_order_key(channel: str, issue_id: str) -> str:
-    """agforge keys its Work on the requesting `<channel>/<topic>`."""
-    return f"{channel}/{asset_topic(issue_id)}"
-
-
-def asset_order(project_id: str, channel: str, issue_id: str) -> tuple[str, dict | None]:
-    """Where one asset order stands, as `(state, agforge issue)`.
-
-    `"absent"` — never ordered; `"working"` — ordered, not finished;
-    `"done"` — agforge moved its Work to a `completed` state. There is no
-    local marker file anywhere in this: Plane is the ledger, so a wiped
-    `.local/` cannot make autolab order the same asset twice.
-    """
-    config = load_plane_config()
-    key = asset_order_key(channel, issue_id)
-    issue = shared_find_issue_by_external(config, project_id, AGFORGE_SOURCE, key)
-    if not issue:
-        return "absent", None
-    # The external lookup may answer with a thin object; the list row wins,
-    # the same rule `write_mission_workspace` follows.
-    issues = list_issues(config, project_id)
-    issue = next((row for row in issues if str(row.get("id")) == str(issue["id"])), issue)
-    groups = state_groups(config, project_id)
-    state = groups.get(str(issue.get("state") or ""))
-    return ("done" if state == "completed" else "working"), issue
-
-
-def asset_answer_context(project: str, work_id: str) -> tuple[str, str]:
-    """`(plan.md text, task.md text)` for one asset Sub-Work, read from Plane.
-
-    Plane is the only source. Step 2 deletes `plan.md` and `task[N].md` from
-    the project folder as soon as Plane accepts them, precisely so that there
-    is one canonical copy and it is this one.
-
-    The parent Work's description *is* `plan.md` — the whole file, heading
-    included — so it is recovered verbatim rather than recomposed. The
-    Sub-Work is recomposed into a document, which gives back the `task[N].md`
-    the superdirector wrote minus the `[Asset]` marker that was addressed to
-    the registration.
-    """
-    config, _, project_id = _prepare(project)
-    issues = list_issues(config, project_id)
-    task = next((row for row in issues if str(row.get("id")) == str(work_id)), None)
-    if not task:
-        raise MissionError(f"no Work {work_id!r} in project {project!r}")
-    parent_id = str(task.get("parent") or "")
-    parent = next((row for row in issues if str(row.get("id")) == parent_id), None)
-    if not parent:
-        raise MissionError(f"Work {work_id!r} has no parent to read the plan from")
-    return (
-        html_to_text(parent.get("description_html")),
-        compose_document(str(task.get("name", "")), task.get("description_html")),
     )
 
 
@@ -674,8 +558,7 @@ class TaskChange:
     """What one re-plan did to one task serial, for the Zulip side to mirror.
 
     `document` is the task as the developer should read it — the same
-    `# title\n\nbody` shape the superdirector wrote, minus the `[Asset]`
-    marker, which was addressed to this registration and never travels on.
+    `# title\n\nbody` shape the superdirector wrote.
     """
 
     serial: int
@@ -684,7 +567,6 @@ class TaskChange:
     title: str
     document: str
     label: str
-    is_asset: bool = False
 
 
 def reconcile_task_files(
@@ -708,10 +590,6 @@ def reconcile_task_files(
     `handle_superdirector_response` mirrors onto the mission's `workrun-`
     topics, one to one.
 
-    A task file ending in `[Asset]` needs a media asset before it can be
-    coded. The marker is stripped from the description and becomes the
-    `asset` label on the issue, which is what the `workrun-` serving
-    dispatches on.
     """
     config, plane_project, project_id = _prepare(project)
     issue = find_issue_by_external(config, project_id, work_key(channel, topic))
@@ -739,8 +617,7 @@ def reconcile_task_files(
 
     for number, path in task_files(plan_dir):
         seen.add(number)
-        text, is_asset = strip_asset_marker(path.read_text(encoding="utf-8"))
-        sub_title, sub_description = split_document(text)
+        sub_title, sub_description = split_document(path.read_text(encoding="utf-8"))
         document = compose_document(sub_title, description_html(sub_description))
         existing = live.get(number)
         if existing is None:
@@ -752,7 +629,6 @@ def reconcile_task_files(
                 state=state,
                 external_id=sub_work_key(channel, topic, number),
                 parent=str(issue["id"]),
-                labels=[ASSET_LABEL] if is_asset else None,
             )
             label = issue_label(plane_project, sub_issue)
             action = "created"
@@ -773,9 +649,8 @@ def reconcile_task_files(
                     {"name": sub_title, "description_html": description_html(sub_description)},
                 )
                 action = "changed-after-done" if done else "updated"
-        suffix = " [asset]" if is_asset else ""
-        lines.append(f'{action} sub-work {label} "{sub_title}"{suffix}')
-        changes.append(TaskChange(number, action, sub_title, document, label, is_asset))
+        lines.append(f'{action} sub-work {label} "{sub_title}"')
+        changes.append(TaskChange(number, action, sub_title, document, label))
 
     cancelled = state_id_for_group(config, project_id, "cancelled")
     for child in [*stale, *(live[serial] for serial in sorted(set(live) - seen))]:

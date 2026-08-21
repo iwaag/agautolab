@@ -37,8 +37,8 @@ ROLE_ALLOWED_TOOLS = {
     # claude_code waits for an interactive permission answer until the timeout.
     "coding": WORKING_ALLOWED_TOOLS,
     # `superdirector` writes `plan.md` and the task split into the project
-    # folder, and answers agforge's questions from it. It writes files, so it
-    # gets the writable set rather than `director`'s read-only one.
+    # folder. It writes files, so it gets the writable set rather than
+    # `director`'s read-only one.
     "superdirector": WORKING_ALLOWED_TOOLS,
     # `supercoder` does the coding work of one `workrun-` topic in the project
     # folder and writes `report.md` into the serving workspace, so it gets the

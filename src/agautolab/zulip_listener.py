@@ -2,12 +2,11 @@
 
 `agag.zulip.sweep_serve` finds every unresolved `workplan-*` topic whose last
 poster is not this bot, and `agag.topics.serve_topic` serves each one — the
-skeleton shared with agforge: ack, generation workspace, chatlog, the steps,
+skeleton shared with the other agents: ack, generation workspace, chatlog, the steps,
 always reply naming the failed step, then re-check for human posts that
 arrived during the run.
 
-Each serving cuts a new generation directory `<N>/`, the way agforge's create
-topics do. Before that, one stable directory was reused forever, so a
+Each serving cuts a new generation directory `<N>/`. Before that, one stable directory was reused forever, so a
 continued conversation ran on top of the previous run's leftovers. `N` is the
 workspace guard only: Sub-Work keys are one-per-serial for the life of the
 mission, so a re-plan updates the issue behind a serial instead of cancelling
@@ -23,8 +22,7 @@ The superdirector serves the topic alone — there is no front relay. It runs
 in the persistent project folder, where `main/`, `direction/` and `devlog/`
 are real directories (symlinking them into the workspace was tried first, and
 harness file tools do not follow directory symlinks), and the serving's own
-generation workspace is handed to it by absolute path — the same shape as the
-assetplan-topic answer flow. The chatlog and Plane mirror are read from there,
+generation workspace is handed to it by absolute path. The chatlog and Plane mirror are read from there,
 and `plan.md`, the task split and the flags are written back there, so
 everything one run wrote stays behind in its own generation as evidence and
 can never be acted on twice.
@@ -32,13 +30,10 @@ can never be acted on twice.
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import shutil
 import time
-import urllib.error
-import urllib.request
 from collections.abc import Callable
 from pathlib import Path
 
@@ -64,13 +59,9 @@ from agag.zulip import (
 )
 
 from .mission import (
-    ASSET_TOPIC_PREFIX,
     RunTarget,
     TaskChange,
     Work,
-    asset_answer_context,
-    asset_order,
-    asset_topic,
     cancel_sub_works,
     compose_document,
     description_html,
@@ -101,7 +92,6 @@ RECORDS_ROOT = AGAUTOLAB_ROOT / ".local" / "agent"
 
 WORKPLAN_TOPIC_PREFIX = "workplan-"
 WORKRUN_TOPIC_PREFIX = "workrun-"
-ASSETPLAN_TOPIC_PREFIX = "assetplan-"
 BMINING_TOPIC_PREFIX = "bmining-"
 PROJECT_CHANNEL_PREFIX = "pj-"
 # What this listener answers, wherever it is subscribed. Its own channel is
@@ -109,7 +99,6 @@ PROJECT_CHANNEL_PREFIX = "pj-"
 SWEEP_PREFIXES = (
     WORKPLAN_TOPIC_PREFIX,
     WORKRUN_TOPIC_PREFIX,
-    ASSETPLAN_TOPIC_PREFIX,
     BMINING_TOPIC_PREFIX,
 )
 # One channel per mission Work, named after that Work's Plane label:
@@ -147,41 +136,7 @@ CURRENT_DIR = "current"
 # recognise, short enough to stay one readable path component.
 MISSION_DIR_TITLE_CHARS = 48
 
-# --- the asset route -------------------------------------------------------
-#
-# agforge's request service, and the footer it puts on every delivery. A
-# presigned download URL lives 60 minutes; the object behind it does not
-# expire, so autolab keeps the *key* and asks for a fresh URL immediately
-# before it launches a run that may take 1200 s. That ordering is the whole
-# point — a URL recovered any earlier could die mid-run.
-AGFORGE_URL = os.environ.get("AGFORGE_URL", "http://localhost:8092").rstrip("/")
-S3_KEY_MARKER = "[S3KEY]"
-S3_KEY_LINE = re.compile(rf"^\s*{re.escape(S3_KEY_MARKER)}\s+(?P<key>\S+)\s*$", re.MULTILINE)
-RESIGN_TIMEOUT_SECONDS = 30
-
-# The project's art direction, quoted into every asset order.
-AESTHETICS_FILE = "aesthetics.md"
-
-# --- answering agforge on an assetplan- topic ---------------------------
-#
-# The mention gate is the loop breaker between the two bots. agforge reacts to
-# any `assetplan-` post that is not its own; autolab reacts only when the last
-# message mentions it by name. Without that asymmetry the two would answer
-# each other forever, one paid agent run per lap.
 CHATLOG_FILE = "chatlog.md"
-TASK_FILE = "task.md"
-ANSWER_FILE = "answer.md"
-ANSWER_ROLE = "answer"
-
-# Appended to the run guide when the work needs an asset. The director check
-# that would normally weigh the delivered asset against the spec is
-# deliberately skipped this episode, so the judgement is handed to the coding
-# run itself, in the prompt.
-ASSET_PROMPT_NOTE = (
-    "\n\nNote: the asset required by this work can be downloaded from the URL "
-    "below. If the asset does not match the spec, try to compromise; only if "
-    "truly unacceptable, treat the work as failed:\n"
-)
 
 # One topic occupies the listener for at most this long; the sweep loop is
 # single-threaded and serial, so this is also the delay before the next
@@ -198,10 +153,6 @@ __all__ = [
     "RunProgress",
     "archive_work_channel",
     "ZULIP_ENV",
-    "aesthetics_text",
-    "answer_prompt",
-    "asset_gate",
-    "asset_order_text",
     "bmining_prompt",
     "bmining_work_directory",
     "direction_directory",
@@ -209,12 +160,10 @@ __all__ = [
     "find_channel",
     "dispatch",
     "entrance_reply",
-    "find_asset_key",
     "format_chatlog",
     "generation_dir",
     "guide",
     "handle_bmining",
-    "handle_assetplan",
     "handle_workrun",
     "handle_superdirector_response",
     "handle_topic",
@@ -223,18 +172,15 @@ __all__ = [
     "mirror_task_changes",
     "mission_directory",
     "main",
-    "mentions_us",
     "next_record_path",
     "prepare_run_surfaces",
     "parse_run_topic",
     "progress_line",
-    "run_answer",
     "workrun_supercoder",
     "run_topic",
     "project_channel",
     "project_directory",
     "record_task_in_devlog",
-    "resign",
     "run_director",
     "run_superdirector",
     "superdirector_prompt",
@@ -566,9 +512,8 @@ def handle_superdirector_response(
     plan = workspace / PLAN_FILE
     if plan.is_file():
         # Title and description both from the plan: the Work is what the
-        # superdirector decided the mission means. The asset answer flow
-        # reads the description back as `plan.md`, so the whole file travels,
-        # heading included.
+        # superdirector decided the mission means. The whole file travels,
+        # heading included, so Plane holds it verbatim.
         plan_text = plan.read_text(encoding="utf-8")
         title, _ = split_document(plan_text)
         line, label = upsert_work(project, channel, topic, title, plan_text)
@@ -598,8 +543,7 @@ def handle_superdirector_response(
     return sections, resolve_after
 
 
-def supercoder_prompt(bot_name: str, workspace: Path, task: str,
-                      asset_url: str | None) -> str:
+def supercoder_prompt(bot_name: str, workspace: Path, task: str) -> str:
     """The placement lines, the task, then the guide — `superdirector_prompt`'s
     shape: read from and write to the workspace by absolute path, work in the
     project itself.
@@ -620,10 +564,7 @@ def supercoder_prompt(bot_name: str, workspace: Path, task: str,
         "",
         task.strip(),
     ]
-    guide_text = guide("workrun_supercoder", "guide.md")
-    if asset_url:
-        guide_text = f"{guide_text}{ASSET_PROMPT_NOTE}{asset_url}"
-    return prompt_with_guide(lines, guide_text)
+    return prompt_with_guide(lines, guide("workrun_supercoder", "guide.md"))
 
 
 def workrun_supercoder(prompt: str, cwd: Path,
@@ -739,96 +680,8 @@ class RunProgress:
             )
 
 
-# --- the asset state machine -----------------------------------------------
-
-
 def project_channel(slug: str) -> str:
     return f"{PROJECT_CHANNEL_PREFIX}{slug}"
-
-
-def aesthetics_text(slug: str) -> str:
-    """The project's art direction, or empty when it has none yet."""
-    path = PROJECTS_ROOT / slug / "direction" / AESTHETICS_FILE
-    return path.read_text(encoding="utf-8").strip() if path.is_file() else ""
-
-
-def asset_order_text(work: Work) -> str:
-    """The order agforge reads.
-
-    Written to stand alone: agforge's front reads the whole topic chatlog and
-    its generator plans from that, so everything the asset has to satisfy —
-    what it is, what it is for, and the project's house style — has to be in
-    this one post. Nothing here points at a file agforge cannot open.
-    """
-    parts = [f"# {work.name}", work.description.strip()]
-    if aesthetics := aesthetics_text(work.slug):
-        parts.append(f"Art direction for this project:\n{aesthetics}")
-    return "\n\n".join(part for part in parts if part)
-
-
-def find_asset_key(client: ZulipClient, channel: str, topic: str) -> str | None:
-    """The newest `[S3KEY] <key>` footer in the asset topic, or None.
-
-    agforge puts that footer on the delivery post (Step 4). Reading it back
-    out of the topic needs no new Plane API and no shared code between the two
-    agents — only the marker, which is documented on both sides.
-    """
-    for message in reversed(client.topic_history(channel, topic, num_before=HISTORY_MESSAGES)):
-        if match := S3_KEY_LINE.search(str(message.get("content", ""))):
-            return match.group("key")
-    return None
-
-
-def resign(key: str) -> str:
-    """A fresh download URL for `key`, from agforge's `POST /api/resign`."""
-    request = urllib.request.Request(
-        f"{AGFORGE_URL}/api/resign",
-        data=json.dumps({"key": key}).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=RESIGN_TIMEOUT_SECONDS) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except (OSError, ValueError) as error:
-        raise ListenerError(f"could not re-sign {key}: {error}") from error
-    url = payload.get("url") if isinstance(payload, dict) else None
-    if not url:
-        raise ListenerError(f"re-signing {key} returned no url: {payload!r}")
-    return str(url)
-
-
-def asset_gate(client: ZulipClient, work: Work) -> tuple[list[str], str | None]:
-    """What an `asset`-labelled Work needs before it can be coded.
-
-    Returns `(report sections, download url)`. A `None` url means the serving
-    finishes here — the order was just placed, or agforge is still on it. The
-    Sub-Work is deliberately left where it is in both cases; the next post in
-    the topic looks again. Since topics are per-task now, a waiting asset
-    blocks only its own task, never the whole queue.
-
-    Plane is the ledger for all three states; no local file records that an
-    order was placed.
-    """
-    channel = project_channel(work.slug)
-    topic = asset_topic(work.issue_id)
-    state, _ = asset_order(work.project_id, channel, work.issue_id)
-
-    if state == "absent":
-        topic_write(topic, asset_order_text(work), channel=channel, client=client)
-        return [f"asset ordered in {channel}/{topic}"], None
-    if state != "done":
-        # No `assetrun-` post is emitted: the Omni Agent fires that by hand
-        # this episode (Deus Ex Machina, recorded in the episode doc).
-        return [f"asset in progress in {channel}/{topic}"], None
-
-    key = find_asset_key(client, channel, topic)
-    if not key:
-        raise ListenerError(
-            f"the asset work for {channel}/{topic} is completed but the topic "
-            f"carries no {S3_KEY_MARKER} footer"
-        )
-    return [f"asset ready ({key})"], resign(key)
 
 
 def remove_work_directory(work_dir: Path) -> None:
@@ -966,15 +819,6 @@ def serve_run(context) -> TopicResult:
         return TopicResult([f"{PREVIOUS_WORK_REPLY} ({target.blocked_by})"])
 
     sections: list[str] = []
-    asset_url: str | None = None
-    if target.work.is_asset:
-        context.step = "asset check"
-        asset_sections, asset_url = asset_gate(context.client, target.work)
-        sections.extend(asset_sections)
-        if asset_url is None:
-            # Ordered, or still being made. Per-task topics mean this blocks
-            # only its own task now, not the whole queue.
-            return TopicResult(sections)
 
     context.step = "project setup"
     init_project(slug)
@@ -993,7 +837,7 @@ def serve_run(context) -> TopicResult:
     try:
         sections.append(
             workrun_supercoder(
-                supercoder_prompt(context.bot_name, workspace, task_text, asset_url),
+                supercoder_prompt(context.bot_name, workspace, task_text),
                 project_directory(slug),
                 on_event=progress,
             )
@@ -1028,105 +872,6 @@ def handle_workrun(client: ZulipClient, channel: str, topic: str) -> None:
     """Serve one awaiting `workrun-` topic through the shared skeleton."""
     log(f"workrun topic {channel!r}/{topic!r}")
     serve_topic(client, channel, topic, serve_run, ack_text=ACK_TEXT, empty_reply=EMPTY_REPLY)
-
-
-# --- answering agforge's questions on assetplan- topics ----------------------
-
-
-def mentions_us(content: str, bot_name: str, self_id: int) -> bool:
-    """Whether a message mentions this bot.
-
-    Zulip writes a mention as `@**Name**`, silences it as `@_**Name**`, and
-    disambiguates duplicate names as `@**Name|<id>**`. All three are the same
-    intent, so all three open the gate; `apply_markdown: false` means the raw
-    syntax is what arrives.
-    """
-    pattern = rf"@_?\*\*{re.escape(bot_name)}(\|{self_id})?\*\*"
-    return re.search(pattern, content) is not None
-
-
-def answer_prompt(answer_dir: Path) -> str:
-    """The placement lines, then the answer guide."""
-    return prompt_with_guide(
-        [
-            f'The conversation with the asset creator ("{CHATLOG_FILE}"), the plan '
-            f'it belongs to ("{PLAN_FILE}") and the task it is for ("{TASK_FILE}") '
-            f'are placed in "{answer_dir}".',
-            f'Write your answer to "{answer_dir / ANSWER_FILE}".',
-            "Your working directory is the project itself.",
-        ],
-        guide("assetplan_answer_superdirector", "guide.md"),
-    )
-
-
-def run_answer(answer_dir: Path, project_dir: Path) -> str:
-    """One answer run: reads from `answer_dir`, but works in the project."""
-    record = next_record_path(RECORDS_ROOT / ANSWER_ROLE)
-    output, _, exit_code = run_role(
-        "superdirector",
-        answer_prompt(answer_dir),
-        cwd=project_dir,
-        timeout=SUPERDIRECTOR_TIMEOUT_SECONDS,
-        record=record,
-    )
-    if exit_code != 0:
-        raise ListenerError(f"answer run exited {exit_code}: {output.strip()[:500]}")
-    return output.strip()
-
-
-def handle_assetplan(client: ZulipClient, channel: str, topic: str) -> None:
-    """Answer agforge's question on one `assetplan-asset_<work_id>` topic.
-
-    Deliberately not `serve_topic`-shaped: there is no ack. An ack would make
-    autolab the topic's last poster, and agforge's sweep would resume the
-    conversation on it — before the answer exists. The single post at the end
-    is both the answer and the hand-back.
-
-    Two gates come before any cost is incurred. The topic name must be an
-    asset topic, and the last message must mention this bot. Failing either,
-    the handler returns without posting: it is then still not the last poster,
-    so the sweep will look again next time, at the price of one history read.
-    """
-    log(f"assetplan topic {channel!r}/{topic!r}")
-    if not topic.startswith(ASSET_TOPIC_PREFIX):
-        log(f"ignoring {topic!r}: not an asset topic")
-        return
-
-    self_user = client.whoami()
-    self_id = int(self_user["user_id"])
-    bot_name = str(self_user.get("full_name") or client.email)
-
-    history = client.topic_history(channel, topic, num_before=HISTORY_MESSAGES)
-    if not history:
-        return
-    last = history[-1]
-    if last.get("sender_id") == self_id:
-        return
-    if not mentions_us(str(last.get("content", "")), bot_name, self_id):
-        log(f"ignoring {channel!r}/{topic!r}: the last message does not mention {bot_name!r}")
-        return
-
-    project = project_from_channel(channel)
-    work_id = topic.removeprefix(ASSET_TOPIC_PREFIX)
-    plan, task = asset_answer_context(project, work_id)
-
-    number = next_generation(topic_workspace(channel, topic))
-    answer_dir = generation_dir(channel, topic, number, ANSWER_ROLE)
-    chatlog_path(answer_dir).write_text(
-        format_chatlog(history, self_id), encoding="utf-8"
-    )
-    (answer_dir / PLAN_FILE).write_text(plan, encoding="utf-8")
-    (answer_dir / TASK_FILE).write_text(task, encoding="utf-8")
-
-    run_answer(answer_dir, project_directory(project))
-
-    answer = answer_dir / ANSWER_FILE
-    if not answer.is_file():
-        raise ListenerError(f"the answer run wrote no {ANSWER_FILE} in {answer_dir}")
-    # Posting it makes autolab the last non-forge poster, which is exactly
-    # what lets agforge's sweep pick the conversation back up.
-    topic_write(topic, answer.read_text(encoding="utf-8").strip(),
-                channel=channel, client=client)
 
 
 # --- brain-mining discussion on bmining- topics -----------------------------
@@ -1256,12 +1001,10 @@ def dispatch(client: ZulipClient, channel: str, topic: str) -> None:
     Every `workrun-` topic elsewhere still comes here from anywhere, but
     `serve_run` is what decides whether it is bound to a task: one outside a
     `work-` channel, or without a `workrun-task<N>-…` name, gets one
-    explanatory reply instead of a run. `workplan-` and `assetplan-` topics
-    still need a `pj-*` channel and are
-    silently ignored elsewhere: with `#general` now swept, a stray `workplan-`
-    topic there would otherwise get an error posted into it on every sweep,
-    and agforge's own `assetplan-` topics in `#FreeForge` are none of autolab's
-    business.
+    explanatory reply instead of a run. `workplan-` topics still need a `pj-*`
+    channel and are silently ignored elsewhere: with `#general` now swept, a
+    stray `workplan-` topic there would otherwise get an error posted into it
+    on every sweep.
     """
     if channel == instance_name():
         client.send_to_channel(channel, topic, entrance_reply())
@@ -1271,9 +1014,6 @@ def dispatch(client: ZulipClient, channel: str, topic: str) -> None:
         return
     if not channel.startswith(PROJECT_CHANNEL_PREFIX):
         log(f"ignoring {topic!r}: {channel!r} is not a project channel")
-        return
-    if topic.startswith(ASSETPLAN_TOPIC_PREFIX):
-        handle_assetplan(client, channel, topic)
         return
     if topic.startswith(BMINING_TOPIC_PREFIX):
         handle_bmining(client, channel, topic)

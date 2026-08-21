@@ -334,42 +334,6 @@ def test_reconcile_leaves_a_child_nobody_serialised(plane, tmp_path):
     assert [c.action for c in changes] == ["created"]
 
 
-@pytest.mark.parametrize(
-    "text,stripped,is_asset",
-    [
-        ("# Art\nA sprite sheet.\n\n[Asset]\n", "# Art\nA sprite sheet.\n", True),
-        ("# Art\nA sprite sheet. [Asset]", "# Art\nA sprite sheet.\n", True),
-        ("# Art\nA sprite sheet.\n[asset]", "# Art\nA sprite sheet.\n", True),
-        ("# Code\nWrite it.\n", "# Code\nWrite it.\n", False),
-        # Only the *end* of the file is the marker; a mention is prose.
-        ("# Code\n[Asset] is a marker.\n", "# Code\n[Asset] is a marker.\n", False),
-    ],
-)
-def test_strip_asset_marker_only_matches_the_tail(text, stripped, is_asset):
-    assert mission.strip_asset_marker(text) == (stripped, is_asset)
-
-
-def test_reconcile_labels_an_asset_sub_work(plane, tmp_path):
-    """The marker never reaches Plane; the label does, and that label is what
-    the `workrun-` serving dispatches on."""
-    plane.add(name="Work", external_id=WORK_KEY)
-    (tmp_path / "task1.md").write_text("# Sprite sheet\nA 32x32 hero.\n\n[Asset]\n")
-    (tmp_path / "task2.md").write_text("# Movement\nWire the input.\n")
-
-    lines, _ = mission.reconcile_task_files("demo", CHANNEL, TOPIC, tmp_path)
-
-    assert lines == [
-        'created sub-work PD-5 "Sprite sheet" [asset]',
-        'created sub-work PD-6 "Movement"',
-    ]
-    asset, plain = plane.creates
-    by_id = {row["id"]: row["name"] for row in plane.labels}
-    assert [by_id[label] for label in asset["labels"]] == ["AUTO", "asset"]
-    assert [by_id[label] for label in plain["labels"]] == ["AUTO"]
-    assert "[Asset]" not in asset["description_html"]
-    assert asset["description_html"] == "<p>A 32x32 hero.</p>"
-
-
 def test_reconcile_requires_the_work(plane, tmp_path):
     with pytest.raises(mission.MissionError):
         mission.reconcile_task_files("demo", CHANNEL, TOPIC, tmp_path)
@@ -476,40 +440,8 @@ def test_next_work_picks_the_oldest_across_auto_projects(monkeypatch):
     }
     next_work_plane(monkeypatch, projects, issues)
     assert mission.next_work() == mission.Work(
-        "demo-two", "Earlier", "do & verify", "p2", "i2", is_asset=False
+        "demo-two", "Earlier", "do & verify", "p2", "i2"
     )
-
-
-def test_next_work_reads_the_asset_label_off_the_issue(monkeypatch):
-    """The `task[N].md` that carried `[Asset]` was deleted the moment Plane
-    accepted it, so the label is the only surviving record."""
-    projects = [{"id": "p1", "name": "Demo", "description": "[AUTO] autolab project: demo"}]
-    issues = {
-        "p1": [
-            {"id": "i1", "name": "Sprite sheet", "labels": ["p1-auto", "p1-asset"],
-             "state": "todo", "created_at": "2026-01-01", "external_id": "c/t@1#1",
-             "description_html": "<p>a hero</p>"},
-        ]
-    }
-    next_work_plane(
-        monkeypatch, projects, issues,
-        labels_by_project={"p1": {"auto": "p1-auto", "asset": "p1-asset"}},
-    )
-    assert mission.next_work().is_asset is True
-
-
-def test_a_project_without_an_asset_label_yields_plain_works(monkeypatch):
-    """No `asset` label in the project means no issue can carry it — and the
-    lookup must not mistake a missing id for a match."""
-    projects = [{"id": "p1", "name": "Demo", "description": "[AUTO] autolab project: demo"}]
-    issues = {
-        "p1": [
-            {"id": "i1", "name": "Plain", "labels": ["p1-auto"], "state": "todo",
-             "created_at": "2026-01-01", "external_id": "c/t@1#1"},
-        ]
-    }
-    next_work_plane(monkeypatch, projects, issues, labels_by_project={"p1": {"auto": "p1-auto"}})
-    assert mission.next_work().is_asset is False
 
 
 def test_next_work_is_none_without_an_eligible_issue(monkeypatch):
@@ -524,54 +456,6 @@ def test_next_work_skips_a_project_without_the_auto_label(monkeypatch):
     issues = {"p1": [{"id": "i1", "labels": ["x"], "state": "todo", "created_at": "1"}]}
     next_work_plane(monkeypatch, projects, issues, labels_by_project={"p1": {}})
     assert mission.next_work() is None
-
-
-def test_asset_topic_and_key_name_one_topic_per_asset_work():
-    """One topic per asset work is load-bearing: agforge keys one Work per
-    `<channel>/<topic>`, so reuse would overwrite the ledger entry."""
-    assert mission.asset_topic("i9") == "assetplan-asset_i9"
-    assert mission.asset_order_key("pj-demo", "i9") == "pj-demo/assetplan-asset_i9"
-    # agforge's listener matches only the `assetplan-` prefix, and the
-    # underscore keeps this clear of its own `assetplan-<stamp>-<id>` names.
-    assert mission.asset_topic("i9").startswith("assetplan-")
-
-
-def asset_plane(monkeypatch, *, issue, issues=(), groups=None):
-    monkeypatch.setattr(mission, "load_plane_config", lambda: mission.PlaneConfig(
-        "http://plane", "key", "workspace"))
-    seen = []
-    monkeypatch.setattr(
-        mission, "shared_find_issue_by_external",
-        lambda config, pid, source, key: seen.append((source, key)) or issue,
-    )
-    monkeypatch.setattr(mission, "list_issues", lambda config, pid: list(issues))
-    monkeypatch.setattr(
-        mission, "state_groups",
-        lambda config, pid: groups or {"todo": "unstarted", "done-id": "completed"},
-    )
-    return seen
-
-
-def test_asset_order_is_absent_until_agforge_has_a_work(monkeypatch):
-    seen = asset_plane(monkeypatch, issue=None)
-    assert mission.asset_order("p1", "pj-demo", "i9") == ("absent", None)
-    # Keyed under agforge's source, never autolab's.
-    assert seen == [("agforge", "pj-demo/assetplan-asset_i9")]
-
-
-def test_asset_order_is_working_while_agforge_has_not_finished(monkeypatch):
-    row = {"id": "f1", "state": "todo"}
-    asset_plane(monkeypatch, issue={"id": "f1"}, issues=[row])
-    state, issue = mission.asset_order("p1", "pj-demo", "i9")
-    assert (state, issue) == ("working", row)
-
-
-def test_asset_order_is_done_when_agforge_completed_it(monkeypatch):
-    """The external lookup may answer with a thin object carrying no state;
-    the list row is what decides."""
-    row = {"id": "f1", "state": "done-id"}
-    asset_plane(monkeypatch, issue={"id": "f1"}, issues=[row])
-    assert mission.asset_order("p1", "pj-demo", "i9")[0] == "done"
 
 
 def workspace_plane(monkeypatch, *, issue, issues, groups):
@@ -636,7 +520,6 @@ def test_run_target_reads_the_task_at_a_serial_and_its_mission(plane):
     assert target.work.name == "Second"
     assert target.work.description == "do that"
     assert target.work.issue_id == "issue-3"
-    assert target.work.is_asset is False
     # The previous task is Done, so nothing blocks.
     assert target.blocked_by is None
 
@@ -654,15 +537,6 @@ def test_the_first_task_has_no_gate(plane):
     plane.add(name="First", external_id=f"{WORK_KEY}#1", parent=work["id"])
 
     assert mission.run_target("demo", CHANNEL, TOPIC, 1).blocked_by is None
-
-
-def test_run_target_reads_the_asset_label_off_the_task(plane):
-    plane.labels.extend([{"id": "auto-id", "name": "AUTO"}, {"id": "asset-id", "name": "asset"}])
-    work = plane.add(name="Work", external_id=WORK_KEY)
-    plane.add(name="Sprite sheet", external_id=f"{WORK_KEY}#1", parent=work["id"],
-              labels=["auto-id", "asset-id"])
-
-    assert mission.run_target("demo", CHANNEL, TOPIC, 1).work.is_asset is True
 
 
 def test_run_target_names_a_serial_that_is_not_there(plane):

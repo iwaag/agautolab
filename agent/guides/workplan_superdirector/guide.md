@@ -14,7 +14,6 @@ And next, if you think the new mission is better divided into smaller tasks, cre
 The first line of "plan.md" and "task[N].md" is a Markdown heading ("# ...") and becomes the title,
 and the rest of the file becomes the description.
 
-Among tasks, if you need assets, create dedicated task which describe what you need and how to place it in your project, and add "[Asset]" at the end of file.
 
 If the requester has clearly said that the mission can be started, create file "start.flag".
 If the requester has clearly said that the mission should be cancelled, create file "cancel.flag".

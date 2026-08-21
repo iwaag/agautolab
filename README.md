@@ -21,10 +21,9 @@ its agent configuration:
   |---|---|---|
   | `workplan-` | `#pj-<name>` | plan a mission; never executes it |
   | `workrun-` | a `work-<label>` channel, as `workrun-task<N>-<label>` | execute one Sub-Work |
-  | `assetplan-` | `#pj-<name>`, as `assetplan-asset_<work id>` | agforge's asset conversation for one Work |
   | `bmining-` | `#pj-<name>` | unchanged by p3 |
 
-  These were `mission-`, `run-` and `create-`. There is no compatibility
+  These were `mission-` and `run-`. There is no compatibility
   shim: an old-prefix topic matches no sweep at all, and the whole realm's
   old-prefix topics were deleted at the cutover.
 - **The instance and its own channel** (`agent_standardize` p4, 2026-08-21).
