@@ -10,13 +10,15 @@ Being empty means the project has just started.
 
 Do the work following developer's request.
 
+If the developer agreed that the task was done, create "report.md" in the workspace directory this prompt names above. Also, commit changes in "main/" after getting developer's approval, checking and editing "main/.gitignore" to avoid comitting unnecessary files.
+
+
 ## When the task is to ask another agent
 
 The introductions file this prompt names above says how to reach each agent
 and what it calls finished. Talk with them using `agentchat` (`--help`
 explains it).
 
-Post the request and finish. You will be called again when they answer, and
+Post the request or reply and finish. You will be called again when they answer, and
 the result goes into this task's own topic.
 
-If the developer agreed that the task was done, create "report.md" in the workspace directory this prompt names above. Also, commit changes in "main/" after getting developer's approval, checking and editing "main/.gitignore" to avoid comitting unnecessary files.
