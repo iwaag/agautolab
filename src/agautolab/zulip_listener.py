@@ -1170,6 +1170,7 @@ def serve_entrance(context) -> TopicResult:
         # that found nothing there. The transcript is what tells the two
         # apart afterwards; it stays in the serving's own generation.
         transcript=workspace / "transcript.jsonl",
+        stream=True,
         home=(context.channel, context.topic),
     )
     if exit_code != 0:

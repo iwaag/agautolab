@@ -156,6 +156,7 @@ def run_role(role: str, prompt: str, *, cwd: Path, timeout: float,
              record: Path | None = None,
              project: str | None = None,
              home: tuple[str, str] | None = None,
+             stream: bool = False,
              on_event: Callable[[dict], None] | None = None) -> tuple[str, dict, int]:
     """Resolve `role`, run it once, and return output, record, and exit code.
 
@@ -184,6 +185,7 @@ def run_role(role: str, prompt: str, *, cwd: Path, timeout: float,
         # classifier is bypassed; the allowlist stays as documentation of
         # what a role is expected to reach for.
         skip_permissions=agent.harness == "claude_code",
+        stream=stream,
         on_event=on_event,
         transcript_path=transcript,
     )

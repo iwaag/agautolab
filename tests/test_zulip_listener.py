@@ -1475,9 +1475,9 @@ def test_serving_the_entrance_writes_the_chatlog_and_runs_the_front(monkeypatch,
     calls = {}
 
     def fake_run_role(role, prompt, *, cwd, timeout, record=None, home=None,
-                      transcript=None, **kw):
+                      transcript=None, stream=False, **kw):
         calls.update(role=role, prompt=prompt, cwd=cwd, home=home,
-                     transcript=transcript)
+                     transcript=transcript, stream=stream)
         return "S2-30 is finished; nothing else is running.", {}, 0
 
     monkeypatch.setattr(zulip_listener, "run_role", fake_run_role)
@@ -1500,6 +1500,7 @@ def test_serving_the_entrance_writes_the_chatlog_and_runs_the_front(monkeypatch,
     # What it looked at is kept: an answer that skipped a project and one
     # that found nothing there are the same sentence otherwise.
     assert calls["transcript"] == calls["cwd"] / "transcript.jsonl"
+    assert calls["stream"] is True
 
 
 def test_a_failed_entrance_run_is_an_error_the_topic_hears_about(monkeypatch, tmp_path):
