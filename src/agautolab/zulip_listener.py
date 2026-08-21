@@ -505,7 +505,11 @@ def mirror_task_changes(
         if change.action == "created":
             anchor_run_topic(client, channel, topic, mission, change.issue_id, self_id)
             topic_write(topic, change.document, channel=channel, client=client)
-            lines.append(f"opened {channel}/{topic}")
+            # Saying where is not enough: agforge learned in p8 to say that
+            # posting there is what starts it, and p9 watched a supervisor
+            # read "opened work-…/workrun-task1-…" as "it is running now" and
+            # then wait for a task nobody had triggered.
+            lines.append(f"opened {channel}/{topic}; post there to start it")
         elif change.action == "updated":
             topic_write(
                 topic,
@@ -607,7 +611,11 @@ def handle_superdirector_response(
     start_flag = workspace / "start.flag"
     if start_flag.is_file():
         label = transition_work(project, channel, topic, "started")
-        sections.append(f"mission {label} is now In Progress")
+        sections.append(
+            f"mission {label} is now In Progress; each task waits for a post "
+            f"in its own `{WORKRUN_TOPIC_PREFIX}…` topic, and nothing runs "
+            f"until somebody makes it"
+        )
 
     cancel_flag = workspace / "cancel.flag"
     if cancel_flag.is_file():

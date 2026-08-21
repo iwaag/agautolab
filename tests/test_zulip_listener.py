@@ -354,7 +354,7 @@ def test_a_plan_reconciles_the_split_and_builds_the_run_surfaces(monkeypatch, tm
         'updated PD-4 "The plan"',
         'created sub-work PD-5 "First"',
         "work channel work-pd-4 is ready",
-        "opened work-pd-4/workrun-task1-pd-4",
+        "opened work-pd-4/workrun-task1-pd-4; post there to start it",
     ]
     assert resolve_after is False
 
@@ -437,7 +437,7 @@ def test_a_replan_mirrors_each_change_onto_its_own_run_topic(monkeypatch, tmp_pa
     ]
     assert sections[-3:] == [
         "updated work-pd-4/workrun-task2-pd-4",
-        "opened work-pd-4/workrun-task3-pd-4",
+        "opened work-pd-4/workrun-task3-pd-4; post there to start it",
         "cancelled and resolved work-pd-4/workrun-task4-pd-4",
     ]
 
@@ -561,7 +561,13 @@ def test_start_flag_moves_the_work_to_in_progress(monkeypatch, tmp_path):
     )
 
     assert calls == [("transition", "started")]
-    assert sections == ["mission PD-4 is now In Progress"]
+    # Starting the mission does not start a task: a task waits for a post in
+    # its own topic, and the line says so, because p9 watched a supervisor
+    # assume otherwise and wait for work nobody had triggered.
+    assert sections == [
+        "mission PD-4 is now In Progress; each task waits for a post in its "
+        "own `workrun-…` topic, and nothing runs until somebody makes it"
+    ]
     assert resolve_after is False
 
 
