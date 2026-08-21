@@ -72,3 +72,10 @@ each in its own topic.
 
 A stretch of work can take many minutes, so expect to wait rather than to be
 answered at once.
+
+**A task may be a delegation.** If the plan says a task's job is to ask
+another agent for something — a media asset, say — then that task's whole
+work is the conversation with that agent, and its result is posted back into
+its own `workrun-…` topic. Those run longest of all, because two agents are
+talking; the topic is still where you watch it, and it still does not close
+until you say it is done.

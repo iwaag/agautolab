@@ -1,14 +1,30 @@
-"""Resolve an agautolab role and launch its configured harness."""
+"""Resolve an agautolab role and launch its configured harness.
+
+A run also gets the handover that lets it talk to other agents: `agentchat`
+on PATH and `AGENTCHAT_ZULIP_ENV` naming this instance's own credentials, so
+a run that delegates speaks as this autolab instance rather than as a human.
+The identity travels as a path, never as a value — the secret stays in
+`.local/`.
+"""
 
 from __future__ import annotations
 
+import os
+import sys
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 
 from agag.harness import run_harness, write_run_record
 
 from .agent_settings import PROJECT_ROOT, resolve_project_role
 from .project_settings import load_project_roles, project_name_from_direction
+
+#: This instance's Zulip credentials. A delegation is attributable to the
+#: instance that made it.
+ZULIP_ENV = PROJECT_ROOT / ".local" / "zulip.env"
+#: `agag.chat.ENV_VARIABLE`, spelled here so the run and the CLI agree.
+AGENTCHAT_ENV_VARIABLE = "AGENTCHAT_ZULIP_ENV"
 
 # The working grant shared by the roles that actually do work. `front` runs
 # `uv run new_mission.py` in its own workspace, so it needs the same shell as
@@ -22,7 +38,10 @@ WORKING_ALLOWED_TOOLS = (
     "Bash(find:*),Bash(rg:*),Bash(sed:*),Bash(awk:*),Bash(mkdir:*),Bash(cp:*),"
     "Bash(mv:*),Bash(rm:*),Bash(chmod:*),Bash(touch:*),Bash(date:*),Bash(pwd:*),"
     "Bash(cd:*),Bash(which:*),Bash(env:*),Bash(sleep:*),Bash(kill:*),Bash(ps:*),Bash(echo:*),"
-    "Bash(open:*),Bash(tar:*),Bash(make:*),Bash(bash:*),Bash(sh:*)"
+    "Bash(open:*),Bash(tar:*),Bash(make:*),Bash(bash:*),Bash(sh:*),"
+    # How a run reaches another agent. `tools/agents.md` says who is there;
+    # this is what lets a run write to them and wait for the answer.
+    "Bash(agentchat:*)"
 )
 
 ROLE_ALLOWED_TOOLS = {
@@ -79,6 +98,26 @@ AGCODE_DEADLINE_MARGIN_S = 60
 AGCODE_MAX_TOKENS = 16384
 
 
+def tool_environment(
+    bin_dir: Path | None = None, zulip_env: Path | None = None
+) -> dict[str, str]:
+    """The handover: `agentchat` reachable by name, speaking as this instance.
+
+    `run_harness` launches with `{**os.environ, **agent.environment}`, so this
+    is the whole seam. The bin directory is the one holding the interpreter
+    that runs the listener — in a `uv` project that is `.venv/bin`, where the
+    `agentchat` console script is installed — so no deployment path is
+    written down anywhere.
+    """
+    directory = Path(sys.executable).parent if bin_dir is None else bin_dir
+    environment = {AGENTCHAT_ENV_VARIABLE: str(zulip_env or ZULIP_ENV)}
+    if directory.is_dir():
+        environment["PATH"] = os.pathsep.join(
+            [str(directory), os.environ.get("PATH", "")]
+        )
+    return environment
+
+
 def _agcode_args(role: str, timeout: float) -> list[str]:
     args = [
         "--max-turns", str(AGCODE_MAX_TURNS),
@@ -104,6 +143,7 @@ def run_role(role: str, prompt: str, *, cwd: Path, timeout: float,
     project_roles = load_project_roles(project)
     profile_override = profile or project_roles.get(role)
     agent = resolve_project_role(role, profile_override=profile_override)
+    agent = replace(agent, environment={**agent.environment, **tool_environment()})
     run_cwd = ROLE_WORKSPACES.get(role, cwd)
     result = run_harness(
         agent,

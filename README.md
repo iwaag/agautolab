@@ -52,6 +52,18 @@ its agent configuration:
   it describes changes** — an agent that reads a stale introduction will act
   on it. Proven in p4: agfront reached this agent for the first time knowing
   nothing but that post.
+- **The board harvest** (`agent_standardize` p6, 2026-08-21). Before a
+  `workplan-` run and before a `workrun-` run, the latest introduction of
+  every live `intro-*` topic in `#agents` is written verbatim into that run's
+  workspace as `tools/agents.md` (`agag.intro.write_agents_md`, shared with
+  agfront). That file is the only place a run learns another agent exists;
+  no agent's name, channel or topic vocabulary is compiled in here. The runs
+  also get `agentchat` on PATH and `AGENTCHAT_ZULIP_ENV` pointing at
+  `.local/zulip.env`, so a task that delegates speaks as this instance.
+
+  A delegating task spends its run waiting on another agent, which is why
+  `WORK_TIMEOUT_SECONDS` is 3600 (planning and brain-mining stay at 1200 —
+  they wait on nobody).
 - **The agent configuration**: `agents.toml` (five roles, three profiles, the
   models behind them), the ignored `.local/agents.local.toml` overlay, the
   per-role tool grants in `src/agautolab/role_run.py`. Those grants are

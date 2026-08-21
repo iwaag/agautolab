@@ -10,6 +10,7 @@ from agautolab import zulip_listener
 
 
 BOT_ID = 11
+FORGE_INTRO = "# agforge\n\nOpen an `assetplan-…` topic in `agforge-agstudio1`."
 HUMAN_ID = 8
 CHANNEL = "pj-demo-project"
 TOPIC = "workplan-one"
@@ -27,18 +28,32 @@ def history_message(sender_id=HUMAN_ID, name="Developer", content="Build it"):
     }
 
 
+#: The shared `#agents` board every run's harvest reads. Serving it here — and
+#: not recording the reads — keeps the harvest out of the call sequences the
+#: flow tests assert on, while still exercising the real code path.
+AGENTS_STREAM = 3
+
+
 class Client:
     email = "autolab-bot@example.invalid"
 
-    def __init__(self, calls, history=None):
+    #: `{intro topic: body}`. Empty by default: an empty board is a fact the
+    #: harvest states honestly, so most tests need say nothing about it.
+    board: dict[str, str] = {}
+
+    def __init__(self, calls, history=None, board=None):
         self.calls = calls
         self.history = history if history is not None else [history_message()]
+        if board is not None:
+            self.board = board
 
     def whoami(self):
         self.calls.append(("whoami",))
         return {"user_id": BOT_ID, "full_name": "Autolab"}
 
     def topic_history(self, channel, topic, num_before):
+        if channel == "agents":
+            return [history_message(sender_id=13, name="Forge", content=self.board[topic])]
         self.calls.append(("history", channel, topic, num_before))
         return self.history
 
@@ -72,9 +87,13 @@ class Client:
         return {}
 
     def stream_id(self, name):
+        if name == "agents":
+            return AGENTS_STREAM
         return next(row["stream_id"] for row in self.channels_list if row["name"] == name)
 
     def channel_topics(self, stream_id):
+        if stream_id == AGENTS_STREAM:
+            return list(self.board)
         self.calls.append(("topics", stream_id))
         return self.topic_names
 
@@ -916,6 +935,69 @@ def test_a_work_channel_without_a_binding_is_reported(monkeypatch, tmp_path):
 
     assert "failed during reading the binding" in last_reply(calls)
     assert not any(call[0] == "supercoder" for call in calls)
+
+
+# --- the board reaches both runs (agent_standardize p6) ----------------------
+#
+# The superdirector needs it to write a delegation into a task; the supercoder
+# needs it to perform one. Neither learns any agent's name from autolab's own
+# code — the file is the whole channel that knowledge travels through.
+
+
+def test_the_planning_run_gets_the_board_in_its_workspace(monkeypatch, tmp_path):
+    calls = []
+    wire(monkeypatch, tmp_path, calls)
+    client = Client(calls, board={"intro-agforge-agstudio1": FORGE_INTRO})
+
+    zulip_listener.handle_topic(client, CHANNEL, TOPIC)
+
+    text = (superdirector_dir(tmp_path) / "tools" / "agents.md").read_text()
+    assert FORGE_INTRO in text
+    prompt = next(call[1] for call in calls if call[0] == "superdirector")
+    assert str(superdirector_dir(tmp_path) / "tools" / "agents.md") in prompt
+
+
+def test_the_task_run_gets_the_board_in_its_workspace(monkeypatch, tmp_path):
+    calls = []
+    wire_run(monkeypatch, tmp_path, calls)
+    client = RunClient(calls, board={"intro-agforge-agstudio1": FORGE_INTRO})
+
+    zulip_listener.handle_workrun(client, WORK_CHANNEL, WORKRUN_TOPIC)
+
+    text = (supercoder_dir(tmp_path) / "tools" / "agents.md").read_text()
+    assert FORGE_INTRO in text
+    prompt = next(call[1] for call in calls if call[0] == "supercoder")
+    assert str(supercoder_dir(tmp_path) / "tools" / "agents.md") in prompt
+
+
+def test_an_empty_board_still_lets_a_run_happen(monkeypatch, tmp_path):
+    """Nobody has introduced themselves is a fact, not a failed serving."""
+    calls = []
+    wire_run(monkeypatch, tmp_path, calls)
+
+    zulip_listener.handle_workrun(RunClient(calls), WORK_CHANNEL, WORKRUN_TOPIC)
+
+    assert "No agent has introduced itself" in (
+        supercoder_dir(tmp_path) / "tools" / "agents.md"
+    ).read_text()
+    assert any(call[0] == "supercoder" for call in calls)
+
+
+def test_the_board_is_re_harvested_for_every_serving(monkeypatch, tmp_path):
+    """An agent that changed its entrance this morning is reachable this
+    afternoon with no deploy, which only holds if nothing is cached."""
+    calls = []
+    wire_run(monkeypatch, tmp_path, calls)
+
+    zulip_listener.handle_workrun(RunClient(calls), WORK_CHANNEL, WORKRUN_TOPIC)
+    zulip_listener.handle_workrun(
+        RunClient(calls, board={"intro-new": "hello"}), WORK_CHANNEL, WORKRUN_TOPIC
+    )
+
+    assert "No agent has introduced itself" in (
+        supercoder_dir(tmp_path, 1) / "tools" / "agents.md"
+    ).read_text()
+    assert "hello" in (supercoder_dir(tmp_path, 2) / "tools" / "agents.md").read_text()
 
 
 def test_dispatch_routes_run_topics_anywhere_and_mission_topics_only_in_projects(monkeypatch):

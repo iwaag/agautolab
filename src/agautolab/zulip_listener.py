@@ -37,6 +37,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
+from agag.intro import agents_file_path, write_agents_md
 from agag.topics import (
     TopicResult,
     chatlog_path,
@@ -141,13 +142,22 @@ CHATLOG_FILE = "chatlog.md"
 # One topic occupies the listener for at most this long; the sweep loop is
 # single-threaded and serial, so this is also the delay before the next
 # matching topic is looked at (events keep queueing meanwhile).
-WORK_TIMEOUT_SECONDS = 1200
+#
+# 3600, not 1200, since `agent_standardize` p6 — the p5 precedent, where
+# `FRONT_TIMEOUT_SECONDS` went 360 → 3600 for the same reason. A task that
+# delegates spends most of its run waiting for another agent, and the other
+# agent's own path can be the sum of several of its runs. A supercoder that
+# gets killed mid-wait is a supervision that stopped, and the topic history is
+# what a re-triggered run reads to resume, so the ceiling is a cost, not a
+# correctness boundary — but paying it once beats resuming three times.
+WORK_TIMEOUT_SECONDS = 3600
 # The superdirector reads the whole project — `main/`, `direction/` and
-# `devlog/` — and the chatlog before it plans, so it gets the work timeout.
-SUPERDIRECTOR_TIMEOUT_SECONDS = WORK_TIMEOUT_SECONDS
-# The director reads the whole direction clone and records notes into it, so
-# it gets the work timeout too.
-DIRECTOR_TIMEOUT_SECONDS = WORK_TIMEOUT_SECONDS
+# `devlog/` — and the chatlog before it plans. It does not wait on anyone, so
+# it keeps the pre-p6 ceiling.
+SUPERDIRECTOR_TIMEOUT_SECONDS = 1200
+# The director reads the whole direction clone and records notes into it. Like
+# the superdirector it waits on nobody, so it keeps the pre-p6 ceiling.
+DIRECTOR_TIMEOUT_SECONDS = SUPERDIRECTOR_TIMEOUT_SECONDS
 
 __all__ = [
     "RunProgress",
@@ -235,12 +245,13 @@ def next_record_path(directory: Path) -> Path:
 
 
 def superdirector_prompt(bot_name: str, workspace: Path, plane_files: bool) -> str:
-    """The placement lines, then the guide — the `answer_prompt` shape:
-    read from and write to the workspace by absolute path, work in the
-    project itself."""
+    """The placement lines, then the guide: read from and write to the
+    workspace by absolute path, work in the project itself."""
     lines = [
         f'The conversation with the requester ("{CHATLOG_FILE}") is placed in '
         f'"{workspace}". You are {bot_name!r} in the chatlog.',
+        f'The other agents\' own introductions are placed in '
+        f'"{agents_file_path(workspace)}".',
     ]
     if plane_files:
         lines.append(
@@ -273,6 +284,9 @@ def serve(context) -> TopicResult:
     chatlog_path(workspace).write_text(
         format_chatlog(context.history, context.self_id), encoding="utf-8"
     )
+
+    context.step = "harvest"
+    write_agents_md(context.client, workspace)
 
     context.step = "project setup"
     init_project(project)
@@ -556,6 +570,8 @@ def supercoder_prompt(bot_name: str, workspace: Path, task: str) -> str:
     lines = [
         f'The conversation with the developer ("{CHATLOG_FILE}") is placed in '
         f'"{workspace}". You are {bot_name!r} in the chatlog.',
+        f'The other agents\' own introductions are placed in '
+        f'"{agents_file_path(workspace)}".',
         f'Write "{REPORT_FILE}" — and any other file this guide asks for — '
         f'into "{workspace}".',
         "Your working directory is the project itself.",
@@ -828,6 +844,9 @@ def serve_run(context) -> TopicResult:
     chatlog_path(workspace).write_text(
         format_chatlog(context.history, context.self_id), encoding="utf-8"
     )
+
+    context.step = "harvest"
+    write_agents_md(context.client, workspace)
 
     context.step = "supercoder"
     task_text = compose_document(
