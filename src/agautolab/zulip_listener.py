@@ -1165,6 +1165,11 @@ def serve_entrance(context) -> TopicResult:
         cwd=workspace,
         timeout=ENTRANCE_TIMEOUT_SECONDS,
         record=next_record_path(RECORDS_ROOT / "entrance_front"),
+        # The answer is the only thing this run leaves behind otherwise, and
+        # an answer that quietly skipped a project looks exactly like one
+        # that found nothing there. The transcript is what tells the two
+        # apart afterwards; it stays in the serving's own generation.
+        transcript=workspace / "transcript.jsonl",
         home=(context.channel, context.topic),
     )
     if exit_code != 0:
