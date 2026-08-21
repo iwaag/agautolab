@@ -52,6 +52,25 @@ its agent configuration:
   it describes changes** — an agent that reads a stale introduction will act
   on it. Proven in p4: agfront reached this agent for the first time knowing
   nothing but that post.
+- **Marking a finished mission Done** (`agent_standardize` p10, 2026-08-21).
+  A task's Sub-Work is closed by the run that executed it; nothing ever
+  closed the mission Work above them, so p9 finished a mission and left its
+  Work `unstarted` with four completed children. `mission_done` is the
+  counting that closes it:
+
+  ```bash
+  uv run python -m agautolab.mission_done            # sweep [AUTO] projects
+  uv run python -m agautolab.mission_done S2-30      # one Work, label or id
+  uv run python -m agautolab.mission_done --dry-run  # say, move nothing
+  ```
+
+  It moves only Works this agent registered (`external_source`) that have at
+  least one live Sub-Work and whose every live Sub-Work is completed;
+  cancelled children do not hold a mission open. One line per Work, moved or
+  not. A named Work that is not finished says how far it is and exits 1;
+  one already Done is reported and exits 0. **This is the only Plane
+  operation the entrance performs** — everything else it needs is in the
+  chat, and the mission Work's state is the one thing that is not.
 - **The board harvest** (`agent_standardize` p6, 2026-08-21). Before a
   `workplan-` run and before a `workrun-` run, the latest introduction of
   every live `intro-*` topic in `#agents` is written verbatim into that run's
