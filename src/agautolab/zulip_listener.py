@@ -57,8 +57,10 @@ from pathlib import Path
 
 from agag.intro import agents_file_path, write_agents_md
 from agag.topics import (
+    TopicContext,
     TopicResult,
     chatlog_path,
+    chatlog_placement,
     format_chatlog,
     generation_dir as shared_generation_dir,
     guide as shared_guide,
@@ -179,9 +181,14 @@ SUPERDIRECTOR_TIMEOUT_SECONDS = 1200
 # The director reads the whole direction clone and records notes into it. Like
 # the superdirector it waits on nobody, so it keeps the pre-p6 ceiling.
 DIRECTOR_TIMEOUT_SECONDS = SUPERDIRECTOR_TIMEOUT_SECONDS
+# The entrance reads chat and answers about it. It runs no project and waits
+# on nobody, but a survey of every project's channels is a lot of small
+# reads, so it gets more room than a single question would need.
+ENTRANCE_TIMEOUT_SECONDS = 900
 
 __all__ = [
     "RunProgress",
+    "TopicContext",
     "archive_work_channel",
     "ZULIP_ENV",
     "bmining_prompt",
@@ -190,7 +197,9 @@ __all__ = [
     "ensure_work_channel",
     "find_channel",
     "dispatch",
-    "entrance_reply",
+    "entrance_prompt",
+    "handle_entrance",
+    "serve_entrance",
     "format_chatlog",
     "generation_dir",
     "guide",
@@ -1120,32 +1129,66 @@ def topic_filter(channel: str, topic: str) -> bool:
     return channel == instance_name() or topic.startswith(SWEEP_PREFIXES)
 
 
-def entrance_reply() -> str:
-    """The placeholder answer at this instance's own channel.
+def entrance_prompt(bot_name: str) -> str:
+    """The chatlog placement, then the entrance guide."""
+    return prompt_with_guide(
+        [chatlog_placement(bot_name)], guide("entrance_front", "guide.md")
+    )
 
-    Its whole job is to be a *redirect*: the work itself happens in a
-    project's `pj-<slug>` channel, because that channel is what says which
-    project the work is for. Saying so here is cheaper than guessing.
+
+def serve_entrance(context) -> TopicResult:
+    """One question at this instance's own channel, answered by `roles.front`.
+
+    Until `agent_standardize` p10 this was a canned redirect: the entrance
+    could name the vocabulary but could not say a word about the work itself.
+    It is now an ordinary serving of an ordinary role — the same skeleton
+    every other topic gets — in a generation workspace holding the
+    conversation, with `agentchat` on PATH. Everything it knows it reads from
+    the chat; the guide says where to look.
+
+    No project is set up and nothing is cloned. The entrance answers
+    questions and does what it is told; the work still happens in a project's
+    own channel.
     """
-    name = instance_name()
-    return (
-        f"This is {name}, a development agent: it plans and carries out work "
-        f"on projects it has been given.\n\n"
-        f"This channel is for questions about the instance. To ask for "
-        f"development work, open a `workplan-…` topic in the project's own "
-        f"`pj-<slug>` channel — the channel is what says which project the "
-        f"work is for, so there is nothing to plan against here. If you do "
-        f"not know which projects exist, ask in this channel."
+    number = next_generation(topic_workspace(context.channel, context.topic))
+    workspace = generation_dir(context.channel, context.topic, number, "front")
+
+    context.step = "chatlog placement"
+    chatlog_path(workspace).write_text(
+        format_chatlog(context.history, context.self_id), encoding="utf-8"
+    )
+
+    context.step = "front"
+    output, _, exit_code = run_role(
+        "front",
+        entrance_prompt(context.bot_name),
+        cwd=workspace,
+        timeout=ENTRANCE_TIMEOUT_SECONDS,
+        record=next_record_path(RECORDS_ROOT / "entrance_front"),
+        home=(context.channel, context.topic),
+    )
+    if exit_code != 0:
+        raise ListenerError(f"front run exited {exit_code}: {output.strip()[:500]}")
+    return TopicResult([output.strip() or NO_CLOSING_MESSAGE])
+
+
+def handle_entrance(client: ZulipClient, channel: str, topic: str) -> None:
+    """Serve one question at the entrance through the shared skeleton."""
+    log(f"entrance topic {channel!r}/{topic!r}")
+    serve_topic(
+        client, channel, topic, serve_entrance,
+        ack_text=ACK_TEXT, empty_reply=EMPTY_REPLY,
     )
 
 
 def dispatch(client: ZulipClient, channel: str, topic: str) -> None:
     """Route one swept topic to its handler.
 
-    This instance's own channel comes first and never executes anything: it
-    is an entrance, and every topic in it gets the redirect reply. Because
-    the shared sweep skips a topic whose last post is this bot's own, that
-    reply is also the loop guard.
+    This instance's own channel comes first and still starts no development
+    work: it is an entrance, and every topic in it is answered by the front
+    role reading the chat. Since `agent_standardize` p10 that answer is a
+    real run rather than a canned redirect, so a question about this
+    instance's plans and how far each has got is answered here.
 
     Every `workrun-` topic elsewhere still comes here from anywhere, but
     `serve_run` is what decides whether it is bound to a task: one outside a
@@ -1156,7 +1199,7 @@ def dispatch(client: ZulipClient, channel: str, topic: str) -> None:
     on every sweep.
     """
     if channel == instance_name():
-        client.send_to_channel(channel, topic, entrance_reply())
+        handle_entrance(client, channel, topic)
         return
     if topic.startswith(WORKRUN_TOPIC_PREFIX):
         handle_workrun(client, channel, topic)

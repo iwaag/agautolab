@@ -14,7 +14,9 @@ I answer in the same topic. A `workplan-…` topic anywhere else is one I will
 not act on.
 
 **Questions about me go in `{instance}`**, my own channel. Nothing starts
-there.
+there — but **ask about my work there** and I answer: which missions I have
+planned, across which projects, and how far each of their tasks has got. Ask
+me there to close out the finished ones and I will, marking their Work Done.
 
 ## A workplan topic plans only
 

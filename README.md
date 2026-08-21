@@ -30,10 +30,21 @@ its agent configuration:
   The placement that runs this listener has a name — `.local/instance.toml`,
   one `name` key, `instance.example.toml` for the shape — and the Zulip
   channel of that name is its entrance. Every topic there is swept, and
-  **none of them executes anything**: the entrance answers with a redirect to
-  the project's `pj-<slug>` channel, because that channel is the only thing
-  that says which project the work is for. The prefixes above still apply in
+  **none of them executes anything**: development work still goes in the
+  project's `pj-<slug>` channel, because that channel is the only thing that
+  says which project the work is for. The prefixes above still apply in
   every other subscribed channel.
+
+  **Since `agent_standardize` p10 the entrance is a run, not a canned
+  redirect** (`serve_entrance`, guide `agent/guides/entrance_front/guide.md`):
+  `roles.front` over a generation workspace holding the conversation, with
+  `agentchat` on PATH. Asked where its plans stand, it reads the board —
+  `channels --prefix pj-` for the projects, their `workplan-` topics for the
+  missions, `channels --prefix work-` whose descriptions name the mission
+  each belongs to, and the `workrun-task<N>-…` topics inside them, `✔ ` for
+  finished. Asked to close finished work out, it verifies by reading,
+  `agentchat resolve`s the finished topics and runs `mission_done`. It never
+  tidies on its own, and every question there is one paid `sonnet` run.
 
   A placement with no Zulip listener — the agautolab1 node — is deliberately
   left unnamed: it owns no channel and answers nothing, so a name would
@@ -83,8 +94,13 @@ its agent configuration:
   A delegating task spends its run waiting on another agent, which is why
   `WORK_TIMEOUT_SECONDS` is 3600 (planning and brain-mining stay at 1200 —
   they wait on nobody).
-- **The agent configuration**: `agents.toml` (five roles, three profiles, the
-  models behind them), the ignored `.local/agents.local.toml` overlay, the
+- **The agent configuration**: `agents.toml` (the roles, three profiles, the
+  models behind them). **Every role runs on `sonnet` since
+  `agent_standardize` p10** — `roles.front` was the last committed `local`
+  one, and its `nested_harness` requirement belonged to the in-process
+  backend it used rather than to the role. The `local` profile is left
+  defined and unused: Agent ≠ Model, and every run records its backend
+  anyway, the ignored `.local/agents.local.toml` overlay, the
   per-role tool grants in `src/agautolab/role_run.py`. Those grants are
   spelled twice, once per harness: `ROLE_ALLOWED_TOOLS` for `claude_code`, and
   the offered agcode tool set for the `local` profile — `director` and

@@ -1425,35 +1425,92 @@ def test_topic_filter_sweeps_the_whole_own_channel_and_prefixes_elsewhere(monkey
     assert not zulip_listener.topic_filter("general", "just-chatting")
 
 
-def test_the_own_channel_only_redirects_and_never_executes(monkeypatch):
+def test_the_own_channel_is_answered_and_never_executes(monkeypatch):
+    """Every topic in the entrance goes to the entrance, whatever it is named.
+
+    A `workplan-` or `workrun-` name there is not a request to run anything:
+    the channel is what says which project work is for, and the entrance is
+    not one.
+    """
     monkeypatch.setattr(zulip_listener, "instance_name", lambda: "autolab-here1")
     for name in ("handle_workrun", "handle_topic", "handle_bmining"):
         monkeypatch.setattr(
             zulip_listener, name,
             lambda *a, **k: pytest.fail("the entrance must not execute anything"),
         )
-    sent = []
-
-    class Client:
-        def send_to_channel(self, channel, topic, text):
-            sent.append((channel, topic, text))
+    served = []
+    monkeypatch.setattr(
+        zulip_listener, "handle_entrance",
+        lambda client, channel, topic: served.append((channel, topic)),
+    )
 
     for topic in ("how-do-i-ask", "workplan-here", "workrun-here"):
-        zulip_listener.dispatch(Client(), "autolab-here1", topic)
+        zulip_listener.dispatch(object(), "autolab-here1", topic)
 
-    assert [(c, t) for c, t, _ in sent] == [
+    assert served == [
         ("autolab-here1", "how-do-i-ask"),
         ("autolab-here1", "workplan-here"),
         ("autolab-here1", "workrun-here"),
     ]
 
 
-def test_the_entrance_reply_names_the_instance_and_the_workplan_contract(monkeypatch):
-    monkeypatch.setattr(zulip_listener, "instance_name", lambda: "autolab-here1")
-    reply = zulip_listener.entrance_reply()
-    assert "autolab-here1" in reply
-    assert "workplan-" in reply
-    assert "pj-" in reply
+# --- the entrance run ------------------------------------------------------
+
+
+def test_the_entrance_prompt_places_the_chatlog_and_carries_the_guide():
+    prompt = zulip_listener.entrance_prompt("Autolab")
+    assert "chatlog" in prompt and "'Autolab'" in prompt
+    assert "agentchat channels" in prompt
+
+
+def test_the_entrance_guide_is_terse():
+    """Same register as forge's guides: a reader, not a manual."""
+    text = zulip_listener.guide("entrance_front", "guide.md")
+    assert len([line for line in text.splitlines() if line.strip()]) <= 12
+
+
+def test_serving_the_entrance_writes_the_chatlog_and_runs_the_front(monkeypatch, tmp_path):
+    monkeypatch.setattr(zulip_listener, "TOPICS_ROOT", tmp_path / "topics")
+    monkeypatch.setattr(zulip_listener, "RECORDS_ROOT", tmp_path / "records")
+    calls = {}
+
+    def fake_run_role(role, prompt, *, cwd, timeout, record=None, home=None, **kw):
+        calls.update(role=role, prompt=prompt, cwd=cwd, home=home)
+        return "S2-30 is finished; nothing else is running.", {}, 0
+
+    monkeypatch.setattr(zulip_listener, "run_role", fake_run_role)
+    context = zulip_listener.TopicContext(
+        client=None, channel="autolab-here1", topic="how-far-along",
+        self_id=BOT_ID, bot_name="Autolab",
+        history=[{"id": 1, "sender_id": 8, "sender_full_name": "Dev",
+                  "content": "where do your plans stand?"}],
+    )
+    result = zulip_listener.serve_entrance(context)
+
+    assert result.sections == ["S2-30 is finished; nothing else is running."]
+    assert calls["role"] == "front"
+    # The run is served in the topic's own generation workspace, and knows
+    # which conversation it is serving.
+    assert calls["home"] == ("autolab-here1", "how-far-along")
+    assert (calls["cwd"] / "chatlog.md").read_text(encoding="utf-8") == (
+        "[Dev] where do your plans stand?\n"
+    )
+
+
+def test_a_failed_entrance_run_is_an_error_the_topic_hears_about(monkeypatch, tmp_path):
+    monkeypatch.setattr(zulip_listener, "TOPICS_ROOT", tmp_path / "topics")
+    monkeypatch.setattr(zulip_listener, "RECORDS_ROOT", tmp_path / "records")
+    monkeypatch.setattr(
+        zulip_listener, "run_role",
+        lambda *a, **k: ("boom", {}, 3),
+    )
+    context = zulip_listener.TopicContext(
+        client=None, channel="autolab-here1", topic="how-far-along",
+        self_id=BOT_ID, bot_name="Autolab",
+        history=[{"id": 1, "sender_id": 8, "sender_full_name": "Dev", "content": "?"}],
+    )
+    with pytest.raises(zulip_listener.ListenerError):
+        zulip_listener.serve_entrance(context)
 
 
 # --- the callback: a delegation that outlives its run ----------------------

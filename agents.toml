@@ -17,9 +17,13 @@ model = "anthropic/claude-sonnet-5"
 harness = "fake"
 model = "ollama/qwen3.6:35b-a3b-coding-nvfp4"
 
+# The instance entrance, and the gateway window. On `sonnet` since
+# `agent_standardize` p10: the `local` profile cost more than it saved,
+# and `nested_harness` was a requirement of the in-process backend it
+# used, not of the role.
 [roles.front]
-profile = "local"
-requires = ["nested_harness"]
+profile = "sonnet"
+requires = []
 
 [roles.director]
 profile = "sonnet"
