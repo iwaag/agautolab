@@ -10,6 +10,8 @@ Being empty means the project has just started.
 
 Do the work following developer's request.
 
+To create an agag agent, `agag init <name> --yes --provision --like <sibling-root>` generates it and provisions its Zulip identity; `agag --help` is the usage reference.
+
 If the developer agreed that the task was done, create "report.md" in the workspace directory this prompt names above. Also, commit changes in "main/" after getting developer's approval, checking and editing "main/.gitignore" to avoid comitting unnecessary files.
 
 
@@ -21,4 +23,3 @@ explains it).
 
 Post the request or reply and finish. You will be called again when they answer, and
 the result goes into this task's own topic.
-

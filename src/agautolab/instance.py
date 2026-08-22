@@ -28,17 +28,25 @@ WORKPLAN_TOPIC_PREFIX = "workplan-"
 WORKRUN_TOPIC_PREFIX = "workrun-"
 BMINING_TOPIC_PREFIX = "bmining-"
 PROJECT_CHANNEL_PREFIX = "pj-"
+PROVISIONER_ENV = AGAUTOLAB_ROOT.parent / ".local" / "zulip" / "provisioner.env"
+
+
+def extra_environment(_environment) -> dict[str, str]:
+    """Paths to local capabilities offered to every role run."""
+    return {"AGAG_ZULIP_ADMIN_ENV": str(PROVISIONER_ENV)}
 
 SPEC = AgentSpec(
     FALLBACK_NAME, AGAUTOLAB_ROOT,
     plan_prefix=WORKPLAN_TOPIC_PREFIX,
     run_prefix=WORKRUN_TOPIC_PREFIX,
     extra_prefixes=(BMINING_TOPIC_PREFIX,),
+    extra_environment=extra_environment,
 )
 
 __all__ = [
     "AGAUTOLAB_ROOT", "BMINING_TOPIC_PREFIX", "FALLBACK_NAME", "PROJECT_CHANNEL_PREFIX",
-    "SPEC", "WORKPLAN_TOPIC_PREFIX", "WORKRUN_TOPIC_PREFIX", "instance_name",
+    "PROVISIONER_ENV", "SPEC", "WORKPLAN_TOPIC_PREFIX", "WORKRUN_TOPIC_PREFIX",
+    "extra_environment", "instance_name",
 ]
 
 
