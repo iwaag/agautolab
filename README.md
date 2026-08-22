@@ -12,7 +12,9 @@ its agent configuration:
   the real front agent with the request text unchanged. Existing `/status`,
   `/jobs`, and `/projects` consumers retain their response surfaces; the
   removed loop's read-side documents remain marked `"stub": true`.
-- **The chat entrance** (`src/agautolab/zulip_listener.py`): `workplan-*`
+- **The chat entrance** (`src/agautolab/listener.py` — `agag.agent.listener_main`
+  over autolab's `SPEC`, routing to the handlers in `zulip_listener.py`;
+  `agag_builder` p2): `workplan-*`
   topics in `#pj-<name>` channels are still heard and answered, and nothing is
   started. The topic prefix says what kind of request it is, and — since
   `agent_standardize` p3 (2026-08-21) — whether it plans or executes:
