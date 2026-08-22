@@ -27,6 +27,7 @@ from pathlib import Path
 
 from agag.zulip import ZulipClient, ZulipError
 
+from .instance import SPEC
 from .project_init import (
     GiteaConfig,
     PROJECT_NAME,
@@ -41,8 +42,7 @@ from .project_init import (
     load_plane_config,
 )
 
-AGAUTOLAB_ROOT = Path(__file__).resolve().parents[2]
-ZULIP_ENV = AGAUTOLAB_ROOT / ".local" / "zulip.env"
+ZULIP_ENV = SPEC.zulip_env
 ARCHIVE_ROOT = PROJECTS_ROOT.parent / "projects-archived"
 
 PROJECT_CHANNEL_PREFIX = "pj-"

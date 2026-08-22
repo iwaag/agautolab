@@ -13,7 +13,7 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
-from .agent_settings import PROJECT_ROOT
+from .instance import AGAUTOLAB_ROOT as PROJECT_ROOT
 
 PROJECT_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{1,38}$")
 PLANE_ENV = PROJECT_ROOT.parent / ".local" / "plane-credentials.env"

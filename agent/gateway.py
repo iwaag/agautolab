@@ -61,7 +61,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
 from agag.agent_config import AgentConfigError, load_config  # noqa: E402
-from agautolab.agent_settings import AGENTS_CONFIG, AGENTS_LOCAL_CONFIG  # noqa: E402
+from agautolab.instance import SPEC  # noqa: E402
 from agautolab.project_settings import (  # noqa: E402
     PROJECTS_ROOT,
     PROJECT_AGENT_ROLES,
@@ -96,7 +96,7 @@ def projects_document():
     row; other project rows remain useful while a human or agent is between
     valid edits.
     """
-    config, overlay = load_config(AGENTS_CONFIG, AGENTS_LOCAL_CONFIG)
+    config, overlay = load_config(SPEC.agents_config, SPEC.agents_local_config)
     profiles = sorted(config.get("profiles", {}))
     roles = config.get("roles", {})
     overlay_roles = overlay.get("roles", {})

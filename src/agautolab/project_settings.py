@@ -5,7 +5,7 @@ from __future__ import annotations
 import tomllib
 from pathlib import Path
 
-from .agent_settings import PROJECT_ROOT
+from .instance import AGAUTOLAB_ROOT as PROJECT_ROOT
 
 PROJECTS_ROOT = PROJECT_ROOT / ".local" / "projects"
 PROJECT_AGENT_ROLES = frozenset({"coding", "director"})

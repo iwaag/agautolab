@@ -1,10 +1,13 @@
-"""Pull workplan topics from Zulip into topic workspaces and the superdirector.
+"""autolab's mission logic: `workplan-`, `workrun-` and `bmining-` topics.
 
-`agag.zulip.sweep_serve` finds every unresolved `workplan-*` topic whose last
-poster is not this bot, and `agag.topics.serve_topic` serves each one — the
-skeleton shared with the other agents: ack, generation workspace, chatlog, the steps,
-always reply naming the failed step, then re-check for human posts that
-arrived during the run.
+The listener itself is `agautolab.listener` — `agag.agent.listener_main`
+over autolab's `SPEC`, which sweeps, routes by prefix to the handlers here,
+answers the instance's own channel through `agag.entrance`, and brings a
+task back through `handle_mention` when an answer names this instance.
+`agag.topics.serve_topic` serves each topic — the skeleton shared with the
+other agents: ack, generation workspace, chatlog, the steps, always reply
+naming the failed step, then re-check for human posts that arrived during
+the run.
 
 Each serving cuts a new generation directory `<N>/`. Before that, one stable directory was reused forever, so a
 continued conversation ran on top of the previous run's leftovers. `N` is the
@@ -48,28 +51,28 @@ can never be acted on twice.
 
 from __future__ import annotations
 
-import os
 import re
 import shutil
 import time
 from collections.abc import Callable
 from pathlib import Path
 
+from agag.agent import SWEEP_ACK as ACK_TEXT
+from agag.entrance import EMPTY_REPLY, NO_ANSWER as NO_CLOSING_MESSAGE, handle_entrance
 from agag.intro import agents_file_path, write_agents_md
 from agag.topics import (
     TopicContext,
     TopicResult,
     chatlog_path,
-    chatlog_placement,
     format_chatlog,
-    generation_dir as shared_generation_dir,
+    generation_dir,
     guide as shared_guide,
     next_generation,
-    next_record_path as shared_next_record_path,
+    next_record_path,
     prompt_with_guide,
     serve_topic,
     threads_placement,
-    topic_workspace as shared_topic_workspace,
+    topic_workspace,
     write_threads,
 )
 from agag.zulip import (
@@ -80,7 +83,6 @@ from agag.zulip import (
     note_served,
     remotes_for_home,
     rootchat_home,
-    sweep_serve,
     topic_write,
 )
 
@@ -109,26 +111,21 @@ from .project_init import (
     init_project,
     load_gitea_config,
 )
-from .instance import instance_name
-from .role_run import run_role
-
-AGAUTOLAB_ROOT = Path(__file__).resolve().parents[2]
-ZULIP_ENV = AGAUTOLAB_ROOT / ".local" / "zulip.env"
-TOPICS_ROOT = AGAUTOLAB_ROOT / ".local" / "topics"
-GUIDES = AGAUTOLAB_ROOT / "agent" / "guides"
-RECORDS_ROOT = AGAUTOLAB_ROOT / ".local" / "agent"
-
-WORKPLAN_TOPIC_PREFIX = "workplan-"
-WORKRUN_TOPIC_PREFIX = "workrun-"
-BMINING_TOPIC_PREFIX = "bmining-"
-PROJECT_CHANNEL_PREFIX = "pj-"
-# What this listener answers, wherever it is subscribed. Its own channel is
-# swept whole instead (see `topic_filter`).
-SWEEP_PREFIXES = (
+from .instance import (
+    AGAUTOLAB_ROOT,
+    BMINING_TOPIC_PREFIX,
+    PROJECT_CHANNEL_PREFIX,
+    SPEC,
     WORKPLAN_TOPIC_PREFIX,
     WORKRUN_TOPIC_PREFIX,
-    BMINING_TOPIC_PREFIX,
 )
+from .role_run import run_role
+
+# The skeleton's paths, named here so a test can point a serving elsewhere.
+ZULIP_ENV = SPEC.zulip_env
+TOPICS_ROOT = SPEC.topics_root
+GUIDES = SPEC.guides
+RECORDS_ROOT = SPEC.records_root
 # One channel per mission Work, named after that Work's Plane label:
 # `work-pa-12`. Its `workrun-task<N>-pa-12` topics are one conversation
 # per task.
@@ -140,15 +137,11 @@ HISTORY_MESSAGES = 1000
 # able to see what it is for. Since `agent_standardize` p9 the code reads the
 # topic's own selfnotes instead (`anchor.py`), so nothing parses this back.
 
-ACK_TEXT = "Message received. Please wait for the reply."
-EMPTY_REPLY = "There is nothing in this topic to answer yet."
-
-# What a run that ended without a closing message contributes to its report.
-# The harness no longer fails such a run (its work is its files, not its
-# farewell), so every flow that quotes an agent's answer needs something to
-# say instead — a topic that got only an ack and then silence would drop out
-# of the sweep until a human posts again.
-NO_CLOSING_MESSAGE = "(the run ended without a closing message)"
+# `ACK_TEXT`, `EMPTY_REPLY` and `NO_CLOSING_MESSAGE` are the skeleton's: the
+# ack that makes this bot the last poster while a run is in flight, the reply
+# to a topic with nothing in it, and what a run that ended without a closing
+# message contributes to its report (a topic that got only an ack and then
+# silence would otherwise drop out of the sweep until a human posts again).
 
 # The planning round's files, all of them in the serving's own generation
 # workspace. The Plane mirror lives in `current/` inside that workspace so the
@@ -181,27 +174,17 @@ SUPERDIRECTOR_TIMEOUT_SECONDS = 1200
 # The director reads the whole direction clone and records notes into it. Like
 # the superdirector it waits on nobody, so it keeps the pre-p6 ceiling.
 DIRECTOR_TIMEOUT_SECONDS = SUPERDIRECTOR_TIMEOUT_SECONDS
-# The entrance reads chat and answers about it. It runs no project and waits
-# on nobody, but a survey of every project's channels is a lot of small
-# reads, so it gets more room than a single question would need.
-ENTRANCE_TIMEOUT_SECONDS = 900
 
 __all__ = [
     "RunProgress",
     "TopicContext",
     "archive_work_channel",
-    "ZULIP_ENV",
     "bmining_prompt",
     "bmining_work_directory",
     "direction_directory",
     "ensure_work_channel",
     "find_channel",
-    "dispatch",
-    "entrance_prompt",
-    "handle_entrance",
-    "serve_entrance",
     "format_chatlog",
-    "generation_dir",
     "guide",
     "handle_bmining",
     "handle_mention",
@@ -212,8 +195,6 @@ __all__ = [
     "live_topic_name",
     "mirror_task_changes",
     "mission_directory",
-    "main",
-    "next_record_path",
     "prepare_run_surfaces",
     "run_binding",
     "progress_line",
@@ -230,8 +211,6 @@ __all__ = [
     "serve_run",
     "supercoder_prompt",
     "title_slug",
-    "topic_filter",
-    "topic_workspace",
     "work_channel",
     "work_channel_description",
 ]
@@ -252,26 +231,8 @@ def project_from_channel(channel: str) -> str:
     return project
 
 
-def topic_workspace(channel: str, topic: str) -> Path:
-    """`.local/topics/<channel>/<topic>/` — the topic's own directory."""
-    return shared_topic_workspace(TOPICS_ROOT, channel, topic)
-
-
-def generation_dir(channel: str, topic: str, number: int, role: str) -> Path:
-    """`.local/topics/<channel>/<topic>/<N>/<role>/`.
-
-    Generations are never deleted. Cutting a new one is what stops a previous
-    generation's `new_mission.md` or task split from being acted on twice.
-    """
-    return shared_generation_dir(TOPICS_ROOT, channel, topic, number, role)
-
-
 def guide(*parts: str) -> str:
     return shared_guide(GUIDES, *parts)
-
-
-def next_record_path(directory: Path) -> Path:
-    return shared_next_record_path(directory)
 
 
 def superdirector_prompt(bot_name: str, workspace: Path, plane_files: bool) -> str:
@@ -309,8 +270,8 @@ def serve(context) -> TopicResult:
     whole outcome.
     """
     project = project_from_channel(context.channel)
-    number = next_generation(topic_workspace(context.channel, context.topic))
-    workspace = generation_dir(context.channel, context.topic, number, "superdirector")
+    number = next_generation(topic_workspace(TOPICS_ROOT, context.channel, context.topic))
+    workspace = generation_dir(TOPICS_ROOT, context.channel, context.topic, number, "superdirector")
     chatlog_path(workspace).write_text(
         format_chatlog(context.history, context.self_id), encoding="utf-8"
     )
@@ -345,8 +306,39 @@ def serve(context) -> TopicResult:
     return TopicResult(sections, resolve_after=resolve_after)
 
 
+def at_the_entrance(client: ZulipClient, channel: str, topic: str) -> bool:
+    """A prefixed topic in this instance's own channel is a question, not work.
+
+    The skeleton routes by prefix first, which is right for an agent whose
+    requests live in its own channel (forge). autolab's do not: the channel
+    is what says which project work is for, and the entrance is not one. So
+    a `workplan-`/`workrun-`/`bmining-` name there is answered by the
+    entrance like any other topic, and nothing runs.
+    """
+    if channel != SPEC.instance_name():
+        return False
+    handle_entrance(SPEC, client, channel, topic)
+    return True
+
+
+def in_project_channel(channel: str, topic: str) -> bool:
+    """`workplan-` and `bmining-` topics need a `pj-*` channel.
+
+    Elsewhere they are ignored silently: with `#general` swept, a stray
+    `workplan-` topic there would otherwise get an error posted into it on
+    every sweep. (`workrun-` topics come from anywhere; `serve_run` decides
+    whether one is bound to a task.)
+    """
+    if channel.startswith(PROJECT_CHANNEL_PREFIX):
+        return True
+    log(f"ignoring {topic!r}: {channel!r} is not a project channel")
+    return False
+
+
 def handle_topic(client: ZulipClient, channel: str, topic: str) -> None:
     """Serve one awaiting workplan topic through the shared skeleton."""
+    if at_the_entrance(client, channel, topic) or not in_project_channel(channel, topic):
+        return
     log(f"workplan topic {channel!r}/{topic!r}")
     serve_topic(client, channel, topic, serve, ack_text=ACK_TEXT, empty_reply=EMPTY_REPLY)
 
@@ -911,8 +903,8 @@ def serve_run(context) -> TopicResult:
     context.step = "project setup"
     init_project(slug)
 
-    number = next_generation(topic_workspace(context.channel, context.topic))
-    workspace = generation_dir(context.channel, context.topic, number, "supercoder")
+    number = next_generation(topic_workspace(TOPICS_ROOT, context.channel, context.topic))
+    workspace = generation_dir(TOPICS_ROOT, context.channel, context.topic, number, "supercoder")
     chatlog_path(workspace).write_text(
         format_chatlog(context.history, context.self_id), encoding="utf-8"
     )
@@ -981,6 +973,8 @@ def handle_workrun(client: ZulipClient, channel: str, topic: str) -> None:
     There is no `reply_to` any more: a serving brought back by a mention
     answers here, in the task's own topic, like every other one.
     """
+    if at_the_entrance(client, channel, topic):
+        return
     log(f"workrun topic {channel!r}/{topic!r}")
     serve_topic(
         client, channel, topic, serve_run,
@@ -1071,6 +1065,8 @@ def serve_bmining(context) -> TopicResult:
 
 def handle_bmining(client: ZulipClient, channel: str, topic: str) -> None:
     """Serve one awaiting bmining topic through the shared skeleton."""
+    if at_the_entrance(client, channel, topic) or not in_project_channel(channel, topic):
+        return
     log(f"bmining topic {channel!r}/{topic!r}")
     serve_topic(client, channel, topic, serve_bmining, ack_text=ACK_TEXT, empty_reply=EMPTY_REPLY)
 
@@ -1117,138 +1113,3 @@ def handle_mention(client: ZulipClient, channel: str, topic: str) -> None:
         log(f"nothing to mark served in {channel!r}/{topic!r}")
     else:
         log(f"marked {channel!r}/{topic!r} served up to {served} in {home}")
-
-
-def observe_topic(channel: str, topic: str) -> None:
-    """Passive handler (`AUTOLAB_ZULIP_LOG_ONLY=1`): log sweep matches, never act."""
-    log(f"observed sweep match {channel!r}/{topic!r}")
-
-
-def topic_filter(channel: str, topic: str) -> bool:
-    """Sweep every topic in this instance's own channel, prefixes elsewhere."""
-    return channel == instance_name() or topic.startswith(SWEEP_PREFIXES)
-
-
-def entrance_prompt(bot_name: str) -> str:
-    """The chatlog placement, then the entrance guide."""
-    return prompt_with_guide(
-        [chatlog_placement(bot_name)], guide("entrance_front", "guide.md")
-    )
-
-
-def serve_entrance(context) -> TopicResult:
-    """One question at this instance's own channel, answered by `roles.front`.
-
-    Until `agent_standardize` p10 this was a canned redirect: the entrance
-    could name the vocabulary but could not say a word about the work itself.
-    It is now an ordinary serving of an ordinary role — the same skeleton
-    every other topic gets — in a generation workspace holding the
-    conversation, with `agentchat` on PATH. Everything it knows it reads from
-    the chat; the guide says where to look.
-
-    No project is set up and nothing is cloned. The entrance answers
-    questions and does what it is told; the work still happens in a project's
-    own channel.
-    """
-    number = next_generation(topic_workspace(context.channel, context.topic))
-    workspace = generation_dir(context.channel, context.topic, number, "front")
-
-    context.step = "chatlog placement"
-    chatlog_path(workspace).write_text(
-        format_chatlog(context.history, context.self_id), encoding="utf-8"
-    )
-
-    context.step = "front"
-    output, _, exit_code = run_role(
-        "front",
-        entrance_prompt(context.bot_name),
-        cwd=workspace,
-        timeout=ENTRANCE_TIMEOUT_SECONDS,
-        record=next_record_path(RECORDS_ROOT / "entrance_front"),
-        # The answer is the only thing this run leaves behind otherwise, and
-        # an answer that quietly skipped a project looks exactly like one
-        # that found nothing there. The transcript is what tells the two
-        # apart afterwards; it stays in the serving's own generation.
-        transcript=workspace / "transcript.jsonl",
-        stream=True,
-        home=(context.channel, context.topic),
-    )
-    if exit_code != 0:
-        raise ListenerError(f"front run exited {exit_code}: {output.strip()[:500]}")
-    return TopicResult([output.strip() or NO_CLOSING_MESSAGE])
-
-
-def handle_entrance(client: ZulipClient, channel: str, topic: str) -> None:
-    """Serve one question at the entrance through the shared skeleton."""
-    log(f"entrance topic {channel!r}/{topic!r}")
-    serve_topic(
-        client, channel, topic, serve_entrance,
-        ack_text=ACK_TEXT, empty_reply=EMPTY_REPLY,
-    )
-
-
-def dispatch(client: ZulipClient, channel: str, topic: str) -> None:
-    """Route one swept topic to its handler.
-
-    This instance's own channel comes first and still starts no development
-    work: it is an entrance, and every topic in it is answered by the front
-    role reading the chat. Since `agent_standardize` p10 that answer is a
-    real run rather than a canned redirect, so a question about this
-    instance's plans and how far each has got is answered here.
-
-    Every `workrun-` topic elsewhere still comes here from anywhere, but
-    `serve_run` is what decides whether it is bound to a task: one outside a
-    `work-` channel, or without a `workrun-task<N>-…` name, gets one
-    explanatory reply instead of a run. `workplan-` topics still need a `pj-*`
-    channel and are silently ignored elsewhere: with `#general` now swept, a
-    stray `workplan-` topic there would otherwise get an error posted into it
-    on every sweep.
-    """
-    if channel == instance_name():
-        handle_entrance(client, channel, topic)
-        return
-    if topic.startswith(WORKRUN_TOPIC_PREFIX):
-        handle_workrun(client, channel, topic)
-        return
-    if not channel.startswith(PROJECT_CHANNEL_PREFIX):
-        log(f"ignoring {topic!r}: {channel!r} is not a project channel")
-        return
-    if topic.startswith(BMINING_TOPIC_PREFIX):
-        handle_bmining(client, channel, topic)
-        return
-    handle_topic(client, channel, topic)
-
-
-def main() -> None:
-    client = ZulipClient.from_env(ZULIP_ENV)
-    if os.environ.get("AUTOLAB_ZULIP_LOG_ONLY") == "1":
-        handler = observe_topic
-        mention_handler = observe_topic
-    else:
-        def handler(channel: str, topic: str) -> None:
-            dispatch(client, channel, topic)
-
-        def mention_handler(channel: str, topic: str) -> None:
-            handle_mention(client, channel, topic)
-
-    # No subscription reconciliation here: what this listener is subscribed to
-    # is the project creator's decision about who the work goes to, not
-    # something a listener may widen on its own. The one thing that does widen
-    # it is a run posting somewhere — `agentchat send` joins the channel it
-    # posts into, because being in the room is what makes the answer arrive.
-    # Posting *is* the routing decision; a listener guessing is not.
-    log(
-        "agautolab zulip listener starting "
-        f"(pull sweep: all topics in {instance_name()!r}, "
-        f"prefixes {SWEEP_PREFIXES} elsewhere, plus mentions)"
-    )
-    try:
-        sweep_serve(
-            client, handler, topic_filter=topic_filter, on_mention=mention_handler
-        )
-    except KeyboardInterrupt:
-        log("stopped")
-
-
-if __name__ == "__main__":
-    main()

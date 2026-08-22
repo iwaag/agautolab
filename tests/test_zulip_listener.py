@@ -294,13 +294,13 @@ def test_handle_topic_always_answers_with_how_far_it_got(monkeypatch, tmp_path):
     assert "failed during superdirector: claude_code timed out" in calls[-1][2]
 
 
-def test_handle_topic_reports_a_channel_that_is_not_a_project(monkeypatch, tmp_path):
+def test_handle_topic_ignores_a_channel_that_is_not_a_project(monkeypatch, tmp_path):
+    """The guard that used to live in `dispatch` is the handler's own now:
+    a stray `workplan-` topic outside `pj-*` gets nothing posted into it."""
     calls = []
     wire(monkeypatch, tmp_path, calls)
     zulip_listener.handle_topic(Client(calls), "another-channel", TOPIC)
-    # The ack still goes out; the failure is reported in the reply.
-    assert [call[0] for call in calls if call[0] == "write"][0:2] == ["write", "write"]
-    assert "failed during chatlog" in calls[-1][2]
+    assert not [call for call in calls if call[0] == "write"]
 
 
 def test_an_empty_topic_costs_no_agent_run(monkeypatch, tmp_path):
@@ -1130,34 +1130,43 @@ def test_the_board_is_re_harvested_for_every_serving(monkeypatch, tmp_path):
     assert "hello" in (supercoder_dir(tmp_path, 2) / "tools" / "agents.md").read_text()
 
 
-def test_dispatch_routes_run_topics_anywhere_and_mission_topics_only_in_projects(monkeypatch):
-    routed = []
-    monkeypatch.setattr(
-        zulip_listener, "handle_workrun",
-        lambda client, channel, topic: routed.append(("run", channel, topic)),
-    )
-    monkeypatch.setattr(
-        zulip_listener, "handle_topic",
-        lambda client, channel, topic: routed.append(("mission", channel, topic)),
-    )
+def test_the_routes_are_the_three_prefixes_and_the_guards_are_the_handlers_own(monkeypatch):
+    """`listener.main` hands the skeleton three routes; the skeleton picks
+    by prefix and sends the rest of the own channel to the entrance. What is
+    autolab's own is that `workplan-`/`bmining-` need a `pj-*` channel and
+    `workrun-` does not (`serve_run` decides whether one is bound to a task)."""
+    from agautolab import listener
 
+    handed = {}
     monkeypatch.setattr(
-        zulip_listener, "handle_bmining",
-        lambda client, channel, topic: routed.append(("bmining", channel, topic)),
+        listener, "listener_main",
+        lambda spec, routes, **kw: handed.update(spec=spec, routes=routes, **kw),
     )
+    listener.main()
+    assert handed["spec"] is zulip_listener.SPEC
+    assert handed["routes"] == {
+        "workplan-": zulip_listener.handle_topic,
+        "workrun-": zulip_listener.handle_workrun,
+        "bmining-": zulip_listener.handle_bmining,
+    }
+    assert handed["on_mention"] is zulip_listener.handle_mention
 
-    zulip_listener.dispatch(None, "general", "workrun-1")
-    zulip_listener.dispatch(None, CHANNEL, "workrun-2")
-    zulip_listener.dispatch(None, CHANNEL, TOPIC)
-    zulip_listener.dispatch(None, "general", "workplan-stray")  # silently ignored
-    zulip_listener.dispatch(None, CHANNEL, "bmining-idea")
-    zulip_listener.dispatch(None, "general", "bmining-stray")  # silently ignored
+    served = []
+    monkeypatch.setattr(zulip_listener, "serve_topic", lambda c, ch, t, *a, **k: served.append((ch, t)))
+    monkeypatch.setenv("AUTOLAB_INSTANCE_NAME", "autolab-here1")
 
-    assert routed == [
-        ("run", "general", "workrun-1"),
-        ("run", CHANNEL, "workrun-2"),
-        ("mission", CHANNEL, TOPIC),
-        ("bmining", CHANNEL, "bmining-idea"),
+    zulip_listener.handle_workrun(None, "general", "workrun-1")
+    zulip_listener.handle_workrun(None, CHANNEL, "workrun-2")
+    zulip_listener.handle_topic(None, CHANNEL, TOPIC)
+    zulip_listener.handle_topic(None, "general", "workplan-stray")  # silently ignored
+    zulip_listener.handle_bmining(None, CHANNEL, "bmining-idea")
+    zulip_listener.handle_bmining(None, "general", "bmining-stray")  # silently ignored
+
+    assert served == [
+        ("general", "workrun-1"),
+        (CHANNEL, "workrun-2"),
+        (CHANNEL, TOPIC),
+        (CHANNEL, "bmining-idea"),
     ]
 
 
@@ -1416,51 +1425,41 @@ def test_run_progress_logs_a_failed_post_and_keeps_going(monkeypatch):
     assert progress.pending == []
 
 
-def test_topic_filter_sweeps_the_whole_own_channel_and_prefixes_elsewhere(monkeypatch):
-    monkeypatch.setattr(zulip_listener, "instance_name", lambda: "autolab-here1")
-
-    assert zulip_listener.topic_filter("autolab-here1", "how-do-i-ask")
-    assert zulip_listener.topic_filter(CHANNEL, "workplan-thing")
-    assert zulip_listener.topic_filter("work-pa-12", "workrun-task1-pa-12")
-    assert not zulip_listener.topic_filter("general", "just-chatting")
-
-
 def test_the_own_channel_is_answered_and_never_executes(monkeypatch):
     """Every topic in the entrance goes to the entrance, whatever it is named.
 
-    A `workplan-` or `workrun-` name there is not a request to run anything:
-    the channel is what says which project work is for, and the entrance is
-    not one.
+    The skeleton routes by prefix first (forge's requests live in its own
+    channel). autolab's do not: a `workplan-` or `workrun-` name there is not
+    a request to run anything — the channel is what says which project work
+    is for, and the entrance is not one. So the handlers hand such a topic
+    to `agag.entrance` themselves.
     """
-    monkeypatch.setattr(zulip_listener, "instance_name", lambda: "autolab-here1")
-    for name in ("handle_workrun", "handle_topic", "handle_bmining"):
-        monkeypatch.setattr(
-            zulip_listener, name,
-            lambda *a, **k: pytest.fail("the entrance must not execute anything"),
-        )
+    monkeypatch.setenv("AUTOLAB_INSTANCE_NAME", "autolab-here1")
+    monkeypatch.setattr(
+        zulip_listener, "serve_topic",
+        lambda *a, **k: pytest.fail("the entrance must not execute anything"),
+    )
     served = []
     monkeypatch.setattr(
         zulip_listener, "handle_entrance",
-        lambda client, channel, topic: served.append((channel, topic)),
+        lambda spec, client, channel, topic: served.append((channel, topic)),
     )
 
-    for topic in ("how-do-i-ask", "workplan-here", "workrun-here"):
-        zulip_listener.dispatch(object(), "autolab-here1", topic)
+    zulip_listener.handle_topic(object(), "autolab-here1", "workplan-here")
+    zulip_listener.handle_workrun(object(), "autolab-here1", "workrun-here")
+    zulip_listener.handle_bmining(object(), "autolab-here1", "bmining-here")
 
     assert served == [
-        ("autolab-here1", "how-do-i-ask"),
         ("autolab-here1", "workplan-here"),
         ("autolab-here1", "workrun-here"),
+        ("autolab-here1", "bmining-here"),
     ]
 
 
-# --- the entrance run ------------------------------------------------------
-
-
-def test_the_entrance_prompt_places_the_chatlog_and_carries_the_guide():
-    prompt = zulip_listener.entrance_prompt("Autolab")
-    assert "chatlog" in prompt and "'Autolab'" in prompt
-    assert "agentchat channels" in prompt
+# --- the entrance -----------------------------------------------------------
+#
+# The serving is `agag.entrance`, tested in pyagag. What is autolab's own is
+# the guide it answers with.
 
 
 def test_the_entrance_guide_is_terse():
@@ -1469,54 +1468,11 @@ def test_the_entrance_guide_is_terse():
     assert len([line for line in text.splitlines() if line.strip()]) <= 12
 
 
-def test_serving_the_entrance_writes_the_chatlog_and_runs_the_front(monkeypatch, tmp_path):
-    monkeypatch.setattr(zulip_listener, "TOPICS_ROOT", tmp_path / "topics")
-    monkeypatch.setattr(zulip_listener, "RECORDS_ROOT", tmp_path / "records")
-    calls = {}
+def test_the_entrance_answers_with_autolab_s_own_guide():
+    from agag.entrance import entrance_guide
 
-    def fake_run_role(role, prompt, *, cwd, timeout, record=None, home=None,
-                      transcript=None, stream=False, **kw):
-        calls.update(role=role, prompt=prompt, cwd=cwd, home=home,
-                     transcript=transcript, stream=stream)
-        return "S2-30 is finished; nothing else is running.", {}, 0
-
-    monkeypatch.setattr(zulip_listener, "run_role", fake_run_role)
-    context = zulip_listener.TopicContext(
-        client=None, channel="autolab-here1", topic="how-far-along",
-        self_id=BOT_ID, bot_name="Autolab",
-        history=[{"id": 1, "sender_id": 8, "sender_full_name": "Dev",
-                  "content": "where do your plans stand?"}],
-    )
-    result = zulip_listener.serve_entrance(context)
-
-    assert result.sections == ["S2-30 is finished; nothing else is running."]
-    assert calls["role"] == "front"
-    # The run is served in the topic's own generation workspace, and knows
-    # which conversation it is serving.
-    assert calls["home"] == ("autolab-here1", "how-far-along")
-    assert (calls["cwd"] / "chatlog.md").read_text(encoding="utf-8") == (
-        "[Dev] where do your plans stand?\n"
-    )
-    # What it looked at is kept: an answer that skipped a project and one
-    # that found nothing there are the same sentence otherwise.
-    assert calls["transcript"] == calls["cwd"] / "transcript.jsonl"
-    assert calls["stream"] is True
-
-
-def test_a_failed_entrance_run_is_an_error_the_topic_hears_about(monkeypatch, tmp_path):
-    monkeypatch.setattr(zulip_listener, "TOPICS_ROOT", tmp_path / "topics")
-    monkeypatch.setattr(zulip_listener, "RECORDS_ROOT", tmp_path / "records")
-    monkeypatch.setattr(
-        zulip_listener, "run_role",
-        lambda *a, **k: ("boom", {}, 3),
-    )
-    context = zulip_listener.TopicContext(
-        client=None, channel="autolab-here1", topic="how-far-along",
-        self_id=BOT_ID, bot_name="Autolab",
-        history=[{"id": 1, "sender_id": 8, "sender_full_name": "Dev", "content": "?"}],
-    )
-    with pytest.raises(zulip_listener.ListenerError):
-        zulip_listener.serve_entrance(context)
+    assert entrance_guide(zulip_listener.SPEC) == zulip_listener.guide("entrance_front", "guide.md")
+    assert "workplan-" in entrance_guide(zulip_listener.SPEC)
 
 
 # --- the callback: a delegation that outlives its run ----------------------

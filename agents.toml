@@ -1,4 +1,4 @@
-schema = "ag.agent-config.v1"
+schema = "ag.agent-config.v2"
 project = "agautolab"
 
 [models."ollama/qwen3.6:35b-a3b-coding-nvfp4"]
@@ -21,21 +21,93 @@ model = "ollama/qwen3.6:35b-a3b-coding-nvfp4"
 # `agent_standardize` p10: the `local` profile cost more than it saved,
 # and `nested_harness` was a requirement of the in-process backend it
 # used, not of the role.
+# Every role carries its own tool grant (claude_code's --allowedTools) since
+# ag.agent-config.v2; a role without one is a schema error, not a run that
+# waits on a permission prompt until the timeout. The working grant is one
+# string of thought repeated per role below, so a permission fix must land
+# on every role that does work — `front` runs `uv run new_mission.py` in its
+# own workspace and needs the same shell as `mediator`; `director` records
+# notes into the direction clone; `coding`/`superdirector`/`supercoder`
+# write files.
 [roles.front]
 profile = "sonnet"
 requires = []
+allowed_tools = [
+    "Read", "Write", "Edit", "Glob", "Grep", "TodoWrite", "BashOutput", "KillShell",
+    "WebFetch", "WebSearch", "NotebookEdit",
+    "Bash(git:*)", "Bash(uv:*)", "Bash(uvx:*)", "Bash(curl:*)", "Bash(wget:*)",
+    "Bash(node:*)", "Bash(npm:*)", "Bash(npx:*)", "Bash(python3:*)", "Bash(pip:*)",
+    "Bash(jq:*)", "Bash(autolab:*)",
+    "Bash(ls:*)", "Bash(cat:*)", "Bash(head:*)", "Bash(tail:*)", "Bash(wc:*)",
+    "Bash(sort:*)", "Bash(find:*)", "Bash(rg:*)", "Bash(sed:*)", "Bash(awk:*)",
+    "Bash(mkdir:*)", "Bash(cp:*)", "Bash(mv:*)", "Bash(rm:*)", "Bash(chmod:*)",
+    "Bash(touch:*)", "Bash(date:*)", "Bash(pwd:*)", "Bash(cd:*)", "Bash(which:*)",
+    "Bash(env:*)", "Bash(sleep:*)", "Bash(kill:*)", "Bash(ps:*)", "Bash(echo:*)",
+    "Bash(open:*)", "Bash(tar:*)", "Bash(make:*)", "Bash(bash:*)", "Bash(sh:*)",
+    # How a run reaches another agent. `tools/agents.md` says who is there;
+    # this is what lets a run write to them.
+    "Bash(agentchat:*)",
+]
 
 [roles.director]
 profile = "sonnet"
 requires = []
+allowed_tools = [
+    "Read", "Write", "Edit", "Glob", "Grep", "TodoWrite", "BashOutput", "KillShell",
+    "WebFetch", "WebSearch", "NotebookEdit",
+    "Bash(git:*)", "Bash(uv:*)", "Bash(uvx:*)", "Bash(curl:*)", "Bash(wget:*)",
+    "Bash(node:*)", "Bash(npm:*)", "Bash(npx:*)", "Bash(python3:*)", "Bash(pip:*)",
+    "Bash(jq:*)", "Bash(autolab:*)",
+    "Bash(ls:*)", "Bash(cat:*)", "Bash(head:*)", "Bash(tail:*)", "Bash(wc:*)",
+    "Bash(sort:*)", "Bash(find:*)", "Bash(rg:*)", "Bash(sed:*)", "Bash(awk:*)",
+    "Bash(mkdir:*)", "Bash(cp:*)", "Bash(mv:*)", "Bash(rm:*)", "Bash(chmod:*)",
+    "Bash(touch:*)", "Bash(date:*)", "Bash(pwd:*)", "Bash(cd:*)", "Bash(which:*)",
+    "Bash(env:*)", "Bash(sleep:*)", "Bash(kill:*)", "Bash(ps:*)", "Bash(echo:*)",
+    "Bash(open:*)", "Bash(tar:*)", "Bash(make:*)", "Bash(bash:*)", "Bash(sh:*)",
+    # How a run reaches another agent. `tools/agents.md` says who is there;
+    # this is what lets a run write to them.
+    "Bash(agentchat:*)",
+]
 
 [roles.mediator]
 profile = "sonnet"
 requires = []
+allowed_tools = [
+    "Read", "Write", "Edit", "Glob", "Grep", "TodoWrite", "BashOutput", "KillShell",
+    "WebFetch", "WebSearch", "NotebookEdit",
+    "Bash(git:*)", "Bash(uv:*)", "Bash(uvx:*)", "Bash(curl:*)", "Bash(wget:*)",
+    "Bash(node:*)", "Bash(npm:*)", "Bash(npx:*)", "Bash(python3:*)", "Bash(pip:*)",
+    "Bash(jq:*)", "Bash(autolab:*)",
+    "Bash(ls:*)", "Bash(cat:*)", "Bash(head:*)", "Bash(tail:*)", "Bash(wc:*)",
+    "Bash(sort:*)", "Bash(find:*)", "Bash(rg:*)", "Bash(sed:*)", "Bash(awk:*)",
+    "Bash(mkdir:*)", "Bash(cp:*)", "Bash(mv:*)", "Bash(rm:*)", "Bash(chmod:*)",
+    "Bash(touch:*)", "Bash(date:*)", "Bash(pwd:*)", "Bash(cd:*)", "Bash(which:*)",
+    "Bash(env:*)", "Bash(sleep:*)", "Bash(kill:*)", "Bash(ps:*)", "Bash(echo:*)",
+    "Bash(open:*)", "Bash(tar:*)", "Bash(make:*)", "Bash(bash:*)", "Bash(sh:*)",
+    # How a run reaches another agent. `tools/agents.md` says who is there;
+    # this is what lets a run write to them.
+    "Bash(agentchat:*)",
+]
 
 [roles.coding]
 profile = "sonnet"
 requires = []
+allowed_tools = [
+    "Read", "Write", "Edit", "Glob", "Grep", "TodoWrite", "BashOutput", "KillShell",
+    "WebFetch", "WebSearch", "NotebookEdit",
+    "Bash(git:*)", "Bash(uv:*)", "Bash(uvx:*)", "Bash(curl:*)", "Bash(wget:*)",
+    "Bash(node:*)", "Bash(npm:*)", "Bash(npx:*)", "Bash(python3:*)", "Bash(pip:*)",
+    "Bash(jq:*)", "Bash(autolab:*)",
+    "Bash(ls:*)", "Bash(cat:*)", "Bash(head:*)", "Bash(tail:*)", "Bash(wc:*)",
+    "Bash(sort:*)", "Bash(find:*)", "Bash(rg:*)", "Bash(sed:*)", "Bash(awk:*)",
+    "Bash(mkdir:*)", "Bash(cp:*)", "Bash(mv:*)", "Bash(rm:*)", "Bash(chmod:*)",
+    "Bash(touch:*)", "Bash(date:*)", "Bash(pwd:*)", "Bash(cd:*)", "Bash(which:*)",
+    "Bash(env:*)", "Bash(sleep:*)", "Bash(kill:*)", "Bash(ps:*)", "Bash(echo:*)",
+    "Bash(open:*)", "Bash(tar:*)", "Bash(make:*)", "Bash(bash:*)", "Bash(sh:*)",
+    # How a run reaches another agent. `tools/agents.md` says who is there;
+    # this is what lets a run write to them.
+    "Bash(agentchat:*)",
+]
 
 # Reads the whole project — main/, direction/, devlog/ — to plan one mission,
 # so it runs on the strongest profile available. Same profile as `coding`
@@ -43,6 +115,22 @@ requires = []
 [roles.superdirector]
 profile = "sonnet"
 requires = []
+allowed_tools = [
+    "Read", "Write", "Edit", "Glob", "Grep", "TodoWrite", "BashOutput", "KillShell",
+    "WebFetch", "WebSearch", "NotebookEdit",
+    "Bash(git:*)", "Bash(uv:*)", "Bash(uvx:*)", "Bash(curl:*)", "Bash(wget:*)",
+    "Bash(node:*)", "Bash(npm:*)", "Bash(npx:*)", "Bash(python3:*)", "Bash(pip:*)",
+    "Bash(jq:*)", "Bash(autolab:*)",
+    "Bash(ls:*)", "Bash(cat:*)", "Bash(head:*)", "Bash(tail:*)", "Bash(wc:*)",
+    "Bash(sort:*)", "Bash(find:*)", "Bash(rg:*)", "Bash(sed:*)", "Bash(awk:*)",
+    "Bash(mkdir:*)", "Bash(cp:*)", "Bash(mv:*)", "Bash(rm:*)", "Bash(chmod:*)",
+    "Bash(touch:*)", "Bash(date:*)", "Bash(pwd:*)", "Bash(cd:*)", "Bash(which:*)",
+    "Bash(env:*)", "Bash(sleep:*)", "Bash(kill:*)", "Bash(ps:*)", "Bash(echo:*)",
+    "Bash(open:*)", "Bash(tar:*)", "Bash(make:*)", "Bash(bash:*)", "Bash(sh:*)",
+    # How a run reaches another agent. `tools/agents.md` says who is there;
+    # this is what lets a run write to them.
+    "Bash(agentchat:*)",
+]
 
 # Serves one `workrun-` topic as a conversation with the developer, in the
 # project folder. Same profile as `coding` today; the role exists so the two
@@ -50,10 +138,28 @@ requires = []
 [roles.supercoder]
 profile = "sonnet"
 requires = []
+allowed_tools = [
+    "Read", "Write", "Edit", "Glob", "Grep", "TodoWrite", "BashOutput", "KillShell",
+    "WebFetch", "WebSearch", "NotebookEdit",
+    "Bash(git:*)", "Bash(uv:*)", "Bash(uvx:*)", "Bash(curl:*)", "Bash(wget:*)",
+    "Bash(node:*)", "Bash(npm:*)", "Bash(npx:*)", "Bash(python3:*)", "Bash(pip:*)",
+    "Bash(jq:*)", "Bash(autolab:*)",
+    "Bash(ls:*)", "Bash(cat:*)", "Bash(head:*)", "Bash(tail:*)", "Bash(wc:*)",
+    "Bash(sort:*)", "Bash(find:*)", "Bash(rg:*)", "Bash(sed:*)", "Bash(awk:*)",
+    "Bash(mkdir:*)", "Bash(cp:*)", "Bash(mv:*)", "Bash(rm:*)", "Bash(chmod:*)",
+    "Bash(touch:*)", "Bash(date:*)", "Bash(pwd:*)", "Bash(cd:*)", "Bash(which:*)",
+    "Bash(env:*)", "Bash(sleep:*)", "Bash(kill:*)", "Bash(ps:*)", "Bash(echo:*)",
+    "Bash(open:*)", "Bash(tar:*)", "Bash(make:*)", "Bash(bash:*)", "Bash(sh:*)",
+    # How a run reaches another agent. `tools/agents.md` says who is there;
+    # this is what lets a run write to them.
+    "Bash(agentchat:*)",
+]
 
+# Only reads. Under agcode the same is said by `--tools read-only` (role_run).
 [roles.summarizer]
 profile = "sonnet"
 requires = []
+allowed_tools = "Read,Glob,Grep"
 
 [capabilities]
 provides = ["nested_harness", "service_http"]

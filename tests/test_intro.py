@@ -1,26 +1,31 @@
-from agautolab import intro
+"""`python -m agautolab.intro` is the skeleton's `intro_main` over autolab's SPEC."""
+
+from agag import agent as skeleton
+
+from agautolab import instance
 
 
-def test_topic_is_the_per_instance_intro_topic(monkeypatch):
-    monkeypatch.setattr(intro, "instance_name", lambda: "autolab-agstudio1")
-    assert intro.topic() == "intro-autolab-agstudio1"
-
-
-def test_main_posts_the_committed_markdown_to_the_shared_board(monkeypatch):
+def test_the_intro_is_posted_for_this_instance(monkeypatch):
     sent = []
 
     class Client:
         def send_to_channel(self, channel, topic, text):
             sent.append((channel, topic, text))
 
-    monkeypatch.setattr(intro.ZulipClient, "from_env", lambda path: Client())
-    monkeypatch.setattr(intro, "instance_name", lambda: "autolab-agstudio1")
+    monkeypatch.setattr(skeleton.ZulipClient, "from_env", lambda path: Client())
+    monkeypatch.setenv(instance.SPEC.instance_env_var, "autolab-agstudio1")
 
-    intro.main()
+    skeleton.intro_main(instance.SPEC)
 
     (channel, topic, text) = sent[0]
     assert (channel, topic) == ("agents", "intro-autolab-agstudio1")
-    body = intro.INTRO_PATH.read_text(encoding="utf-8").rstrip()
+    body = instance.SPEC.intro_path.read_text(encoding="utf-8").rstrip()
     assert text.startswith(body.replace("{instance}", "autolab-agstudio1"))
     assert "{instance}" not in text
     assert "\nPosted: " in text and "\nRevision: `" in text
+
+
+def test_the_spec_names_autolab_s_vocabulary():
+    assert instance.SPEC.agent == "autolab"
+    assert instance.SPEC.instance_env_var == "AUTOLAB_INSTANCE_NAME"
+    assert instance.SPEC.sweep_prefixes == ("workrun-", "workplan-", "bmining-")
