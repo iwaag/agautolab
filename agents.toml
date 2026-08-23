@@ -1,13 +1,13 @@
 schema = "ag.agent-config.v2"
 project = "agautolab"
 
-[models."ollama/qwen3.6:35b-a3b-coding-nvfp4"]
+[models."ollama/qwen3.8:27b-mxfp8"]
 
 [models."anthropic/claude-sonnet-5"]
 
 [profiles.local]
 harness = "agcode"
-model = "ollama/qwen3.6:35b-a3b-coding-nvfp4"
+model = "ollama/qwen3.8:27b-mxfp8"
 
 [profiles.sonnet]
 harness = "claude_code"
@@ -15,7 +15,7 @@ model = "anthropic/claude-sonnet-5"
 
 [profiles.stub]
 harness = "fake"
-model = "ollama/qwen3.6:35b-a3b-coding-nvfp4"
+model = "ollama/qwen3.8:27b-mxfp8"
 
 # The instance entrance, and the gateway window. On `sonnet` since
 # `agent_standardize` p10: the `local` profile cost more than it saved,
