@@ -6,7 +6,7 @@ import pytest
 from agag import topics
 from agag.topics import GuideError
 
-from agautolab import zulip_listener
+from agautolab import project_init, zulip_listener
 
 
 BOT_ID = 11
@@ -822,6 +822,11 @@ def wire_run(monkeypatch, tmp_path, calls, *, target=TARGET, report=None,
     monkeypatch.setattr(
         zulip_listener, "init_project", lambda project: calls.append(("init", project)) or "ok"
     )
+    # What a full `init_project` leaves behind: a devlog clone (unless the test
+    # made `devlog/` a plain folder first — the main-only layout).
+    root = tmp_path / "projects" / "demo-project"
+    if not project_init.is_main_only(root):
+        (root / "devlog" / ".git").mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(
         zulip_listener,
         "run_target",
@@ -992,6 +997,25 @@ def test_a_report_completes_the_task_records_it_and_resolves_the_topic(monkeypat
     outcome = last_reply(calls)
     assert "task PD-6: commented yes, Done yes; resolving this topic" in outcome
     assert "recorded pd-4-fix-title-screen/task-2 in devlog and pushed" in outcome
+    assert any(call[0] == "resolve" for call in calls)
+
+
+def test_a_local_only_devlog_is_written_and_never_pushed(monkeypatch, tmp_path):
+    """Main-only project: `devlog/` is a plain folder. The record is written
+    exactly as for a clone; the git helper is not called at all."""
+    devlog = tmp_path / "projects" / "demo-project" / "devlog"
+    devlog.mkdir(parents=True)
+    calls = []
+    wire_run(monkeypatch, tmp_path, calls, report="all good\n")
+
+    zulip_listener.handle_workrun(RunClient(calls), WORK_CHANNEL, WORKRUN_TOPIC)
+
+    task_dir = devlog / "pd-4-fix-title-screen" / "task-2"
+    assert (task_dir / "report.md").read_text() == "all good\n"
+    assert not any(call[0] == "push" for call in calls)
+    assert not (devlog / ".git").exists()
+    outcome = last_reply(calls)
+    assert "recorded pd-4-fix-title-screen/task-2 in devlog locally (not a repository)" in outcome
     assert any(call[0] == "resolve" for call in calls)
 
 
@@ -1200,6 +1224,10 @@ def wire_bmining(monkeypatch, tmp_path, calls, *, reply="director says hi",
     monkeypatch.setattr(
         zulip_listener, "init_project", lambda project: calls.append(("init", project)) or "success"
     )
+    # A full project's direction clone; a main-only test leaves it absent.
+    root = tmp_path / "projects" / "demo-project"
+    if not project_init.is_main_only(root):
+        (root / "direction" / ".git").mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(
         zulip_listener,
         "run_director",
@@ -1279,6 +1307,19 @@ def test_bmining_replaces_a_leftover_chatlog(monkeypatch, tmp_path):
 
     assert "stale conversation" not in seen["chatlog"]
     assert "[Developer] Build it" in seen["chatlog"]
+
+
+def test_bmining_declines_on_a_main_only_project(monkeypatch, tmp_path):
+    """No `direction/` clone: nothing to record into, so no director run, no git."""
+    (tmp_path / "projects" / "demo-project" / "devlog").mkdir(parents=True)
+    (tmp_path / "projects" / "demo-project" / "main").mkdir()
+    calls = []
+    wire_bmining(monkeypatch, tmp_path, calls)
+
+    zulip_listener.handle_bmining(Client(calls), CHANNEL, BMINING_TOPIC)
+
+    assert not any(call[0] in {"director", "push"} for call in calls)
+    assert "no `direction/` repository" in last_reply(calls)
 
 
 def test_bmining_reports_the_push_when_the_clone_was_dirty(monkeypatch, tmp_path):

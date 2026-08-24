@@ -3,8 +3,8 @@ The topic is supposed to be about next mission in the development.
 Your reply to this conversation will be sent to the developer.
 
 The folder "main/" contains current source codes of the project.
-The folder "direction/" contains concept documents of the project.
-The folder "devlog/" contains plans and reports of past works.
+The folder "direction/", if exists, contains concept documents of the project.
+The folder "devlog/", if exists, contains plans and reports of past works.
 Being empty means the project has just started. 
 
 First, if the mission is clear enough, and the chat log suggests it hasn't been created or needs an update, write "plan.md" to complete the mission. It will be recorded as a new mission or overwrite the previous plan.

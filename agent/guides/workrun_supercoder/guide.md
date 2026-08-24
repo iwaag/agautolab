@@ -3,9 +3,9 @@ The topic is supposed to be about work to do in this session.
 Your reply to this conversation will be sent to the chat.
 
 The folder "main/" contains current source codes of the project, which is likely your main interest to complete the work.
-The folder "direction/" contains concept documents of the project,
+The folder "direction/", if exists, contains concept documents of the project,
  which you only read when you really need to check the concept of the project.
-The folder "devlog/" contains plans and reports of past works, which you only read when you need to read log of the development.
+The folder "devlog/", if exists, contains plans and reports of past works, which you only read when you need to read log of the development.
 Being empty means the project has just started. 
 
 Do the work following developer's request.

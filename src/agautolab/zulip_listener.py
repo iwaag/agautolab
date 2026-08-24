@@ -865,12 +865,16 @@ def record_task_in_devlog(target, workspace: Path, report: str) -> str:
         encoding="utf-8",
     )
     (task_dir / REPORT_FILE).write_text(report, encoding="utf-8")
+    relative = task_dir.relative_to(devlog)
+    if not (devlog / ".git").exists():
+        # A main-only project (`init_project --main-only`): the record is a
+        # plain local folder, read by the next plan and pushed nowhere.
+        return f"recorded {relative} in devlog locally (not a repository)"
     pushed = commit_all_and_push(
         load_gitea_config(),
         devlog,
         f"{AUTO_MARKER} task {target.serial} report for {target.mission_label}",
     )
-    relative = task_dir.relative_to(devlog)
     return (
         f"recorded {relative} in devlog and pushed" if pushed
         else f"recorded {relative} in devlog (nothing to commit)"
@@ -1027,6 +1031,13 @@ def run_director(prompt: str, cwd: Path) -> str:
     return output.strip() or NO_CLOSING_MESSAGE
 
 
+NO_DIRECTION_REPLY = (
+    "This project has no `direction/` repository (it was set up main-only), "
+    "so there is nowhere to record a brain-mining discussion. Ask in a "
+    "`workplan-` topic instead, or re-initialise the project with a direction repository."
+)
+
+
 def serve_bmining(context) -> TopicResult:
     """One discussion serving: chatlog in, director run, notes pushed.
 
@@ -1040,6 +1051,8 @@ def serve_bmining(context) -> TopicResult:
     init_project(project)
 
     direction_dir = direction_directory(project)
+    if not (direction_dir / ".git").exists():
+        return TopicResult([NO_DIRECTION_REPLY])
     work_dir = bmining_work_directory(project)
     try:
         context.step = "chatlog placement"
