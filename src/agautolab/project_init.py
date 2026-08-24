@@ -343,23 +343,60 @@ def commit_all_and_push(config: GiteaConfig, workspace: Path, message: str) -> b
     return True
 
 
-def init_project(project: str) -> str:
+def is_main_only(project_root: Path) -> bool:
+    """Whether the project folder on disk has the main-only layout.
+
+    Main-only means `devlog/` is a plain folder (no `.git`) and there is no
+    `direction/`. A project that does not exist yet is not main-only: the
+    caller decides. Runtime callers (`init_project(slug)` from a serving)
+    never pass a layout, so this is what keeps a re-run from cloning two
+    repositories into a project that was deliberately made without them.
+    """
+    devlog = project_root / "devlog"
+    return (
+        devlog.is_dir()
+        and not (devlog / ".git").exists()
+        and not (project_root / "direction").exists()
+    )
+
+
+def init_project(project: str, *, main_only: bool | None = None) -> str:
+    """Create or re-check one project. Idempotent.
+
+    `main_only=None` (every runtime caller) reads the layout off the disk:
+    an existing main-only project stays main-only, anything else gets the
+    full three-repo treatment. `main_only=True` on an existing full project
+    touches `main/` only and leaves `direction/` and the `devlog/` clone as
+    they are. `main_only=False` on an existing main-only project is refused
+    rather than turning the local record into a clone.
+    """
     if not PROJECT_NAME.fullmatch(project):
         raise ProjectInitError(
             "project name must be 2-39 lowercase letters, digits, or hyphens "
             "and start with a letter or digit"
         )
+    project_root = PROJECTS_ROOT / project
+    on_disk_main_only = is_main_only(project_root)
+    if main_only is None:
+        main_only = on_disk_main_only
+    elif not main_only and on_disk_main_only:
+        raise ProjectInitError(
+            f"{project} is a main-only project (devlog/ is a plain folder); "
+            "refusing to turn it into a clone — re-run with --main-only"
+        )
     plane = load_plane_config()
     gitea = load_gitea_config()
     ensure_plane_project(plane, project)
-    project_root = PROJECTS_ROOT / project
-    for repo, directory in (
-        (project, "main"),
-        (f"{project}-direction", "direction"),
-        (f"{project}-devlog", "devlog"),
-    ):
+    repos = [(project, "main")]
+    if not main_only:
+        repos += [(f"{project}-direction", "direction"), (f"{project}-devlog", "devlog")]
+    for repo, directory in repos:
         ensure_gitea_repo(gitea, repo)
         workspace = project_root / directory
         ensure_clone(gitea, repo, workspace)
         ensure_gitignore(gitea, workspace)
+    if main_only:
+        # The local-only record: written by `record_task_in_devlog`, read by
+        # the next plan, pushed nowhere. Lives as long as `.local/` does.
+        (project_root / "devlog").mkdir(parents=True, exist_ok=True)
     return "success"

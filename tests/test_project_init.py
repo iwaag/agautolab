@@ -84,6 +84,78 @@ def test_init_project_runs_every_idempotent_step_in_order(monkeypatch, tmp_path)
     ]
 
 
+def wire_init(monkeypatch, tmp_path, calls):
+    plane = project_init.PlaneConfig("http://plane", "key", "workspace")
+    gitea = project_init.GiteaConfig("http://gitea", "token", "autodev")
+    monkeypatch.setattr(project_init, "PROJECTS_ROOT", tmp_path)
+    monkeypatch.setattr(project_init, "load_plane_config", lambda: plane)
+    monkeypatch.setattr(project_init, "load_gitea_config", lambda: gitea)
+    monkeypatch.setattr(
+        project_init, "ensure_plane_project", lambda config, name: calls.append(("plane", name))
+    )
+    monkeypatch.setattr(
+        project_init, "ensure_gitea_repo", lambda config, name: calls.append(("repo", name))
+    )
+
+    def clone(config, repo, path):
+        calls.append(("clone", repo, path.relative_to(tmp_path)))
+        (path / ".git").mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(project_init, "ensure_clone", clone)
+    monkeypatch.setattr(
+        project_init,
+        "ensure_gitignore",
+        lambda config, path: calls.append(("gitignore", path.relative_to(tmp_path))),
+    )
+
+
+def test_init_project_main_only_clones_main_and_makes_devlog_a_plain_folder(monkeypatch, tmp_path):
+    calls = []
+    wire_init(monkeypatch, tmp_path, calls)
+
+    assert project_init.init_project("rtnotes", main_only=True) == "success"
+    assert calls == [
+        ("plane", "rtnotes"),
+        ("repo", "rtnotes"),
+        ("clone", "rtnotes", Path("rtnotes/main")),
+        ("gitignore", Path("rtnotes/main")),
+    ]
+    assert (tmp_path / "rtnotes" / "devlog").is_dir()
+    assert not (tmp_path / "rtnotes" / "devlog" / ".git").exists()
+    assert not (tmp_path / "rtnotes" / "direction").exists()
+    assert project_init.is_main_only(tmp_path / "rtnotes")
+
+    # A runtime re-run passes no layout and must read main-only off the disk.
+    calls.clear()
+    assert project_init.init_project("rtnotes") == "success"
+    assert [call[0] for call in calls] == ["plane", "repo", "clone", "gitignore"]
+    assert not (tmp_path / "rtnotes" / "direction").exists()
+
+
+def test_init_project_main_only_leaves_an_existing_full_project_alone(monkeypatch, tmp_path):
+    calls = []
+    wire_init(monkeypatch, tmp_path, calls)
+    project_init.init_project("demo-project")
+    assert (tmp_path / "demo-project" / "devlog" / ".git").is_dir()
+
+    calls.clear()
+    project_init.init_project("demo-project", main_only=True)
+    assert [call[1] for call in calls if call[0] == "repo"] == ["demo-project"]
+    assert (tmp_path / "demo-project" / "direction" / ".git").is_dir()
+    assert (tmp_path / "demo-project" / "devlog" / ".git").is_dir()
+    assert not project_init.is_main_only(tmp_path / "demo-project")
+
+
+def test_init_project_refuses_to_turn_a_local_devlog_into_a_clone(monkeypatch, tmp_path):
+    calls = []
+    wire_init(monkeypatch, tmp_path, calls)
+    project_init.init_project("rtnotes", main_only=True)
+
+    with pytest.raises(project_init.ProjectInitError, match="main-only"):
+        project_init.init_project("rtnotes", main_only=False)
+    assert not (tmp_path / "rtnotes" / "devlog" / ".git").exists()
+
+
 def test_ensure_gitignore_seeds_commits_and_is_idempotent(monkeypatch, tmp_path):
     commands = []
     monkeypatch.setattr(
