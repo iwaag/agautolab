@@ -343,6 +343,23 @@ def commit_all_and_push(config: GiteaConfig, workspace: Path, message: str) -> b
     return True
 
 
+def push_main_repository(config: GiteaConfig, workspace: Path) -> int:
+    """Publish the clone's commits to `main`, and say how many it carried.
+
+    Unlike `commit_all_and_push` this commits nothing. What enters a project's
+    history is the agent's decision — approving the task is what authorises the
+    commit — and only the *publishing* was missing (`scheduled_routine` p2's
+    open finding: a routine project's Gitea repository silently aged while its
+    local clone grew). The fetch is what keeps the count honest when somebody
+    else pushed meanwhile; a clone already level costs no push at all.
+    """
+    _git(config, "fetch", "origin", "main", cwd=workspace)
+    carried = len(_git(config, "rev-list", "origin/main..HEAD", cwd=workspace).split())
+    if carried:
+        _git(config, "push", "origin", "HEAD:main", cwd=workspace)
+    return carried
+
+
 def is_main_only(project_root: Path) -> bool:
     """Whether the project folder on disk has the main-only layout.
 

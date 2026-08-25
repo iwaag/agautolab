@@ -217,6 +217,36 @@ def test_commit_all_and_push_commits_a_dirty_workspace(monkeypatch, tmp_path):
     assert commands[-1] == ("push", "origin", "HEAD:main")
 
 
+def test_push_main_repository_publishes_what_the_run_committed(monkeypatch, tmp_path):
+    """It commits nothing: what enters the history was the agent's decision,
+    and only the publishing was missing."""
+    commands = []
+
+    def fake_git(config, *args, cwd=None):
+        commands.append(args)
+        return "aaa\nbbb\n" if args[0] == "rev-list" else ""
+
+    monkeypatch.setattr(project_init, "_git", fake_git)
+    gitea = project_init.GiteaConfig("http://gitea", "token", "autodev")
+
+    assert project_init.push_main_repository(gitea, tmp_path) == 2
+    assert commands[0] == ("fetch", "origin", "main")
+    assert commands[1] == ("rev-list", "origin/main..HEAD")
+    assert commands[-1] == ("push", "origin", "HEAD:main")
+    assert not any(args[0] in {"add", "commit"} for args in commands)
+
+
+def test_push_main_repository_pushes_nothing_when_the_clone_is_level(monkeypatch, tmp_path):
+    commands = []
+    monkeypatch.setattr(
+        project_init, "_git", lambda config, *args, cwd=None: commands.append(args) or ""
+    )
+    gitea = project_init.GiteaConfig("http://gitea", "token", "autodev")
+
+    assert project_init.push_main_repository(gitea, tmp_path) == 0
+    assert [args[0] for args in commands] == ["fetch", "rev-list"]
+
+
 def test_commit_all_and_push_leaves_a_clean_workspace_alone(monkeypatch, tmp_path):
     commands = []
     monkeypatch.setattr(

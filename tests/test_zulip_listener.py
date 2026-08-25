@@ -815,7 +815,7 @@ HANDOFF = "@**Developer**\n\n"
 
 
 def wire_run(monkeypatch, tmp_path, calls, *, target=TARGET, report=None,
-             output="work done", pushed=True):
+             output="work done", pushed=True, main_carried=2):
     monkeypatch.setattr(zulip_listener, "PROJECTS_ROOT", tmp_path / "projects")
     monkeypatch.setattr(zulip_listener, "TOPICS_ROOT", tmp_path / "topics")
     monkeypatch.setattr(zulip_listener, "RECORDS_ROOT", tmp_path / "records")
@@ -827,6 +827,9 @@ def wire_run(monkeypatch, tmp_path, calls, *, target=TARGET, report=None,
     root = tmp_path / "projects" / "demo-project"
     if not project_init.is_main_only(root):
         (root / "devlog" / ".git").mkdir(parents=True, exist_ok=True)
+    # `main/` is a clone in every layout, main-only included: it is the one
+    # repository the requester reads, so the close-out has something to push.
+    (root / "main" / ".git").mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(
         zulip_listener,
         "run_target",
@@ -861,6 +864,13 @@ def wire_run(monkeypatch, tmp_path, calls, *, target=TARGET, report=None,
         ),
     )
     monkeypatch.setattr(zulip_listener, "load_gitea_config", lambda: "gitea-config")
+    monkeypatch.setattr(
+        zulip_listener,
+        "push_main_repository",
+        lambda config, workspace: (
+            calls.append(("push-main", workspace)) or main_carried
+        ),
+    )
     monkeypatch.setattr(
         zulip_listener,
         "commit_all_and_push",
@@ -998,6 +1008,53 @@ def test_a_report_completes_the_task_records_it_and_resolves_the_topic(monkeypat
     assert "task PD-6: commented yes, Done yes; resolving this topic" in outcome
     assert "recorded pd-4-fix-title-screen/task-2 in devlog and pushed" in outcome
     assert any(call[0] == "resolve" for call in calls)
+
+
+def test_the_close_out_publishes_main(monkeypatch, tmp_path):
+    """`scheduled_routine` p2's open finding: the supercoder committed `main`
+    and nothing ever pushed it. The close-out does, beside the devlog record."""
+    calls = []
+    wire_run(monkeypatch, tmp_path, calls, report="all good\n")
+
+    zulip_listener.handle_workrun(RunClient(calls), WORK_CHANNEL, WORKRUN_TOPIC)
+
+    main = tmp_path / "projects" / "demo-project" / "main"
+    assert calls_of(calls, "push-main")[0][1:] == (main,)
+    assert "pushed main to Gitea (2 commits)" in last_reply(calls)
+
+
+def test_a_main_only_project_publishes_main_too(monkeypatch, tmp_path):
+    """The devlog is local in this layout, so `main` is the whole visible
+    record — the routine's value is exactly that Gitea history."""
+    (tmp_path / "projects" / "demo-project" / "devlog").mkdir(parents=True)
+    calls = []
+    wire_run(monkeypatch, tmp_path, calls, report="all good\n", main_carried=1)
+
+    zulip_listener.handle_workrun(RunClient(calls), WORK_CHANNEL, WORKRUN_TOPIC)
+
+    outcome = last_reply(calls)
+    assert "pushed main to Gitea (1 commit)" in outcome
+    assert "recorded pd-4-fix-title-screen/task-2 in devlog locally (not a repository)" in outcome
+
+
+def test_a_run_that_committed_nothing_pushes_nothing(monkeypatch, tmp_path):
+    calls = []
+    wire_run(monkeypatch, tmp_path, calls, report="all good\n", main_carried=0)
+
+    zulip_listener.handle_workrun(RunClient(calls), WORK_CHANNEL, WORKRUN_TOPIC)
+
+    assert "main was already level with Gitea" in last_reply(calls)
+
+
+def test_an_unfinished_run_publishes_nothing(monkeypatch, tmp_path):
+    """No report means the conversation is not over; nothing closes, so
+    nothing is published either."""
+    calls = []
+    wire_run(monkeypatch, tmp_path, calls)
+
+    zulip_listener.handle_workrun(RunClient(calls), WORK_CHANNEL, WORKRUN_TOPIC)
+
+    assert not calls_of(calls, "push-main")
 
 
 def test_a_local_only_devlog_is_written_and_never_pushed(monkeypatch, tmp_path):

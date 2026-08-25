@@ -110,6 +110,7 @@ from .project_init import (
     commit_all_and_push,
     init_project,
     load_gitea_config,
+    push_main_repository,
 )
 from .instance import (
     AGAUTOLAB_ROOT,
@@ -881,6 +882,25 @@ def record_task_in_devlog(target, workspace: Path, report: str) -> str:
     )
 
 
+def push_main(slug: str) -> str:
+    """Publish what the run committed in `main`. One line.
+
+    `scheduled_routine` p2 left this open: the supercoder commits `main` —
+    approving the task is what authorises that — and nothing ever pushed, so
+    the Gitea repository aged while the local clone grew. The close-out
+    publishes it, for the same reason `record_task_in_devlog` publishes the
+    devlog: deterministic handler code, so the agent is never asked to run git,
+    and a repository the requester can read is what the work was for.
+    """
+    main = project_directory(slug) / "main"
+    if not (main / ".git").exists():
+        return "main is not a repository; nothing pushed"
+    carried = push_main_repository(load_gitea_config(), main)
+    if not carried:
+        return "main was already level with Gitea"
+    return f"pushed main to Gitea ({carried} commit{'' if carried == 1 else 's'})"
+
+
 def serve_run(context) -> TopicResult:
     """One serving of a `workrun-` topic: gate, agent, and — only if the run
     wrote a report — the close-out.
@@ -965,6 +985,9 @@ def serve_run(context) -> TopicResult:
         f"task {label}: commented {'yes' if commented else 'no'}, "
         f"Done {'yes' if completed else 'no'}; resolving this topic"
     )
+
+    context.step = "publishing main"
+    sections.append(push_main(slug))
 
     context.step = "devlog record"
     sections.append(record_task_in_devlog(target, workspace, report))
