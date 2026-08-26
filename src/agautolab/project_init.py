@@ -276,6 +276,15 @@ def _git(config: GiteaConfig, *arguments: str, cwd: Path | None = None) -> str:
     return completed.stdout
 
 
+def _git_succeeds(config: GiteaConfig, *arguments: str, cwd: Path | None = None) -> bool:
+    """Whether a git command exits 0 — for the questions git answers by failing."""
+    try:
+        _git(config, *arguments, cwd=cwd)
+    except ProjectInitError:
+        return False
+    return True
+
+
 def ensure_clone(config: GiteaConfig, repo: str, destination: Path) -> None:
     if destination.exists():
         return
@@ -358,9 +367,18 @@ def push_main_repository(config: GiteaConfig, workspace: Path) -> int:
     open finding: a routine project's Gitea repository silently aged while its
     local clone grew). The fetch is what keeps the count honest when somebody
     else pushed meanwhile; a clone already level costs no push at all.
+
+    A repository that has never been pushed to has no `main` on the remote —
+    `init-repo` creates an empty one, so every pattern project starts there —
+    and `git fetch origin main` fails outright on it. The first push then
+    carries the whole local history, and a clone with no commits yet carries
+    nothing.
     """
-    _git(config, "fetch", "origin", "main", cwd=workspace)
-    carried = len(_git(config, "rev-list", "origin/main..HEAD", cwd=workspace).split())
+    if not _git_succeeds(config, "rev-parse", "--verify", "HEAD", cwd=workspace):
+        return 0
+    remote_main = _git_succeeds(config, "fetch", "origin", "main", cwd=workspace)
+    revisions = "origin/main..HEAD" if remote_main else "HEAD"
+    carried = len(_git(config, "rev-list", revisions, cwd=workspace).split())
     if carried:
         _git(config, "push", "origin", "HEAD:main", cwd=workspace)
     return carried

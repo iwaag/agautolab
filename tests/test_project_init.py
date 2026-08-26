@@ -230,10 +230,49 @@ def test_push_main_repository_publishes_what_the_run_committed(monkeypatch, tmp_
     gitea = project_init.GiteaConfig("http://gitea", "token", "autodev")
 
     assert project_init.push_main_repository(gitea, tmp_path) == 2
-    assert commands[0] == ("fetch", "origin", "main")
-    assert commands[1] == ("rev-list", "origin/main..HEAD")
+    assert commands[0] == ("rev-parse", "--verify", "HEAD")
+    assert commands[1] == ("fetch", "origin", "main")
+    assert commands[2] == ("rev-list", "origin/main..HEAD")
     assert commands[-1] == ("push", "origin", "HEAD:main")
     assert not any(args[0] in {"add", "commit"} for args in commands)
+
+
+def test_push_main_repository_carries_the_whole_history_on_the_first_ever_push(
+    monkeypatch, tmp_path
+):
+    """`init-repo` makes an empty repository, so `origin/main` does not exist
+    until something is pushed — and `git fetch origin main` fails on it."""
+    commands = []
+
+    def fake_git(config, *args, cwd=None):
+        commands.append(args)
+        if args[0] == "fetch":
+            raise project_init.ProjectInitError(
+                "git fetch failed: fatal: couldn't find remote ref main"
+            )
+        return "aaa\n" if args[0] == "rev-list" else ""
+
+    monkeypatch.setattr(project_init, "_git", fake_git)
+    gitea = project_init.GiteaConfig("http://gitea", "token", "autodev")
+
+    assert project_init.push_main_repository(gitea, tmp_path) == 1
+    assert commands[2] == ("rev-list", "HEAD")
+    assert commands[-1] == ("push", "origin", "HEAD:main")
+
+
+def test_push_main_repository_pushes_nothing_from_a_clone_with_no_commits(monkeypatch, tmp_path):
+    """An unborn branch has nothing to publish and nothing to count."""
+    commands = []
+
+    def fake_git(config, *args, cwd=None):
+        commands.append(args)
+        raise project_init.ProjectInitError("git rev-parse failed: fatal: bad revision 'HEAD'")
+
+    monkeypatch.setattr(project_init, "_git", fake_git)
+    gitea = project_init.GiteaConfig("http://gitea", "token", "autodev")
+
+    assert project_init.push_main_repository(gitea, tmp_path) == 0
+    assert [args[0] for args in commands] == ["rev-parse"]
 
 
 def test_push_main_repository_pushes_nothing_when_the_clone_is_level(monkeypatch, tmp_path):
@@ -244,7 +283,7 @@ def test_push_main_repository_pushes_nothing_when_the_clone_is_level(monkeypatch
     gitea = project_init.GiteaConfig("http://gitea", "token", "autodev")
 
     assert project_init.push_main_repository(gitea, tmp_path) == 0
-    assert [args[0] for args in commands] == ["fetch", "rev-list"]
+    assert [args[0] for args in commands] == ["rev-parse", "fetch", "rev-list"]
 
 
 def test_commit_all_and_push_leaves_a_clean_workspace_alone(monkeypatch, tmp_path):
