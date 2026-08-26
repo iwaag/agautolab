@@ -258,13 +258,16 @@ def test_commit_all_and_push_leaves_a_clean_workspace_alone(monkeypatch, tmp_pat
     assert [args[0] for args in commands] == ["status"]
 
 
-def test_init_project_leaves_a_pattern_managed_workspace_entirely_alone(monkeypatch, tmp_path):
-    """The listener runs this on every serving, before the agent reads anything."""
+def test_init_project_ensures_only_the_plane_project_of_a_pattern_managed_workspace(
+    monkeypatch, tmp_path
+):
+    """The listener runs this on every serving, before the agent reads anything.
+
+    A pattern project's folders stay the agent's, but its missions need a
+    ledger to bind to, so the Plane project is the one thing ensured here.
+    """
     calls = []
     wire_init(monkeypatch, tmp_path, calls)
-    monkeypatch.setattr(
-        project_init, "load_plane_config", lambda: pytest.fail("no Plane call is allowed")
-    )
     monkeypatch.setattr(
         project_init, "load_gitea_config", lambda: pytest.fail("no Gitea call is allowed")
     )
@@ -273,7 +276,7 @@ def test_init_project_leaves_a_pattern_managed_workspace_entirely_alone(monkeypa
     (workspace / project_init.PATTERN_MARKER).write_text("pattern-managed\n", encoding="utf-8")
 
     assert project_init.init_project("studyarxiv") == project_init.PATTERN_MANAGED_RESULT
-    assert calls == []
+    assert calls == [("plane", "studyarxiv")]
     assert sorted(p.name for p in workspace.iterdir()) == [project_init.PATTERN_MARKER]
 
 
@@ -301,4 +304,4 @@ def test_init_project_pattern_marker_wins_over_an_existing_layout(monkeypatch, t
     calls.clear()
     (tmp_path / "demo-project" / project_init.PATTERN_MARKER).write_text("x", encoding="utf-8")
     assert project_init.init_project("demo-project") == project_init.PATTERN_MANAGED_RESULT
-    assert calls == []
+    assert calls == [("plane", "demo-project")]

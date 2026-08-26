@@ -1701,13 +1701,19 @@ def test_a_task_with_no_delegation_gets_no_threads_sentence(monkeypatch, tmp_pat
 
 
 def wire_pattern_managed(monkeypatch, tmp_path, calls, *, superdirector="made it"):
-    """Like `wire`, but with the *real* `init_project` and no way to reach
-    Plane or Gitea: whatever the serving does, it does without them."""
+    """Like `wire`, but with the *real* `init_project`, a recorded Plane
+    ensure and no way to reach Gitea: the Plane project is the one thing a
+    pattern-managed serving is allowed to create."""
     wire(monkeypatch, tmp_path, calls, superdirector=superdirector)
     monkeypatch.setattr(zulip_listener, "init_project", project_init.init_project)
     monkeypatch.setattr(project_init, "PROJECTS_ROOT", tmp_path / "projects")
     monkeypatch.setattr(
-        project_init, "load_plane_config", lambda: pytest.fail("no Plane call is allowed")
+        project_init, "load_plane_config",
+        lambda: project_init.PlaneConfig("http://plane", "key", "workspace"),
+    )
+    monkeypatch.setattr(
+        project_init, "ensure_plane_project",
+        lambda config, name: calls.append(("plane", name)),
     )
     monkeypatch.setattr(
         project_init, "load_gitea_config", lambda: pytest.fail("no Gitea call is allowed")
@@ -1726,19 +1732,20 @@ def wire_pattern_managed(monkeypatch, tmp_path, calls, *, superdirector="made it
     return workspace
 
 
-def test_a_marked_workspace_is_served_without_any_plane_or_gitea_call(monkeypatch, tmp_path):
+def test_a_marked_workspace_is_served_with_only_its_plane_project_ensured(monkeypatch, tmp_path):
     calls = []
     workspace = wire_pattern_managed(monkeypatch, tmp_path, calls)
 
     zulip_listener.handle_topic(Client(calls), CHANNEL, TOPIC)
 
     # The superdirector still runs, in the marked workspace, and its reply is
-    # relayed — only the scaffold and the Plane mirror are gone.
+    # relayed. The Plane project is ensured before it runs; the Gitea scaffold
+    # and the Plane read-back are still gone.
     assert [call[0] for call in calls] == [
-        "whoami", "write", "history", "superdirector", "history", "write", "history",
+        "whoami", "write", "history", "plane", "superdirector", "history", "write", "history",
     ]
     assert next(call[2] for call in calls if call[0] == "superdirector") == workspace
-    assert calls[5][2] == HANDOFF + "made it"
+    assert calls[6][2] == HANDOFF + "made it"
     # Nothing was scaffolded into the workspace.
     assert sorted(p.name for p in workspace.iterdir()) == [project_init.PATTERN_MARKER]
 
