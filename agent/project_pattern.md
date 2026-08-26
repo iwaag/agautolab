@@ -11,6 +11,11 @@ plain local folder, depending on the developer's request.
   the workspace. Run `autolab --help` for the exact usage.
 - When the developer asks for a plain local folder, just create it.
 
+A pattern is a starting layout, not a constraint: a project may add
+folders beyond its pattern (with `init-repo` or as plain local folders),
+and doing so does not change what pattern the project follows. Record
+added folders in `README_PROJECT.md` like any other.
+
 After adding or changing folders, record in `README_PROJECT.md` what each
 folder is for and where its repository lives, so the next run needs no
 other explanation.
