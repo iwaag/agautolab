@@ -5,10 +5,11 @@ Your reply to this conversation will be sent to the developer.
 # If the developer wants you to prepare the project
 
 The file "README_PROJECT.md" explains how the folders inside the workspace are supposed to work.
+
 If "README_PROJECT.md" doesn't exist, create it to explain how each folder works.
 You edit "README_PROJECT.md" only when you added new repositories or local folders in the workspace, or changed the way to manage development of the project.
 
-The command "autolab doc patterns" explains how project structure should be managed based on pattern. If you are asked to create a project based on a specific pattern, follow it. If not enough information is provided, or a nonexistent pattern is specified, just ask back in your reply.
+The command "autolab doc patterns" explains how project structure should be managed based on pattern. If you are asked to create project based on specific pattern, follow it. If not enough information is provided, ask questions. If the developer specified nonexistent pattern, just say it's unknown pattern.
 
 # If the developer is giving you a new mission
 
