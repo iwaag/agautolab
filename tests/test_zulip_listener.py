@@ -1702,8 +1702,9 @@ def test_a_task_with_no_delegation_gets_no_threads_sentence(monkeypatch, tmp_pat
 
 def wire_pattern_managed(monkeypatch, tmp_path, calls, *, superdirector="made it"):
     """Like `wire`, but with the *real* `init_project`, a recorded Plane
-    ensure and no way to reach Gitea: the Plane project is the one thing a
-    pattern-managed serving is allowed to create."""
+    project ensure and no way to reach Gitea: the Plane project is the one
+    thing a pattern-managed serving creates, and its folders stay the
+    agent's."""
     wire(monkeypatch, tmp_path, calls, superdirector=superdirector)
     monkeypatch.setattr(zulip_listener, "init_project", project_init.init_project)
     monkeypatch.setattr(project_init, "PROJECTS_ROOT", tmp_path / "projects")
@@ -1713,15 +1714,10 @@ def wire_pattern_managed(monkeypatch, tmp_path, calls, *, superdirector="made it
     )
     monkeypatch.setattr(
         project_init, "ensure_plane_project",
-        lambda config, name: calls.append(("plane", name)),
+        lambda config, name: calls.append(("plane-project", name)),
     )
     monkeypatch.setattr(
         project_init, "load_gitea_config", lambda: pytest.fail("no Gitea call is allowed")
-    )
-    monkeypatch.setattr(
-        zulip_listener,
-        "write_mission_workspace",
-        lambda *a: pytest.fail("no Plane read-back is allowed"),
     )
     workspace = tmp_path / "projects" / PROJECT
     workspace.mkdir(parents=True)
@@ -1738,19 +1734,22 @@ def test_a_marked_workspace_is_served_with_only_its_plane_project_ensured(monkey
 
     zulip_listener.handle_topic(Client(calls), CHANNEL, TOPIC)
 
-    # The superdirector still runs, in the marked workspace, and its reply is
-    # relayed. The Plane project is ensured before it runs; the Gitea scaffold
-    # and the Plane read-back are still gone.
+    # The superdirector runs in the marked workspace and its reply is relayed.
+    # The Plane project is ensured before the read-back, and the Gitea scaffold
+    # never runs — the folders are the agent's.
     assert [call[0] for call in calls] == [
-        "whoami", "write", "history", "plane", "superdirector", "history", "write", "history",
+        "whoami", "write", "history", "plane-project", "plane", "superdirector",
+        "history", "write", "history",
     ]
     assert next(call[2] for call in calls if call[0] == "superdirector") == workspace
-    assert calls[6][2] == HANDOFF + "made it"
+    assert calls[7][2] == HANDOFF + "made it"
     # Nothing was scaffolded into the workspace.
     assert sorted(p.name for p in workspace.iterdir()) == [project_init.PATTERN_MARKER]
 
 
-def test_a_plan_written_for_a_pattern_managed_project_is_not_sent_to_plane(monkeypatch, tmp_path):
+def test_a_plan_written_for_a_pattern_managed_project_reaches_plane(monkeypatch, tmp_path):
+    """Since scheduled_routine p5 a pattern project has a Plane project, so its
+    mission is recorded there like any other — that is what lets it run."""
     calls = []
     wire_pattern_managed(monkeypatch, tmp_path, calls)
     wire_response(monkeypatch, tmp_path, calls)
@@ -1765,7 +1764,9 @@ def test_a_plan_written_for_a_pattern_managed_project_is_not_sent_to_plane(monke
 
     zulip_listener.handle_topic(Client(calls), CHANNEL, TOPIC)
 
-    assert not [call for call in calls if call[0] in {"upsert", "reconcile", "transition"}]
+    assert [call[0] for call in calls if call[0] in {"upsert", "reconcile"}] == [
+        "upsert", "reconcile",
+    ]
     reply = next(call[2] for call in calls if call[0] == "write" and call[1] == TOPIC
                  and call[2].startswith(HANDOFF))
-    assert "pattern-managed" in reply and zulip_listener.PLAN_FILE in reply
+    assert "pattern-managed" not in reply

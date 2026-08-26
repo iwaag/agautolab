@@ -107,7 +107,6 @@ from .project_init import (
     AUTO_MARKER,
     PROJECT_NAME,
     PROJECTS_ROOT,
-    PATTERN_MANAGED_RESULT,
     commit_all_and_push,
     init_project,
     load_gitea_config,
@@ -282,17 +281,14 @@ def serve(context) -> TopicResult:
     write_agents_md(context.client, workspace)
 
     context.step = "project setup"
-    setup = init_project(project)
-    pattern_managed = setup == PATTERN_MANAGED_RESULT
+    init_project(project)
 
     context.step = "plane read-back"
-    plane_files = False
-    if not pattern_managed:
-        current = workspace / CURRENT_DIR
-        current.mkdir(exist_ok=True)
-        plane_files = write_mission_workspace(current, project, context.channel, context.topic)
-        if not plane_files:
-            current.rmdir()
+    current = workspace / CURRENT_DIR
+    current.mkdir(exist_ok=True)
+    plane_files = write_mission_workspace(current, project, context.channel, context.topic)
+    if not plane_files:
+        current.rmdir()
 
     context.step = "superdirector"
     sections = [
@@ -305,7 +301,7 @@ def serve(context) -> TopicResult:
     context.step = "response handling"
     response_sections, resolve_after = handle_superdirector_response(
         context.client, context.channel, context.topic, project, workspace,
-        context.self_id, pattern_managed=pattern_managed,
+        context.self_id,
     )
     sections.extend(response_sections)
     return TopicResult(sections, resolve_after=resolve_after)
@@ -557,7 +553,7 @@ def archive_work_channel(client: ZulipClient, label: str) -> str:
 
 def handle_superdirector_response(
     client: ZulipClient, channel: str, topic: str, project: str, workspace: Path,
-    self_id: int, *, pattern_managed: bool = False,
+    self_id: int,
 ) -> tuple[list[str], bool]:
     """Act on what the superdirector wrote: `plan.md`, then the flags.
 
@@ -581,21 +577,6 @@ def handle_superdirector_response(
     sections: list[str] = []
     resolve_after = False
     label: str | None = None
-
-    if pattern_managed:
-        # A pattern-managed project has no Plane project this episode, so
-        # there is no ledger to record a mission in. Say what was skipped
-        # rather than raising `Plane project does not exist` at the developer.
-        written = [
-            name for name in (PLAN_FILE, "start.flag", "cancel.flag")
-            if (workspace / name).is_file()
-        ]
-        if written:
-            sections.append(
-                f"{project} is pattern-managed, so nothing was recorded in Plane "
-                f"(written and left as files: {', '.join(written)})"
-            )
-        return sections, resolve_after
 
     plan = workspace / PLAN_FILE
     if plan.is_file():
