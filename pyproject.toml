@@ -7,6 +7,9 @@ dependencies = [
     "pyagag",
 ]
 
+[project.scripts]
+autolab = "agautolab.cli:main"
+
 [dependency-groups]
 dev = [
     "pytest>=8.0",

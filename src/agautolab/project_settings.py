@@ -15,6 +15,22 @@ class ProjectSettingsError(Exception):
     """A project's local agent selection is unreadable or invalid."""
 
 
+def project_name_from_workspace(cwd: Path, projects_root: Path | None = None) -> str | None:
+    """Return the project whose workspace contains ``cwd``, if any.
+
+    The workspace root itself counts: a serving runs there, and that is where
+    `autolab project init-repo` is typed. Anything outside `.local/projects/`
+    is not a project workspace and gets ``None``.
+    """
+    root = PROJECTS_ROOT if projects_root is None else projects_root
+    try:
+        relative = cwd.resolve().relative_to(root.resolve())
+    except (OSError, ValueError):
+        return None
+    parts = relative.parts
+    return parts[0] if parts else None
+
+
 def project_name_from_direction(cwd: Path) -> str | None:
     """Return the project owning a direction workspace, if ``cwd`` is in one."""
     try:
