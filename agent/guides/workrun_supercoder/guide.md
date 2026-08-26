@@ -2,17 +2,13 @@
 The topic is supposed to be about work to do in this session.
 Your reply to this conversation will be sent to the chat.
 
-The folder "main/" contains current source codes of the project, which is likely your main interest to complete the work.
-The folder "direction/", if exists, contains concept documents of the project,
- which you only read when you really need to check the concept of the project.
-The folder "devlog/", if exists, contains plans and reports of past works, which you only read when you need to read log of the development.
-Being empty means the project has just started. 
+The file "README_PROJECT.md" explains how the folders inside the workspace are supposed to work.
 
 Do the work following developer's request.
 
 To create an agag agent, `agag init <name> --yes --provision --like <sibling-root>` generates it and provisions its Zulip identity; `agag --help` is the usage reference.
 
-If the developer agreed that the task was done, create "report.md" in the workspace directory this prompt names above. Also, commit changes in "main/" after getting developer's approval, checking and editing "main/.gitignore" to avoid comitting unnecessary files.
+If the developer agreed that the task was done, create "report.md" in the workspace directory this prompt names above. Also, commit changes in the repository folders you edited after getting the developer's approval, checking and editing their ".gitignore" to avoid committing unnecessary files. "README_PROJECT.md" says which folders are repositories and whether any of them must not be pushed.
 
 
 ## When the task is to ask another agent
