@@ -1695,3 +1695,70 @@ def test_a_task_with_no_delegation_gets_no_threads_sentence(monkeypatch, tmp_pat
     zulip_listener.handle_workrun(RunClient(calls), WORK_CHANNEL, WORKRUN_TOPIC)
     prompt = next(call[1] for call in calls if call[0] == "supercoder")
     assert "threads" not in prompt
+
+
+# --- pattern-managed workspaces ---------------------------------------------
+
+
+def wire_pattern_managed(monkeypatch, tmp_path, calls, *, superdirector="made it"):
+    """Like `wire`, but with the *real* `init_project` and no way to reach
+    Plane or Gitea: whatever the serving does, it does without them."""
+    wire(monkeypatch, tmp_path, calls, superdirector=superdirector)
+    monkeypatch.setattr(zulip_listener, "init_project", project_init.init_project)
+    monkeypatch.setattr(project_init, "PROJECTS_ROOT", tmp_path / "projects")
+    monkeypatch.setattr(
+        project_init, "load_plane_config", lambda: pytest.fail("no Plane call is allowed")
+    )
+    monkeypatch.setattr(
+        project_init, "load_gitea_config", lambda: pytest.fail("no Gitea call is allowed")
+    )
+    monkeypatch.setattr(
+        zulip_listener,
+        "write_mission_workspace",
+        lambda *a: pytest.fail("no Plane read-back is allowed"),
+    )
+    workspace = tmp_path / "projects" / PROJECT
+    workspace.mkdir(parents=True)
+    (workspace / project_init.PATTERN_MARKER).write_text(
+        "pattern-managed; folders are created by the workplan on the developer's request\n",
+        encoding="utf-8",
+    )
+    return workspace
+
+
+def test_a_marked_workspace_is_served_without_any_plane_or_gitea_call(monkeypatch, tmp_path):
+    calls = []
+    workspace = wire_pattern_managed(monkeypatch, tmp_path, calls)
+
+    zulip_listener.handle_topic(Client(calls), CHANNEL, TOPIC)
+
+    # The superdirector still runs, in the marked workspace, and its reply is
+    # relayed — only the scaffold and the Plane mirror are gone.
+    assert [call[0] for call in calls] == [
+        "whoami", "write", "history", "superdirector", "history", "write", "history",
+    ]
+    assert next(call[2] for call in calls if call[0] == "superdirector") == workspace
+    assert calls[5][2] == HANDOFF + "made it"
+    # Nothing was scaffolded into the workspace.
+    assert sorted(p.name for p in workspace.iterdir()) == [project_init.PATTERN_MARKER]
+
+
+def test_a_plan_written_for_a_pattern_managed_project_is_not_sent_to_plane(monkeypatch, tmp_path):
+    calls = []
+    wire_pattern_managed(monkeypatch, tmp_path, calls)
+    wire_response(monkeypatch, tmp_path, calls)
+    monkeypatch.setattr(project_init, "PROJECTS_ROOT", tmp_path / "projects")
+
+    def run(prompt, cwd):
+        calls.append(("superdirector", prompt, cwd))
+        (superdirector_dir(tmp_path) / zulip_listener.PLAN_FILE).write_text(PLAN_TEXT)
+        return "made a plan"
+
+    monkeypatch.setattr(zulip_listener, "run_superdirector", run)
+
+    zulip_listener.handle_topic(Client(calls), CHANNEL, TOPIC)
+
+    assert not [call for call in calls if call[0] in {"upsert", "reconcile", "transition"}]
+    reply = next(call[2] for call in calls if call[0] == "write" and call[1] == TOPIC
+                 and call[2].startswith(HANDOFF))
+    assert "pattern-managed" in reply and zulip_listener.PLAN_FILE in reply

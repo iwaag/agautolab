@@ -256,3 +256,49 @@ def test_commit_all_and_push_leaves_a_clean_workspace_alone(monkeypatch, tmp_pat
 
     assert project_init.commit_all_and_push(gitea, tmp_path, "record notes") is False
     assert [args[0] for args in commands] == ["status"]
+
+
+def test_init_project_leaves_a_pattern_managed_workspace_entirely_alone(monkeypatch, tmp_path):
+    """The listener runs this on every serving, before the agent reads anything."""
+    calls = []
+    wire_init(monkeypatch, tmp_path, calls)
+    monkeypatch.setattr(
+        project_init, "load_plane_config", lambda: pytest.fail("no Plane call is allowed")
+    )
+    monkeypatch.setattr(
+        project_init, "load_gitea_config", lambda: pytest.fail("no Gitea call is allowed")
+    )
+    workspace = tmp_path / "studyarxiv"
+    workspace.mkdir()
+    (workspace / project_init.PATTERN_MARKER).write_text("pattern-managed\n", encoding="utf-8")
+
+    assert project_init.init_project("studyarxiv") == project_init.PATTERN_MANAGED_RESULT
+    assert calls == []
+    assert sorted(p.name for p in workspace.iterdir()) == [project_init.PATTERN_MARKER]
+
+
+def test_init_project_still_scaffolds_a_marked_project_that_lost_its_marker(monkeypatch, tmp_path):
+    """The marker is the whole of the declaration: no marker, old behaviour."""
+    calls = []
+    wire_init(monkeypatch, tmp_path, calls)
+    workspace = tmp_path / "studyarxiv"
+    workspace.mkdir()
+
+    assert project_init.init_project("studyarxiv") == "success"
+    assert [call[0] for call in calls] == [
+        "plane", "repo", "clone", "gitignore", "repo", "clone", "gitignore",
+        "repo", "clone", "gitignore",
+    ]
+
+
+def test_init_project_pattern_marker_wins_over_an_existing_layout(monkeypatch, tmp_path):
+    """A project that grows a marker later stops being touched from then on."""
+    calls = []
+    wire_init(monkeypatch, tmp_path, calls)
+    project_init.init_project("demo-project")
+    assert calls
+
+    calls.clear()
+    (tmp_path / "demo-project" / project_init.PATTERN_MARKER).write_text("x", encoding="utf-8")
+    assert project_init.init_project("demo-project") == project_init.PATTERN_MANAGED_RESULT
+    assert calls == []

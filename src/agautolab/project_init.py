@@ -25,6 +25,12 @@ AUTO_MARKER = "[AUTO]"
 AUTO_DESCRIPTION_PREFIX = f"{AUTO_MARKER} autolab project: "
 IGNORE_LINE = ".local/"
 
+#: A workspace holding this file is pattern-managed: its folders were decided
+#: by the agent from `agent/project_pattern.md` on the developer's request, and
+#: `init_project` is not the thing that creates them.
+PATTERN_MARKER = "README_PROJECT.md"
+PATTERN_MANAGED_RESULT = "pattern-managed, untouched"
+
 GIT_AUTHOR_NAME = "autolab-agent"
 GIT_AUTHOR_EMAIL = "autolab-agent@agautolab.invalid"
 
@@ -386,6 +392,12 @@ def init_project(project: str, *, main_only: bool | None = None) -> str:
     touches `main/` only and leaves `direction/` and the `devlog/` clone as
     they are. `main_only=False` on an existing main-only project is refused
     rather than turning the local record into a clone.
+
+    A workspace holding `README_PROJECT.md` is pattern-managed and is left
+    entirely alone — no Plane project, no Gitea repository, no clone, not
+    even a folder. The listener runs this on *every* serving, before the
+    agent has read the request; without this gate a fresh pattern project
+    would be scaffolded into the fixed layout before anyone asked for one.
     """
     if not PROJECT_NAME.fullmatch(project):
         raise ProjectInitError(
@@ -393,6 +405,8 @@ def init_project(project: str, *, main_only: bool | None = None) -> str:
             "and start with a letter or digit"
         )
     project_root = PROJECTS_ROOT / project
+    if (project_root / PATTERN_MARKER).exists():
+        return PATTERN_MANAGED_RESULT
     on_disk_main_only = is_main_only(project_root)
     if main_only is None:
         main_only = on_disk_main_only
