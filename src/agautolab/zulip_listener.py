@@ -386,8 +386,8 @@ def run_superdirector(prompt: str, cwd: Path) -> str:
 UPDATED_BY_PLANNER = "Updated by planner."
 CANCELLED_BY_PLANNER = "Cancelled by planner."
 CHANGED_AFTER_DONE = (
-    "This task was changed by the planner after it had been completed. The "
-    "topic is left as it is; whether to redo it is the mission's call."
+    "This task was changed by the planner after it had been completed. This "
+    "fresh topic is the approved rework; post here to start it."
 )
 
 
@@ -399,6 +399,17 @@ def work_channel(label: str) -> str:
 def run_topic(serial: int, label: str) -> str:
     """`workrun-task3-pa-12` — one topic per Sub-Work serial."""
     return f"{WORKRUN_TOPIC_PREFIX}task{serial}-{label.lower()}"
+
+
+def rerun_topic(serial: int, label: str) -> str:
+    """A fresh execution surface when a completed Sub-Work is changed.
+
+    The original topic is resolved with the completed attempt's record.  A
+    bare re-use opens a second, unanchored Zulip topic, so a changed completed
+    task must get its own name and fresh selfnotes while retaining its Plane
+    Sub-Work identity.
+    """
+    return f"{WORKRUN_TOPIC_PREFIX}rerun-task{serial}-{label.lower()}"
 
 
 def work_channel_description(slug: str, channel: str, topic: str) -> str:
@@ -480,11 +491,13 @@ def mirror_task_changes(
 ) -> list[str]:
     """Mirror one re-plan onto the mission's `workrun-` topics, one to one.
 
-    Created and updated tasks get their content posted; a cancelled one is
-    told so and resolved; a task the planner changed *after* it was completed
-    gets a note and nothing else — redoing it is the mission conversation's
-    decision, not this handler's. An unchanged task is left silent, so a
-    re-plan that only touched task 3 does not disturb tasks 1 and 2.
+    Created tasks get a topic, updated live tasks get their content posted,
+    and cancelled tasks are told and resolved. A task changed after completion
+    gets a distinct, freshly anchored rerun topic for the same Sub-Work: the
+    re-plan is the mission conversation's explicit decision to make that work
+    available again, while a human post in the new topic still starts it.
+    Unchanged tasks are left silent, so a re-plan that only touched task 3
+    does not disturb tasks 1 and 2.
     """
     lines: list[str] = []
     for change in changes:
@@ -510,10 +523,15 @@ def mirror_task_changes(
             client.resolve_topic(int(message_id), topic)
             lines.append(f"cancelled and resolved {channel}/{topic}")
         elif change.action == "changed-after-done":
-            client.send_to_channel(
-                channel, live_topic_name(client, channel, topic), CHANGED_AFTER_DONE
+            redo = rerun_topic(change.serial, label)
+            anchor_run_topic(client, channel, redo, mission, change.issue_id, self_id)
+            topic_write(
+                redo,
+                f"{CHANGED_AFTER_DONE}\n\n{change.document}",
+                channel=channel,
+                client=client,
             )
-            lines.append(f"noted a post-completion change in {channel}/{topic}")
+            lines.append(f"opened {channel}/{redo}; post there to start the rework")
     return lines
 
 

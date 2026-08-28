@@ -442,9 +442,8 @@ def test_a_replan_mirrors_each_change_onto_its_own_run_topic(monkeypatch, tmp_pa
     ]
 
 
-def test_a_task_changed_after_completion_only_gets_a_note(monkeypatch, tmp_path):
-    """Whether to redo it is the mission conversation's call, not this
-    handler's; the resolved topic is left as it is."""
+def test_a_task_changed_after_completion_gets_a_fresh_anchored_rerun_topic(monkeypatch, tmp_path):
+    """A changed completed task cannot reuse its resolved, already-bound topic."""
     calls = []
     client = Client(calls)
     client.channels_list = [
@@ -464,13 +463,26 @@ def test_a_task_changed_after_completion_only_gets_a_note(monkeypatch, tmp_path)
         client, CHANNEL, TOPIC, PROJECT, workspace, BOT_ID
     )
 
-    # Posted under the resolved name: a resolved topic is a renamed topic, so
-    # the bare name would open a second one beside it.
-    sent = next(call for call in calls if call[0] == "send")
-    assert sent[1:3] == ("work-pd-4", "\u2714 workrun-task1-pd-4")
-    assert sent[3] == zulip_listener.CHANGED_AFTER_DONE
-    assert not any(call[0] == "resolve" for call in calls)
-    assert sections[-1] == "noted a post-completion change in work-pd-4/workrun-task1-pd-4"
+    assert [call for call in calls if call[0] in {"post", "send", "resolve"}] == [
+        (
+            "post",
+            "work-pd-4",
+            "workrun-rerun-task1-pd-4",
+            "[selfnote][rootchat] pj-demo-project/workplan-one",
+        ),
+        ("post", "work-pd-4", "workrun-rerun-task1-pd-4", "[selfnote][work] i5"),
+        (
+            "post",
+            "work-pd-4",
+            "workrun-rerun-task1-pd-4",
+            "This task was changed by the planner after it had been completed. "
+            "This fresh topic is the approved rework; post here to start it.\n\n"
+            "# First\n\na\n",
+        ),
+    ]
+    assert sections[-1] == (
+        "opened work-pd-4/workrun-rerun-task1-pd-4; post there to start the rework"
+    )
 
 
 def test_the_workspace_keeps_its_evidence_after_registration(monkeypatch, tmp_path):
