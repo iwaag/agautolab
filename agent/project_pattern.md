@@ -20,6 +20,26 @@ After adding or changing folders, record in `README_PROJECT.md` what each
 folder is for and where its repository lives, so the next run needs no
 other explanation.
 
+## Repository-backed local tests
+
+A study project may add `localtest-<paper-id>/` for one bounded local
+reproduction attempt. It is a convention, not a third mandatory study folder.
+Create it with `autolab project init-localtest <paper-id>` from the project
+workspace. It uses the ordinary `init-repo` naming path: for example,
+`localtest-2608.23283/` in `studyarxiv` maps to
+`autodev/studyarxiv-localtest-2608.23283`; an old-style ID such as
+`hep-th/9901001` maps to `localtest-hep-th-9901001/` and
+`autodev/studyarxiv-localtest-hep-th-9901001`.
+
+The command creates a committed `.gitignore`, `README.md`, `localtest.yaml`,
+and `report.md`. `localtest.yaml` is the resumable record, with only these
+states: `prepared`, `waiting_external`, `running`, `verified`, `failed`,
+`adoption_pending`, and `complete`. Record commands, upstream revisions,
+expected and actual evidence, cleanup, and any upper-actor handoff in
+`report.md`; keep private host facts, credentials, and large artifacts in the
+ignored `.local/` directory. Add the folder and repository to
+`README_PROJECT.md` when creating it.
+
 ## "study" pattern
 
 - `main/` ... workspace where you store summaries of knowledge.

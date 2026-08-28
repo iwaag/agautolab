@@ -19,6 +19,7 @@ Two things live here, and they are both Tool Giving:
 from __future__ import annotations
 
 import argparse
+import re
 import subprocess
 import sys
 import urllib.parse
@@ -35,6 +36,16 @@ DOCUMENTS = {
 }
 
 MAIN_FOLDER = "main"
+LOCALTEST_PREFIX = "localtest-"
+LOCALTEST_STATES = (
+    "prepared",
+    "waiting_external",
+    "running",
+    "verified",
+    "failed",
+    "adoption_pending",
+    "complete",
+)
 
 
 class CliError(Exception):
@@ -59,6 +70,18 @@ def repository_name(project: str, folder: str) -> str:
     pattern document promises the same shape for any folder a pattern adds.
     """
     return project if folder == MAIN_FOLDER else f"{project}-{folder}"
+
+
+def localtest_folder_name(paper_id: str) -> str:
+    """Return the portable workspace name for one arXiv identifier.
+
+    Modern arXiv IDs retain their dot; old-style IDs contain a slash which is
+    unsafe as a single workspace-folder name, so only that separator changes.
+    """
+    normalized = paper_id.strip().replace("/", "-")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", normalized):
+        raise CliError(f"invalid arXiv paper ID: {paper_id!r}")
+    return f"{LOCALTEST_PREFIX}{normalized}"
 
 
 def remote_url(config: GiteaConfig, repo: str) -> str:
@@ -131,6 +154,59 @@ def init_repo(folder: str, *, project: str | None = None, cwd: Path | None = Non
     return destination, wanted
 
 
+def _localtest_files(paper_id: str) -> dict[str, str]:
+    return {
+        "README.md": (
+            f"# Local test: arXiv {paper_id}\n\n"
+            f"Paper: https://arxiv.org/abs/{paper_id}\n\n"
+            "This repository records a bounded local reproduction attempt. Read "
+            "`localtest.yaml` and `report.md` before resuming it. Add the paper's "
+            "official code repository and revision to `report.md` before running it.\n"
+        ),
+        "localtest.yaml": (
+            "# Resumable state for this one local reproduction attempt.\n"
+            f"paper_id: {paper_id}\n"
+            "state: prepared\n"
+            f"# State values: {', '.join(LOCALTEST_STATES)}.\n"
+        ),
+        "report.md": (
+            "# Local test report\n\n"
+            "## Plan\n\n"
+            "- Paper and claim to test:\n"
+            "- Official code and revision:\n"
+            "- Smallest meaningful command:\n"
+            "- Expected evidence:\n\n"
+            "## Result\n\n"
+            "Record commands, installed/downloaded components, actual evidence, "
+            "cleanup, and any upper-actor handoff here. Keep credentials, host "
+            "facts, and large artifacts under ignored `.local/`.\n"
+        ),
+    }
+
+
+def init_localtest(
+    paper_id: str, *, project: str | None = None, cwd: Path | None = None
+) -> tuple[Path, str, bool]:
+    """Create a standard localtest clone with small, committed resume records."""
+    folder = localtest_folder_name(paper_id)
+    destination, url = init_repo(folder, project=project, cwd=cwd)
+    config = project_init.load_gitea_config()
+    changed = False
+    for name, content in _localtest_files(paper_id).items():
+        path = destination / name
+        if not path.exists():
+            path.write_text(content, encoding="utf-8")
+            changed = True
+    # `init-repo` intentionally makes an empty clone; establish main and make
+    # the private-work boundary explicit before adding the reusable records.
+    changed = project_init.ensure_gitignore(config, destination) or changed
+    if changed:
+        project_init.commit_all_and_push(
+            config, destination, f"Initialize local test for arXiv {paper_id}"
+        )
+    return destination, url, changed
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="autolab",
@@ -146,6 +222,8 @@ def build_parser() -> argparse.ArgumentParser:
             "                                  create autodev/<project>-publish on\n"
             "                                  the local Gitea and clone it into\n"
             "                                  ./publish\n"
+            "  autolab project init-localtest 2401.12345\n"
+            "                                  create a resumable paper-test repository\n"
         ),
     )
     subcommands = parser.add_subparsers(dest="command")
@@ -184,6 +262,17 @@ def build_parser() -> argparse.ArgumentParser:
         dest="project",
         help="project slug; by default the workspace the working directory is in",
     )
+    localtest = project_commands.add_parser(
+        "init-localtest",
+        help="create and initialize a repository-backed paper local test",
+        description=(
+            "Create the standard localtest-<paper-id> repository and initialize "
+            "its portable README, resumable state, report skeleton, and .gitignore. "
+            "Old-style arXiv IDs replace / with - in the folder and repository name."
+        ),
+    )
+    localtest.add_argument("paper_id", nargs="?", help="arXiv ID, for example 2401.12345")
+    localtest.add_argument("--project", help="project slug; defaults to the current workspace")
     return parser
 
 
@@ -204,6 +293,15 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "project":
             if args.project_command is None:
                 parser.parse_args(["project", "--help"])
+                return 0
+            if args.project_command == "init-localtest":
+                if not args.paper_id:
+                    print("autolab project init-localtest: name an arXiv paper ID", file=sys.stderr)
+                    return 2
+                destination, url, changed = init_localtest(args.paper_id, project=args.project)
+                print(f"path: {destination}")
+                print(f"remote: {url}")
+                print(f"initialized: {'yes' if changed else 'already present'}")
                 return 0
             if not args.folder:
                 print(

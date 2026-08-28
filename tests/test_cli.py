@@ -54,6 +54,11 @@ def test_repository_name_follows_project_init_naming():
     assert cli.repository_name("studyarxiv", "publish") == "studyarxiv-publish"
 
 
+def test_localtest_folder_name_preserves_new_ids_and_normalizes_old_style_ids():
+    assert cli.localtest_folder_name("2608.23283") == "localtest-2608.23283"
+    assert cli.localtest_folder_name("hep-th/9901001") == "localtest-hep-th-9901001"
+
+
 def _fixture_workspace(monkeypatch, tmp_path, slug="studyarxiv"):
     projects_root = tmp_path / "projects"
     workspace = projects_root / slug
@@ -97,6 +102,32 @@ def test_init_repo_main_uses_the_bare_project_name(monkeypatch, tmp_path, capsys
     assert code == 0
     assert "remote: http://gitea.example/autodev/studyarxiv.git" in out
     assert (workspace / "main" / ".git").is_dir()
+
+
+def test_init_localtest_uses_standard_repo_naming_and_seeds_resumable_records(
+    monkeypatch, tmp_path
+):
+    workspace = _fixture_workspace(monkeypatch, tmp_path)
+    calls = []
+    monkeypatch.setattr(project_init, "ensure_gitea_repo", lambda config, name: calls.append(name))
+    monkeypatch.setattr(
+        project_init,
+        "ensure_clone",
+        lambda config, repo, dest: (dest / ".git").mkdir(parents=True),
+    )
+    monkeypatch.setattr(project_init, "ensure_gitignore", lambda config, path: calls.append("ignore") or True)
+    monkeypatch.setattr(
+        project_init, "commit_all_and_push", lambda config, path, message: calls.append((path, message)) or True
+    )
+
+    destination, remote, changed = cli.init_localtest("hep-th/9901001")
+
+    assert destination == workspace / "localtest-hep-th-9901001"
+    assert remote == "http://gitea.example/autodev/studyarxiv-localtest-hep-th-9901001.git"
+    assert calls[0] == "studyarxiv-localtest-hep-th-9901001"
+    assert changed is True
+    assert "state: prepared" in (destination / "localtest.yaml").read_text()
+    assert "arXiv hep-th/9901001" in (destination / "README.md").read_text()
 
 
 def test_init_repo_refuses_a_folder_cloned_from_somewhere_else(monkeypatch, tmp_path, capsys):
