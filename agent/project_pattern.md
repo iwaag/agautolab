@@ -57,8 +57,9 @@ Mac, local Ollama, model `<name>`" — never a hostname, path, or port), the
 evidence for the level, and what a later run would have to do to raise it.
 Assign the level honestly: a one-shot smoke command is `L1`, however much
 setup it took. `test.md` must stand on its own when copied out of `main/`,
-so it does not link into `localtest-<paper-id>/`; it names the repository
-instead. The `localtest` column of `main/papers/INDEX.md` carries the level
+so it neither links into `localtest-<paper-id>/` nor names that repository —
+say only that a separate internal repository holds the raw run log. The
+workspace's `README_PROJECT.md` already records which one. The `localtest` column of `main/papers/INDEX.md` carries the level
 (`no`, `L1`…`L4`), or a `localtest.yaml` state such as `waiting_external`
 while a test is in progress. A local test ends by writing or updating
 `test.md` and that column.
@@ -74,14 +75,21 @@ assume the reader has the autolab checkout.
 ## "study" pattern
 
 - `main/` ... workspace where you store summaries of knowledge.
-- `publish/` ... an edited copy of `main/` reports, produced by the
-  `publish` routine as its own mission (never as a self-check inside a
-  papers or localtest run). The routine reviews each report against the
-  publication conditions — no local-environment or secret facts, the
-  paper's version stated, no long or unverifiable quotations — edits it
-  into compliance, copies it here and commits locally. `main/` stays
-  intact: nothing is moved or emptied. Never push `publish/`; the
-  developer reviews and pushes it by hand.
+- `publish/` ... a copy of the `main/` reports that pass the publication
+  review, produced by the `publish` routine as its own mission (never as a
+  self-check inside a papers or localtest run). The routine checks each
+  report against the publication conditions — no local-environment or
+  secret facts, the paper's version stated, no long or unverifiable
+  quotations, no internal-workflow residue — and when one fails, it
+  **fixes the report in `main/` first and then copies it here**, so the two
+  always agree. A published file is never edited on the way out; a
+  difference between `main/` and `publish/` is a defect, not a policy.
+  Nothing is moved out of `main/` — it keeps every report, published or
+  not. Because `main/` is written publish-ready, private material —
+  hostnames, paths, ports, internal repository names, raw run logs —
+  belongs in the `localtest-<paper-id>/` repositories and `.local/`, never
+  in `main/papers/`. Never push `publish/`; the developer reviews and
+  pushes it by hand.
 
 ## "game" pattern
 
