@@ -88,7 +88,12 @@ assume the reader has the autolab checkout.
   not. Because `main/` is written publish-ready, private material —
   hostnames, paths, ports, internal repository names, raw run logs —
   belongs in the `localtest-<paper-id>/` repositories and `.local/`, never
-  in `main/papers/`. Never push `publish/`; the developer reviews and
+  in `main/papers/`. `publish/` is read by strangers: its `README.md`
+  says what the papers are, what each file contains, and what the test
+  levels mean — nothing about `main/`, routines, missions, reviews, or
+  any other internal arrangement, and the same goes for every published
+  file (no "a separate internal repository holds…" asides; just leave
+  such things out). Never push `publish/`; the developer reviews and
   pushes it by hand.
 
 ## "game" pattern
