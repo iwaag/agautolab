@@ -72,6 +72,46 @@ where it documents its `localtest` column, and any repository the reports
 are copied into — `publish/` — restates them in its own `README.md`. Never
 assume the reader has the autolab checkout.
 
+## Repository-backed generation tests
+
+A study project whose subject is media generation may add generation tests
+the same way, and for the same reason: one bounded, resumable folder per
+subject, backed by its own repository on the ordinary `init-repo` naming
+path. `autolab project init-localtest <subject>` reuses that path directly;
+`autolab project init-repo gentest-<subject>` plus a hand-written yaml is the
+alternative when the `paper-id`/`localtest` vocabulary does not fit. Either
+is fine — record which one the project chose in `README_PROJECT.md`, as with
+any other folder.
+
+The resumable yaml records the **subject** (a checkpoint, a LoRA set, or a
+workflow family), the **backend** the images were generated on (in generic
+terms only — never a hostname, port, or path), the **model or workflow**
+under test, and the **state**. `report.md` is the raw run log: the matrix
+spec, per-image parameters and timings, and what was judged against what.
+
+The distilled, publishable result is `main/<subject>/tips.md`. A tip is
+"under these conditions this comes out", and a condition that did nothing is
+a tip too — "that negative prompt changed nothing" saves the next run the
+same experiment. Every tip carries on one line the evidence that produced it
+(matrix cell or seed, plus the settings that mattered) and the date it was
+found. `tips.md` is **append-only**: a later run that contradicts an earlier
+tip adds a newer one rather than rewriting it, so the file reads as a history
+of what was learned and a second run always knows where to append. Keep it
+apart from `summary.md`, which says what the model *is* and what its authors
+and the public recommend — hearsay belongs there, findings belong here.
+
+**There is no level scale for generation tests.** The `L1`–`L4` axis above is
+a claim about how far a paper was reproduced and means nothing for a
+generation sweep. The `tips` column of the project's `INDEX.md` therefore
+says only whether tips exist — `no`, or the date of the most recent tip.
+
+Like `test.md`, `tips.md` must stand on its own when copied out of `main/`:
+it neither links into the generation-test folder nor names that repository,
+and it carries no host facts. Generated files are large and often not
+publishable, so raw outputs stay in the test repository's ignored `.local/`;
+a few small contact sheets may be committed to the test repository, and one
+or two in `main/` when they carry the point.
+
 ## "study" pattern
 
 - `main/` ... workspace where you store summaries of knowledge.
