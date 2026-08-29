@@ -63,6 +63,14 @@ instead. The `localtest` column of `main/papers/INDEX.md` carries the level
 while a test is in progress. A local test ends by writing or updating
 `test.md` and that column.
 
+**The scale travels with the reports.** A bare `L1` means nothing to a
+reader who does not have this file, and it collides with unrelated `L0`/`L1`
+notation some papers use for their own hierarchies. So the four levels are
+restated where the reports are read: `main/papers/INDEX.md` spells them out
+where it documents its `localtest` column, and any repository the reports
+are copied into — `publish/` — restates them in its own `README.md`. Never
+assume the reader has the autolab checkout.
+
 ## "study" pattern
 
 - `main/` ... workspace where you store summaries of knowledge.
