@@ -161,7 +161,10 @@ def _localtest_files(paper_id: str) -> dict[str, str]:
             f"Paper: https://arxiv.org/abs/{paper_id}\n\n"
             "This repository records a bounded local reproduction attempt. Read "
             "`localtest.yaml` and `report.md` before resuming it. Add the paper's "
-            "official code repository and revision to `report.md` before running it.\n"
+            "official code repository and revision to `report.md` before running it. "
+            "When the test reaches a result, write the level reached (L1-L4, see "
+            "Autolab's project patterns) to `main/papers/<paper-id>/test.md` and "
+            "the `localtest` column of `main/papers/INDEX.md`.\n"
         ),
         "localtest.yaml": (
             "# Resumable state for this one local reproduction attempt.\n"

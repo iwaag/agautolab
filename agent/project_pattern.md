@@ -40,12 +40,40 @@ expected and actual evidence, cleanup, and any upper-actor handoff in
 ignored `.local/` directory. Add the folder and repository to
 `README_PROJECT.md` when creating it.
 
+`report.md` is the raw run log. The distilled, publishable result of a local
+test lives in `main/papers/<paper-id>/test.md`, beside `summary.md`, and
+states the **level** the test reached:
+
+| level | meaning |
+|---|---|
+| `L1` | the system was built locally and its most basic function was confirmed working |
+| `L2` | a workflow described in the paper was completed end to end |
+| `L3` | a small, minimal *original* verification experiment measured performance (not a paper reproduction) |
+| `L4` | a reproduction of the paper's own experiments, or a performance check beyond them |
+
+A `test.md` names the level reached, the upstream repository and revision
+tested, the environment in generic terms only (for example "Apple-silicon
+Mac, local Ollama, model `<name>`" — never a hostname, path, or port), the
+evidence for the level, and what a later run would have to do to raise it.
+Assign the level honestly: a one-shot smoke command is `L1`, however much
+setup it took. `test.md` must stand on its own when copied out of `main/`,
+so it does not link into `localtest-<paper-id>/`; it names the repository
+instead. The `localtest` column of `main/papers/INDEX.md` carries the level
+(`no`, `L1`…`L4`), or a `localtest.yaml` state such as `waiting_external`
+while a test is in progress. A local test ends by writing or updating
+`test.md` and that column.
+
 ## "study" pattern
 
 - `main/` ... workspace where you store summaries of knowledge.
-- `publish/` ... only reviewed summaries of knowledge, moved here from
-  `main/` on the developer's explicit approval. Never push `publish/`;
-  the developer pushes it by hand after review.
+- `publish/` ... an edited copy of `main/` reports, produced by the
+  `publish` routine as its own mission (never as a self-check inside a
+  papers or localtest run). The routine reviews each report against the
+  publication conditions — no local-environment or secret facts, the
+  paper's version stated, no long or unverifiable quotations — edits it
+  into compliance, copies it here and commits locally. `main/` stays
+  intact: nothing is moved or emptied. Never push `publish/`; the
+  developer reviews and pushes it by hand.
 
 ## "game" pattern
 
