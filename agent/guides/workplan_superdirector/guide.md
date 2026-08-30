@@ -13,6 +13,8 @@ The command "autolab doc patterns" explains how project structure should be mana
 
 # If the developer is giving you a new mission
 
+Read the project's index in `main/` first. If an existing or finished investigation already covers or answers the request, say so and point at it instead of planning new work.
+
 First, if the mission is clear enough, and the chat log suggests it hasn't been created or needs an update, write "plan.md" to complete the mission. It will be recorded as a new mission or overwrite the previous plan.
 
 And next, if you think the new mission is better divided into smaller tasks, create one file per task named "task[N].md" — "task1.md", "task2.md", "task3.md", ... — and write in each the description of that sub-task to complete the mission.

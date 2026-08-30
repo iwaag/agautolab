@@ -129,53 +129,24 @@ publishable, so raw outputs stay in the test repository's ignored `.local/`;
 a few small contact sheets may be committed to the test repository, and one
 or two in `main/` when they carry the point.
 
-## The open-question queue: `main/QUESTIONS.md`
+## One investigation, one repository
 
-Every generation run ends knowing more than it set out to learn, and knowing
-what it still cannot answer. Until now those unknowns died at the bottom of
-one subject's `tips.md` under "Still open", where nothing ever read them
-back. `main/QUESTIONS.md` is the queue that fixes that. It is part of `main/`
-and therefore **publish-ready like the rest of it**: no host facts, no
-credentials, no internal repository names.
-
-One entry per open question, each carrying:
-
-- **subject** — the `main/<subject>/` it belongs to, or `-` when the question
-  is what the next subject should be;
-- **the question**, stated so a run that has never read this file can act on
-  it;
-- **why it matters** — what a decision or an asset would gain from the
-  answer;
-- **what evidence would close it** — the matrix, the comparison, or the
-  observation that would settle it, not a vague "investigate";
-- **raised** — the date it was raised;
-- **status** — `open`, or `blocked` naming the human action it waits on (see
-  the handoff paragraph in "Repository-backed local tests"; a run that needs
-  a host-level install raises its question here as `blocked` rather than
-  leaving the request only in a test repository, because this file is the
-  only thing a later fire is guaranteed to read).
-
-A run **closes** an entry by appending to the subject's `tips.md` the tip
-that answers it and marking the entry closed with the date and a pointer to
-that tip; it **raises** the new questions its own work created. Closed
-entries stay in the file — the queue is a history of what was asked, the same
-way `tips.md` is a history of what was learned.
-
-Each `tips.md` keeps its own "Still open" section: that is the local
-narrative, written for someone reading that one subject end to end.
-`QUESTIONS.md` is the **cross-subject queue a routine reads first**, before
-it decides what this fire is about. The two are allowed to overlap and the
-queue is the one that gets consumed.
-
-A fire that finds only `blocked` entries **says so and stops**. It does not
-invent a question to have something to do; an empty actionable queue is a
-real answer and reporting it is the whole of that fire's work.
+A study project holds one test repository per investigation and nothing
+that spans them. What a run still could not answer stays in that subject's
+report — the "Still open" list of its `tips.md` or `test.md` — and nowhere
+else: `main/` is knowledge, not a work queue, and its HEAD is meant to equal
+`publish/`. Whether a request is already answered is decided by reading
+`main/`: the index must list every investigation, so a planner that reads it
+first can say "already covered, see …" instead of planning the same work
+again.
 
 ## "study" pattern
 
-- `main/` ... workspace where you store summaries of knowledge.
-- `main/QUESTIONS.md` ... the project's open-question queue (see above).
-  A study routine reads it before it decides what a fire is about.
+- `main/` ... workspace where you store summaries of knowledge. Its
+  `README.md` says what the repository is and what the index is for; the
+  index (`main/<kind>/INDEX.md`, e.g. `papers/`, `subjects/`) has one row
+  per investigated item and nothing else — an inventory of what a backend
+  or a feed holds is not knowledge.
 - `publish/` ... a copy of the `main/` reports that pass the publication
   review, produced by the `publish` routine as its own mission (never as a
   self-check inside a papers or localtest run). The routine checks each
