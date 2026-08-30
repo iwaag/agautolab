@@ -83,6 +83,23 @@ alternative when the `paper-id`/`localtest` vocabulary does not fit. Either
 is fine — record which one the project chose in `README_PROJECT.md`, as with
 any other folder.
 
+**A subject is not only a checkpoint or a LoRA set.** A *workflow family* —
+"sprite-sheet animation from a video model", "skeletal rigging on
+AI-generated parts", "instruction-guided keyframe editing" — is a subject of
+exactly the same shape: it gets `main/<subject>/summary.md` and
+`main/<subject>/tips.md` like any other, its own `gentest-<subject>/`
+repository by the same route, and its own row in the project's `INDEX.md`
+(under the index's workflow-family heading rather than its checkpoint one).
+The distinction matters only for what a tip is *about*: for a checkpoint a
+tip says "under these settings this model produces that"; for a workflow
+family it says "wiring these steps together in this order produces that, and
+this step is where it breaks". Nothing else changes — same append-only
+`tips.md`, same evidence line, same absence of a level scale. Do not fold a
+workflow subject into an existing checkpoint's `gentest-` repository: that
+repository's yaml records one subject and one state, and a finished
+(`verified`) checkpoint test is not the place to start an unfinished
+workflow one.
+
 The resumable yaml records the **subject** (a checkpoint, a LoRA set, or a
 workflow family), the **backend** the images were generated on (in generic
 terms only — never a hostname, port, or path), the **model or workflow**
@@ -112,9 +129,53 @@ publishable, so raw outputs stay in the test repository's ignored `.local/`;
 a few small contact sheets may be committed to the test repository, and one
 or two in `main/` when they carry the point.
 
+## The open-question queue: `main/QUESTIONS.md`
+
+Every generation run ends knowing more than it set out to learn, and knowing
+what it still cannot answer. Until now those unknowns died at the bottom of
+one subject's `tips.md` under "Still open", where nothing ever read them
+back. `main/QUESTIONS.md` is the queue that fixes that. It is part of `main/`
+and therefore **publish-ready like the rest of it**: no host facts, no
+credentials, no internal repository names.
+
+One entry per open question, each carrying:
+
+- **subject** — the `main/<subject>/` it belongs to, or `-` when the question
+  is what the next subject should be;
+- **the question**, stated so a run that has never read this file can act on
+  it;
+- **why it matters** — what a decision or an asset would gain from the
+  answer;
+- **what evidence would close it** — the matrix, the comparison, or the
+  observation that would settle it, not a vague "investigate";
+- **raised** — the date it was raised;
+- **status** — `open`, or `blocked` naming the human action it waits on (see
+  the handoff paragraph in "Repository-backed local tests"; a run that needs
+  a host-level install raises its question here as `blocked` rather than
+  leaving the request only in a test repository, because this file is the
+  only thing a later fire is guaranteed to read).
+
+A run **closes** an entry by appending to the subject's `tips.md` the tip
+that answers it and marking the entry closed with the date and a pointer to
+that tip; it **raises** the new questions its own work created. Closed
+entries stay in the file — the queue is a history of what was asked, the same
+way `tips.md` is a history of what was learned.
+
+Each `tips.md` keeps its own "Still open" section: that is the local
+narrative, written for someone reading that one subject end to end.
+`QUESTIONS.md` is the **cross-subject queue a routine reads first**, before
+it decides what this fire is about. The two are allowed to overlap and the
+queue is the one that gets consumed.
+
+A fire that finds only `blocked` entries **says so and stops**. It does not
+invent a question to have something to do; an empty actionable queue is a
+real answer and reporting it is the whole of that fire's work.
+
 ## "study" pattern
 
 - `main/` ... workspace where you store summaries of knowledge.
+- `main/QUESTIONS.md` ... the project's open-question queue (see above).
+  A study routine reads it before it decides what a fire is about.
 - `publish/` ... a copy of the `main/` reports that pass the publication
   review, produced by the `publish` routine as its own mission (never as a
   self-check inside a papers or localtest run). The routine checks each
