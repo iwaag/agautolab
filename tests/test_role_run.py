@@ -13,7 +13,7 @@ from agag.agent_config import ResolvedAgent, load_config, resolve_role
 from agag.harness import HarnessResult
 
 from agautolab import role_run
-from agautolab.instance import PROVISIONER_ENV
+from agautolab.instance import COMFYNOTIFY_BIN, PROVISIONER_ENV
 
 
 def resolved(role: str, harness: str = "agcode", allowed: str = "Read") -> ResolvedAgent:
@@ -117,6 +117,7 @@ def test_every_role_carries_its_grant_in_agents_toml():
 
 
 def test_every_role_is_given_the_provisioner_credential_path_not_its_value():
-    assert role_run.SPEC.extra_environment({}) == {
-        "AGAG_ZULIP_ADMIN_ENV": str(PROVISIONER_ENV)
-    }
+    environment = role_run.SPEC.extra_environment({})
+    assert environment["AGAG_ZULIP_ADMIN_ENV"] == str(PROVISIONER_ENV)
+    if COMFYNOTIFY_BIN.is_dir():
+        assert environment["PATH"].split(":")[0] == str(COMFYNOTIFY_BIN)

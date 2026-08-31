@@ -17,6 +17,7 @@ to. Its own channel is swept whole and is the entrance.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from agag.agent import AgentSpec
@@ -29,11 +30,17 @@ WORKRUN_TOPIC_PREFIX = "workrun-"
 BMINING_TOPIC_PREFIX = "bmining-"
 PROJECT_CHANNEL_PREFIX = "pj-"
 PROVISIONER_ENV = AGAUTOLAB_ROOT.parent / ".local" / "zulip" / "provisioner.env"
+COMFYNOTIFY_BIN = AGAUTOLAB_ROOT.parent / "comfynotify" / ".venv" / "bin"
 
 
 def extra_environment(_environment) -> dict[str, str]:
     """Paths to local capabilities offered to every role run."""
-    return {"AGAG_ZULIP_ADMIN_ENV": str(PROVISIONER_ENV)}
+    environment = {"AGAG_ZULIP_ADMIN_ENV": str(PROVISIONER_ENV)}
+    if COMFYNOTIFY_BIN.is_dir():
+        environment["PATH"] = os.pathsep.join([
+            str(COMFYNOTIFY_BIN), _environment.get("PATH", os.environ.get("PATH", "")),
+        ])
+    return environment
 
 SPEC = AgentSpec(
     FALLBACK_NAME, AGAUTOLAB_ROOT,
@@ -45,7 +52,7 @@ SPEC = AgentSpec(
 
 __all__ = [
     "AGAUTOLAB_ROOT", "BMINING_TOPIC_PREFIX", "FALLBACK_NAME", "PROJECT_CHANNEL_PREFIX",
-    "PROVISIONER_ENV", "SPEC", "WORKPLAN_TOPIC_PREFIX", "WORKRUN_TOPIC_PREFIX",
+    "COMFYNOTIFY_BIN", "PROVISIONER_ENV", "SPEC", "WORKPLAN_TOPIC_PREFIX", "WORKRUN_TOPIC_PREFIX",
     "extra_environment", "instance_name",
 ]
 
