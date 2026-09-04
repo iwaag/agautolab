@@ -19,7 +19,10 @@ What is autolab's own:
   the classifier is bypassed; the grant in `agents.toml` stays as the
   statement of what a role is expected to reach for. gemini_cli gets the
   same bypass (`--approval-mode yolo`); its read-only roles get `plan`
-  instead, the way agcode's get `--tools read-only`.
+  instead, the way agcode's get `--tools read-only`. agy has no read-only
+  door — headless mode auto-denies reads too, and its `plan` mode writes a
+  plan file instead of answering — so every role, `summarizer` included,
+  runs on the bypass; the grant stays as documentation.
 """
 
 from __future__ import annotations
@@ -128,7 +131,7 @@ def run_role(role: str, prompt: str, *, cwd: Path, timeout: float,
         stream=stream,
         # A read-only gemini role must keep its `plan`: the bypass would turn
         # it into `yolo`.
-        skip_permissions=agent.harness == "claude_code"
+        skip_permissions=agent.harness in ("claude_code", "agy")
         or (agent.harness == "gemini_cli" and role not in READONLY_ROLES),
         extra_args=harness_args(agent.harness, role, timeout),
         on_event=on_event,

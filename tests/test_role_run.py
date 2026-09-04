@@ -112,6 +112,26 @@ def test_the_gemini_profile_is_declared_and_resolves(monkeypatch):
     assert (agent.harness, agent.provider, agent.native_model) == ("gemini_cli", "google", "gemini-2.5-flash")
 
 
+def test_agy_roles_all_run_on_the_bypass_including_the_readonly_one(monkeypatch, tmp_path):
+    """agy has no read-only door: headless mode auto-denies reads as well as
+    commands, and `--mode plan` writes a plan instead of answering. So the
+    summarizer gets the bypass, not a mode, and no harness args."""
+    for role in ("coding", "summarizer"):
+        calls = harness_calls(monkeypatch, role, "agy")
+        role_run.run_role(role, "work", cwd=tmp_path, timeout=5)
+        _, kwargs = calls[0]
+        assert kwargs["skip_permissions"] is True, role
+        assert kwargs["extra_args"] is None, role
+
+
+def test_the_agy_profiles_are_declared_and_resolve(monkeypatch):
+    config, overlay = load_config(role_run.SPEC.agents_config, Path("/nonexistent"))
+    agent = resolve_role(config, overlay, "coding", profile_override="agy", check_available=False)
+    assert (agent.harness, agent.provider, agent.native_model) == ("agy", "antigravity", "gemini-3.8-flash-medium")
+    agent = resolve_role(config, overlay, "coding", profile_override="agy-claude", check_available=False)
+    assert (agent.harness, agent.provider, agent.native_model) == ("agy", "antigravity", "claude-sonnet-4-6")
+
+
 def test_the_project_profile_wins_and_the_project_is_recorded(monkeypatch, tmp_path):
     seen = []
     monkeypatch.setattr(role_run, "load_project_roles", lambda project: {"coding": "local"})
