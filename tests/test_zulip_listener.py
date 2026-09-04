@@ -78,6 +78,27 @@ class Client:
         self.calls.append(("create-channel", name, description, principals, folder_id))
         return {"subscribed": {}}
 
+    # --- the channel-folder surface, seen through the admin credential -----
+
+    #: Folders the realm has, by name. Minting appends here.
+    folders: dict[str, int] = {}
+
+    def channel_folder_by_name(self, name):
+        self.calls.append(("folder-lookup", name))
+        return {"id": self.folders[name], "name": name} if name in self.folders else None
+
+    def create_channel_folder(self, name, description=""):
+        self.calls.append(("folder-create", name, description))
+        self.folders[name] = 100 + len(self.folders)
+        return self.folders[name]
+
+    def set_channel_folder(self, stream_id, folder_id):
+        self.calls.append(("folder-set", stream_id, folder_id))
+        for row in self.channels_list:
+            if row["stream_id"] == stream_id:
+                row["folder_id"] = folder_id
+        return {}
+
     def send_to_channel(self, channel, topic, content):
         self.calls.append(("send", channel, topic, content))
         return 42
@@ -117,6 +138,9 @@ def wire(monkeypatch, tmp_path, calls, *, plane_files=False, superdirector="plan
     monkeypatch.setattr(
         zulip_listener, "init_project", lambda project: calls.append(("init", project)) or "success"
     )
+    # The node is not equipped with the provisioner credential unless a test
+    # hands one over; the serving then skips filing and goes on.
+    monkeypatch.setattr(zulip_listener, "admin_client", lambda: None)
     monkeypatch.setattr(
         zulip_listener,
         "write_mission_workspace",
@@ -229,6 +253,72 @@ def test_handle_topic_acks_then_runs_the_steps_in_order(monkeypatch, tmp_path):
     assert str(workspace) in calls[5][1]
     assert "currently registered mission" not in calls[5][1]
     assert calls[7][1:3] == (TOPIC, HANDOFF + "planner says hi")
+
+
+def test_serving_files_the_project_channel_in_its_own_folder(monkeypatch, tmp_path):
+    """The folder is minted from the channel's name and the channel moved
+    into it, right after `init_project` and before anything that could open
+    a `work-` channel — those inherit the parent's folder."""
+    calls = []
+    client = Client(calls)
+    wire(monkeypatch, tmp_path, calls)
+    admin = Client([])
+    admin.channels_list = [{"name": CHANNEL, "stream_id": 7, "folder_id": None}]
+    admin.folders = {}
+    monkeypatch.setattr(zulip_listener, "admin_client", lambda: admin)
+
+    zulip_listener.handle_topic(client, CHANNEL, TOPIC)
+
+    assert admin.calls == [
+        ("channels",),
+        ("folder-lookup", CHANNEL),
+        ("folder-create", CHANNEL, f"{PROJECT} project channel and its work channels"),
+        ("folder-set", 7, 100),
+    ]
+    # Filing sits between project setup and the Plane read-back.
+    names = [call[0] for call in calls]
+    assert names.index("init") < names.index("plane")
+
+
+def test_ensure_project_folder_is_idempotent_and_re_files_a_misfiled_channel():
+    admin = Client([])
+    admin.folders = {"pj-other": 1, "pj-demo-project": 2}
+    # Filed into another project's folder by hand: the drift this exists for.
+    admin.channels_list = [{"name": "pj-demo-project", "stream_id": 7, "folder_id": 1}]
+
+    assert zulip_listener.ensure_project_folder(admin, PROJECT) == 2
+    assert ("folder-set", 7, 2) in admin.calls
+    assert not any(call[0] == "folder-create" for call in admin.calls)
+
+    admin.calls.clear()
+    assert zulip_listener.ensure_project_folder(admin, PROJECT) == 2
+    assert not any(call[0] in {"folder-set", "folder-create"} for call in admin.calls)
+
+
+def test_ensure_project_folder_leaves_an_invisible_channel_alone():
+    admin = Client([])
+    admin.channels_list = []
+    admin.folders = {}
+    assert zulip_listener.ensure_project_folder(admin, PROJECT) is None
+    assert admin.calls == [("channels",)]
+
+
+def test_work_channel_inherits_the_folder_the_serving_just_filed(monkeypatch, tmp_path):
+    """The two halves together: after filing, `ensure_work_channel` reads the
+    parent's folder back and passes it on."""
+    admin = Client([])
+    shared = [{"name": "pj-demo-project", "stream_id": 7, "folder_id": None}]
+    admin.channels_list = shared
+    admin.folders = {}
+    zulip_listener.ensure_project_folder(admin, PROJECT)
+
+    calls = []
+    bot = Client(calls)
+    bot.channels_list = shared
+    zulip_listener.ensure_work_channel(bot, PROJECT, "pj-demo-project", "workplan-x", "PD-4")
+    create = next(call for call in calls if call[0] == "create-channel")
+    assert create[1] == "work-pd-4"
+    assert create[4] == 100
 
 
 def test_each_serving_cuts_a_new_generation(monkeypatch, tmp_path):

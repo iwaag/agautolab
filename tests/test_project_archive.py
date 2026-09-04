@@ -12,10 +12,12 @@ GITEA = project_archive.GiteaConfig("http://gitea", "token", "autodev")
 class FakeClient:
     """A ZulipClient stand-in with one archivable channel."""
 
-    def __init__(self, channels, error=None):
+    def __init__(self, channels, error=None, folders=()):
         self._channels = channels
         self._error = error
+        self._folders = list(folders)
         self.archived = []
+        self.archived_folders = []
 
     def channels(self):
         return self._channels
@@ -24,6 +26,15 @@ class FakeClient:
         if self._error is not None:
             raise self._error
         self.archived.append(stream_id)
+        return {"result": "success"}
+
+    def channel_folder_by_name(self, name):
+        return next((f for f in self._folders if f["name"] == name), None)
+
+    def archive_channel_folder(self, folder_id):
+        if self._error is not None:
+            raise self._error
+        self.archived_folders.append(folder_id)
         return {"result": "success"}
 
 
@@ -89,6 +100,32 @@ def test_archive_zulip_channel_raises_when_the_bot_may_not_administer_it():
         project_archive.archive_zulip_channel(client, "spike")
 
 
+def test_archive_zulip_folder_retires_an_emptied_folder():
+    folders = [{"id": 4, "name": "pj-spike"}]
+    # The project channel is already archived and gone from the listing;
+    # only unrelated channels remain.
+    client = FakeClient([{"name": "general", "stream_id": 3, "folder_id": None}], folders=folders)
+    assert project_archive.archive_zulip_folder(client, "spike") == ARCHIVED
+    assert client.archived_folders == [4]
+    assert project_archive.archive_zulip_folder(FakeClient([]), "spike") == ABSENT
+
+
+def test_archive_zulip_folder_keeps_a_folder_that_still_holds_a_work_channel():
+    folders = [{"id": 4, "name": "pj-spike"}]
+    client = FakeClient([{"name": "work-sp-1", "stream_id": 12, "folder_id": 4}], folders=folders)
+    assert project_archive.archive_zulip_folder(client, "spike") == project_archive.KEPT
+    assert client.archived_folders == []
+
+
+def test_archive_zulip_folder_raises_when_the_bot_may_not_archive_it():
+    client = FakeClient(
+        [], folders=[{"id": 4, "name": "pj-spike"}],
+        error=project_archive.ZulipError("PATCH channel_folders/4 -> HTTP 400: Must be an organization administrator"),
+    )
+    with pytest.raises(project_archive.ProjectArchiveError, match="pj-spike"):
+        project_archive.archive_zulip_folder(client, "spike")
+
+
 def test_archive_workspace_moves_the_clone_set_aside(tmp_path):
     root, archive = tmp_path / "projects", tmp_path / "projects-archived"
     (root / "spike" / "main").mkdir(parents=True)
@@ -135,6 +172,11 @@ def test_archive_project_covers_all_four_surfaces(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(
         project_archive,
+        "archive_zulip_folder",
+        lambda client, name: calls.append(("zulip-folder", name)) or ARCHIVED,
+    )
+    monkeypatch.setattr(
+        project_archive,
         "archive_workspace",
         lambda name: calls.append(("workspace", name)) or ARCHIVED,
     )
@@ -149,6 +191,7 @@ def test_archive_project_covers_all_four_surfaces(monkeypatch, tmp_path):
             "demo-project-devlog": ARCHIVED,
         },
         "zulip": ARCHIVED,
+        "zulip_folder": ARCHIVED,
         "workspace": ARCHIVED,
     }
     assert calls == [
@@ -157,6 +200,7 @@ def test_archive_project_covers_all_four_surfaces(monkeypatch, tmp_path):
         ("repo", "demo-project-direction"),
         ("repo", "demo-project-devlog"),
         ("zulip", "demo-project"),
+        ("zulip-folder", "demo-project"),
         ("workspace", "demo-project"),
     ]
 

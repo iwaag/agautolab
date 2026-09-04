@@ -53,18 +53,21 @@ REPO_SUFFIXES = ("", "-direction", "-devlog")
 ARCHIVED = "archived"
 ALREADY = "already-archived"
 ABSENT = "absent"
+KEPT = "kept"
 
 __all__ = [
     "ABSENT",
     "ALREADY",
     "ARCHIVED",
     "ARCHIVE_ROOT",
+    "KEPT",
     "ProjectArchiveError",
     "archive_gitea_repo",
     "archive_plane_project",
     "archive_project",
     "archive_workspace",
     "archive_zulip_channel",
+    "archive_zulip_folder",
     "main",
     "project_channel",
 ]
@@ -80,6 +83,7 @@ class ArchiveReport:
     plane: str
     gitea: dict[str, str]
     zulip: str
+    zulip_folder: str
     workspace: str
 
     def as_dict(self) -> dict:
@@ -88,6 +92,7 @@ class ArchiveReport:
             "plane": self.plane,
             "gitea": self.gitea,
             "zulip": self.zulip,
+            "zulip_folder": self.zulip_folder,
             "workspace": self.workspace,
         }
 
@@ -175,6 +180,31 @@ def archive_zulip_channel(client: ZulipClient, project: str) -> str:
     return ARCHIVED
 
 
+def archive_zulip_folder(client: ZulipClient, project: str) -> str:
+    """Archive the project's channel folder, `pj-<slug>` like the channel.
+
+    The listener files every project channel in a folder of its own name
+    (`zulip_listener.ensure_project_folder`), so a retired project would
+    otherwise leave an empty folder in every channel picker. Zulip refuses to
+    archive a folder that still holds a live channel, and `work-` channels
+    are retired one Work at a time, so a folder that is not yet empty is
+    reported as `kept` rather than failed — running this again once the
+    last work channel is gone finishes the job.
+    """
+    name = project_channel(project)
+    folder = client.channel_folder_by_name(name)
+    if folder is None:
+        return ABSENT
+    folder_id = int(folder["id"])
+    if any(row.get("folder_id") == folder_id for row in client.channels()):
+        return KEPT
+    try:
+        client.archive_channel_folder(folder_id)
+    except ZulipError as error:
+        raise ProjectArchiveError(f"Zulip folder archive failed for {name}: {error}") from error
+    return ARCHIVED
+
+
 def archive_workspace(project: str, *, root: Path | None = None, archive: Path | None = None) -> str:
     """Move the local clone set aside, keeping it on disk.
 
@@ -212,6 +242,7 @@ def archive_project(project: str, *, zulip_env: Path | None = None) -> dict:
             for suffix in REPO_SUFFIXES
         },
         zulip=archive_zulip_channel(client, project),
+        zulip_folder=archive_zulip_folder(client, project),
         workspace=archive_workspace(project),
     ).as_dict()
 

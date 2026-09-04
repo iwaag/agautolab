@@ -116,6 +116,7 @@ from .instance import (
     AGAUTOLAB_ROOT,
     BMINING_TOPIC_PREFIX,
     PROJECT_CHANNEL_PREFIX,
+    PROVISIONER_ENV,
     SPEC,
     WORKPLAN_TOPIC_PREFIX,
     WORKRUN_TOPIC_PREFIX,
@@ -283,6 +284,9 @@ def serve(context) -> TopicResult:
     context.step = "project setup"
     init_project(project)
 
+    context.step = "channel folder"
+    file_project_channel(project)
+
     context.step = "plane read-back"
     current = workspace / CURRENT_DIR
     current.mkdir(exist_ok=True)
@@ -424,6 +428,57 @@ def work_channel_description(slug: str, channel: str, topic: str) -> str:
 
 def find_channel(client: ZulipClient, name: str) -> dict | None:
     return next((row for row in client.channels() if str(row.get("name")) == name), None)
+
+
+def project_folder_description(slug: str) -> str:
+    return f"{slug} project channel and its work channels"
+
+
+def admin_client() -> ZulipClient | None:
+    """The realm-administrator credential this node was provisioned with.
+
+    A `pj-` channel is opened by a human, and Zulip lets only its creator or
+    an organization administrator administer it — this bot may create and
+    file its own `work-` channels but not move the project channel they
+    inherit from. `agag provision` already hands autolab the provisioner
+    path for the same reason. A node without the file is not equipped, and
+    the serving goes on: filing is housekeeping, not the mission.
+    """
+    return ZulipClient.from_env(PROVISIONER_ENV) if PROVISIONER_ENV.is_file() else None
+
+
+def ensure_project_folder(client: ZulipClient, slug: str) -> int | None:
+    """File `pj-<slug>` in the channel folder of the same name, minting it.
+
+    One folder per project is the standard, and the folder is derived from
+    the channel's name, so nobody has to decide anything — including the
+    human who opened the channel. Idempotent, and run on every serving of a
+    project channel (beside `init_project`), because that is what makes it
+    self-healing: a channel filed wrongly by hand is re-filed on its next
+    post, and every `work-` channel opened after that inherits the right
+    folder. Before this ran on every serving, one mis-filed project channel
+    carried twenty work channels into the wrong folder with it.
+
+    Returns the folder id, or None when the channel is not visible.
+    """
+    name = project_channel(slug)
+    channel = find_channel(client, name)
+    if channel is None or channel.get("stream_id") is None:
+        return None
+    folder = client.channel_folder_by_name(name)
+    folder_id = (
+        int(folder["id"]) if folder
+        else client.create_channel_folder(name, project_folder_description(slug))
+    )
+    current = channel.get("folder_id")
+    if current is None or int(current) != folder_id:
+        client.set_channel_folder(int(channel["stream_id"]), folder_id)
+    return folder_id
+
+
+def file_project_channel(slug: str) -> int | None:
+    admin = admin_client()
+    return ensure_project_folder(admin, slug) if admin is not None else None
 
 
 def ensure_work_channel(
