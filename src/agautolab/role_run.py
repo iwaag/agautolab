@@ -17,7 +17,9 @@ What is autolab's own:
   inside a compound command, despite `Bash(ls:*)`), and a non-interactive
   run turns that denial into a dead end. The roles are workspace-bound, so
   the classifier is bypassed; the grant in `agents.toml` stays as the
-  statement of what a role is expected to reach for.
+  statement of what a role is expected to reach for. gemini_cli gets the
+  same bypass (`--approval-mode yolo`); its read-only roles get `plan`
+  instead, the way agcode's get `--tools read-only`.
 """
 
 from __future__ import annotations
@@ -67,7 +69,8 @@ AGCODE_MAX_TOKENS = 16384
 
 __all__ = [
     "AGCODE_DEADLINE_MARGIN_S", "AGCODE_MAX_TOKENS", "AGCODE_MAX_TURNS", "PROJECT_ROOT",
-    "READONLY_ROLES", "ROLE_WORKSPACES", "SPEC", "ZULIP_ENV", "agcode_args", "run_role",
+    "READONLY_ROLES", "ROLE_WORKSPACES", "SPEC", "ZULIP_ENV", "agcode_args", "gemini_args",
+    "run_role",
 ]
 
 
@@ -80,6 +83,19 @@ def agcode_args(role: str, timeout: float) -> list[str]:
     if role in READONLY_ROLES:
         args += ["--tools", "read-only"]
     return args
+
+
+def gemini_args(role: str) -> list[str]:
+    """`plan` is gemini's read-only door; every other role runs on the bypass."""
+    return ["--approval-mode", "plan"] if role in READONLY_ROLES else []
+
+
+def harness_args(harness: str, role: str, timeout: float) -> list[str] | None:
+    if harness == "agcode":
+        return agcode_args(role, timeout)
+    if harness == "gemini_cli":
+        return gemini_args(role)
+    return None
 
 
 def run_role(role: str, prompt: str, *, cwd: Path, timeout: float,
@@ -110,8 +126,11 @@ def run_role(role: str, prompt: str, *, cwd: Path, timeout: float,
         record=record,
         home=home,
         stream=stream,
-        skip_permissions=agent.harness == "claude_code",
-        extra_args=agcode_args(role, timeout) if agent.harness == "agcode" else None,
+        # A read-only gemini role must keep its `plan`: the bypass would turn
+        # it into `yolo`.
+        skip_permissions=agent.harness == "claude_code"
+        or (agent.harness == "gemini_cli" and role not in READONLY_ROLES),
+        extra_args=harness_args(agent.harness, role, timeout),
         on_event=on_event,
         extra_meta={"project": project},
         agent=agent,

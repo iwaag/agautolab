@@ -96,8 +96,9 @@ its agent configuration:
   A delegating task spends its run waiting on another agent, which is why
   `WORK_TIMEOUT_SECONDS` is 3600 (planning and brain-mining stay at 1200 —
   they wait on nobody).
-- **The agent configuration**: `agents.toml` (the roles, three profiles, the
-  models behind them). **Every role runs on `sonnet` since
+- **The agent configuration**: `agents.toml` (the roles, four profiles —
+  `sonnet`, `local`, `gemini`, `stub` — and the models behind them; a
+  `gemini` run records tokens but no cost, the CLI prints none). **Every role runs on `sonnet` since
   `agent_standardize` p10** — `roles.front` was the last committed `local`
   one, and its `nested_harness` requirement belonged to the in-process
   backend it used rather than to the role. The `local` profile is left

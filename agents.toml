@@ -5,6 +5,8 @@ project = "agautolab"
 
 [models."anthropic/claude-sonnet-5"]
 
+[models."google/gemini-2.5-flash"]
+
 [profiles.local]
 harness = "agcode"
 model = "ollama/qwen3.8:27b-mlx-bf16"
@@ -16,6 +18,15 @@ model = "anthropic/claude-sonnet-5"
 [profiles.stub]
 harness = "fake"
 model = "ollama/qwen3.8:27b-mlx-bf16"
+
+# Google's Gemini CLI, headless. Selectable per project (autolab:
+# `.local/projects/<p>/agents.toml`) or in the instance overlay; the CLI
+# resolves its own key and reports tokens but no cost, so a gemini run's
+# record carries `usage` only. `gemini-2.5-flash` is the model that answered
+# on 2026-09-04 while the default model returned 503 all day.
+[profiles.gemini]
+harness = "gemini_cli"
+model = "google/gemini-2.5-flash"
 
 # The instance entrance, and the gateway window. On `sonnet` since
 # `agent_standardize` p10: the `local` profile cost more than it saved,

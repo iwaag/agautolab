@@ -89,6 +89,29 @@ def test_readonly_role_on_agcode_is_handed_fewer_tools(monkeypatch, tmp_path):
     assert calls[0][1]["extra_args"][-2:] == ["--tools", "read-only"]
 
 
+def test_gemini_roles_run_on_the_bypass_and_readonly_ones_on_plan(monkeypatch, tmp_path):
+    """gemini_cli's permission story is its approval mode: the working roles
+    get the same bypass as claude_code (spelled `yolo` by the harness), and a
+    read-only role keeps `plan` — which the bypass would otherwise override."""
+    calls = harness_calls(monkeypatch, "coding", "gemini_cli")
+    role_run.run_role("coding", "work", cwd=tmp_path, timeout=5)
+    _, kwargs = calls[0]
+    assert kwargs["skip_permissions"] is True
+    assert kwargs["extra_args"] == []
+
+    calls = harness_calls(monkeypatch, "summarizer", "gemini_cli")
+    role_run.run_role("summarizer", "summarize", cwd=tmp_path, timeout=5)
+    _, kwargs = calls[0]
+    assert kwargs["skip_permissions"] is False
+    assert kwargs["extra_args"] == ["--approval-mode", "plan"]
+
+
+def test_the_gemini_profile_is_declared_and_resolves(monkeypatch):
+    config, overlay = load_config(role_run.SPEC.agents_config, Path("/nonexistent"))
+    agent = resolve_role(config, overlay, "coding", profile_override="gemini", check_available=False)
+    assert (agent.harness, agent.provider, agent.native_model) == ("gemini_cli", "google", "gemini-2.5-flash")
+
+
 def test_the_project_profile_wins_and_the_project_is_recorded(monkeypatch, tmp_path):
     seen = []
     monkeypatch.setattr(role_run, "load_project_roles", lambda project: {"coding": "local"})
