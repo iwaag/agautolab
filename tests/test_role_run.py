@@ -132,6 +132,34 @@ def test_the_agy_profiles_are_declared_and_resolve(monkeypatch):
     assert (agent.harness, agent.provider, agent.native_model) == ("agy", "antigravity", "claude-sonnet-4-6")
 
 
+def test_codex_readonly_role_gets_the_read_only_sandbox_and_the_rest_the_bypass(monkeypatch, tmp_path):
+    """codex's sandbox is the whole permission: `summarizer` gets `-s
+    read-only` and no bypass (the bypass would turn it into full access);
+    every other role gets `danger-full-access` through `skip_permissions`,
+    because `workspace-write` can neither commit nor reach Zulip."""
+    calls = harness_calls(monkeypatch, "coding", "codex")
+    role_run.run_role("coding", "work", cwd=tmp_path, timeout=5)
+    _, kwargs = calls[0]
+    assert kwargs["skip_permissions"] is True
+    assert kwargs["extra_args"] == []
+
+    calls = harness_calls(monkeypatch, "summarizer", "codex")
+    role_run.run_role("summarizer", "summarize", cwd=tmp_path, timeout=5)
+    _, kwargs = calls[0]
+    assert kwargs["skip_permissions"] is False
+    assert kwargs["extra_args"] == ["-s", "read-only"]
+
+
+def test_the_codex_profiles_are_declared_and_resolve(monkeypatch):
+    config, overlay = load_config(role_run.SPEC.agents_config, Path("/nonexistent"))
+    agent = resolve_role(config, overlay, "coding", profile_override="codex", check_available=False)
+    assert (agent.harness, agent.provider, agent.native_model) == ("codex", "openai", "gpt-5.6-terra")
+    assert agent.model_options == {"effort": "medium"}
+    agent = resolve_role(config, overlay, "summarizer", profile_override="codex-mini", check_available=False)
+    assert (agent.harness, agent.provider, agent.native_model) == ("codex", "openai", "gpt-5.4-mini")
+    assert agent.model_options == {"effort": "low"}
+
+
 def test_the_project_profile_wins_and_the_project_is_recorded(monkeypatch, tmp_path):
     seen = []
     monkeypatch.setattr(role_run, "load_project_roles", lambda project: {"coding": "local"})

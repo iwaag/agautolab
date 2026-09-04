@@ -22,7 +22,12 @@ What is autolab's own:
   instead, the way agcode's get `--tools read-only`. agy has no read-only
   door — headless mode auto-denies reads too, and its `plan` mode writes a
   plan file instead of answering — so every role, `summarizer` included,
-  runs on the bypass; the grant stays as documentation.
+  runs on the bypass; the grant stays as documentation. codex has a real
+  read-only door: `exec` never prompts, so the sandbox is the whole
+  permission — `READONLY_ROLES` get `-s read-only` (reads and shell
+  commands run, writes fail and the model says so), everyone else
+  `danger-full-access` through `skip_permissions`, because
+  `workspace-write` can neither commit nor reach Zulip.
 """
 
 from __future__ import annotations
@@ -72,8 +77,8 @@ AGCODE_MAX_TOKENS = 16384
 
 __all__ = [
     "AGCODE_DEADLINE_MARGIN_S", "AGCODE_MAX_TOKENS", "AGCODE_MAX_TURNS", "PROJECT_ROOT",
-    "READONLY_ROLES", "ROLE_WORKSPACES", "SPEC", "ZULIP_ENV", "agcode_args", "gemini_args",
-    "run_role",
+    "READONLY_ROLES", "ROLE_WORKSPACES", "SPEC", "ZULIP_ENV", "agcode_args", "codex_args",
+    "gemini_args", "run_role",
 ]
 
 
@@ -93,11 +98,18 @@ def gemini_args(role: str) -> list[str]:
     return ["--approval-mode", "plan"] if role in READONLY_ROLES else []
 
 
+def codex_args(role: str) -> list[str]:
+    """`read-only` is codex's read-only door; every other role runs on the bypass."""
+    return ["-s", "read-only"] if role in READONLY_ROLES else []
+
+
 def harness_args(harness: str, role: str, timeout: float) -> list[str] | None:
     if harness == "agcode":
         return agcode_args(role, timeout)
     if harness == "gemini_cli":
         return gemini_args(role)
+    if harness == "codex":
+        return codex_args(role)
     return None
 
 
@@ -130,9 +142,9 @@ def run_role(role: str, prompt: str, *, cwd: Path, timeout: float,
         home=home,
         stream=stream,
         # A read-only gemini role must keep its `plan`: the bypass would turn
-        # it into `yolo`.
+        # it into `yolo`; a read-only codex role its `-s read-only` likewise.
         skip_permissions=agent.harness in ("claude_code", "agy")
-        or (agent.harness == "gemini_cli" and role not in READONLY_ROLES),
+        or (agent.harness in ("gemini_cli", "codex") and role not in READONLY_ROLES),
         extra_args=harness_args(agent.harness, role, timeout),
         on_event=on_event,
         extra_meta={"project": project},

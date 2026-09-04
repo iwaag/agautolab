@@ -11,6 +11,12 @@ project = "agautolab"
 
 [models."antigravity/claude-sonnet-4-6"]
 
+[models."openai/gpt-5.6-terra"]
+effort = "medium"
+
+[models."openai/gpt-5.4-mini"]
+effort = "low"
+
 [profiles.local]
 harness = "agcode"
 model = "ollama/qwen3.8:27b-mlx-bf16"
@@ -44,6 +50,18 @@ model = "antigravity/gemini-3.8-flash-medium"
 [profiles.agy-claude]
 harness = "agy"
 model = "antigravity/claude-sonnet-4-6"
+
+# OpenAI's Codex CLI (`codex exec`), headless, on the ChatGPT account the CLI
+# is logged into: provider `openai`, the CLI owns its auth, a run reports
+# tokens and no cost. The reasoning effort is the model's declared `effort`
+# above. `codex-mini` is the cheap one, for `summarizer` trials.
+[profiles.codex]
+harness = "codex"
+model = "openai/gpt-5.6-terra"
+
+[profiles.codex-mini]
+harness = "codex"
+model = "openai/gpt-5.4-mini"
 
 # The instance entrance, and the gateway window. On `sonnet` since
 # `agent_standardize` p10: the `local` profile cost more than it saved,
