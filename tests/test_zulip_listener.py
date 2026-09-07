@@ -151,7 +151,7 @@ def wire(monkeypatch, tmp_path, calls, *, plane_files=False, superdirector="plan
     monkeypatch.setattr(
         zulip_listener,
         "run_superdirector",
-        lambda prompt, cwd: calls.append(("superdirector", prompt, cwd)) or superdirector,
+        lambda prompt, cwd, **kwargs: calls.append(("superdirector", prompt, cwd)) or superdirector,
     )
     monkeypatch.setattr(
         topics,
@@ -373,7 +373,7 @@ def test_handle_topic_always_answers_with_how_far_it_got(monkeypatch, tmp_path):
     calls = []
     wire(monkeypatch, tmp_path, calls)
 
-    def explode(prompt, cwd):
+    def explode(prompt, cwd, **kwargs):
         raise zulip_listener.ListenerError("claude_code timed out")
 
     monkeypatch.setattr(zulip_listener, "run_superdirector", explode)
@@ -732,7 +732,7 @@ def test_a_mission_serving_opens_one_run_topic_per_task(monkeypatch, tmp_path):
     monkeypatch.setattr(
         zulip_listener,
         "run_superdirector",
-        lambda prompt, cwd: (
+        lambda prompt, cwd, **kwargs: (
             (superdirector_dir(tmp_path) / "plan.md").write_text(PLAN_TEXT) and "" or "planned"
         ),
     )
@@ -762,7 +762,7 @@ def test_handle_topic_resolves_the_topic_after_the_final_reply(monkeypatch, tmp_
     monkeypatch.setattr(
         zulip_listener,
         "run_superdirector",
-        lambda prompt, cwd: (
+        lambda prompt, cwd, **kwargs: (
             (superdirector_dir(tmp_path) / "cancel.flag").touch() or "cancelling"
         ),
     )
@@ -786,7 +786,7 @@ def test_handle_topic_reports_a_response_handling_failure(monkeypatch, tmp_path)
     monkeypatch.setattr(
         zulip_listener,
         "run_superdirector",
-        lambda prompt, cwd: (
+        lambda prompt, cwd, **kwargs: (
             (superdirector_dir(tmp_path) / "start.flag").touch() or "starting"
         ),
     )
@@ -1390,7 +1390,7 @@ def wire_bmining(monkeypatch, tmp_path, calls, *, reply="director says hi",
     monkeypatch.setattr(
         zulip_listener,
         "run_director",
-        director or (lambda prompt, cwd: calls.append(("director", prompt, cwd)) or reply),
+        director or (lambda prompt, cwd, **kwargs: calls.append(("director", prompt, cwd)) or reply),
     )
     monkeypatch.setattr(zulip_listener, "load_gitea_config", lambda: "gitea-config")
     monkeypatch.setattr(
@@ -1420,7 +1420,7 @@ def test_handle_bmining_places_chatlog_runs_director_and_replies(monkeypatch, tm
     calls, seen = [], {}
     direction, work = bmining_paths(tmp_path)
 
-    def director(prompt, cwd):
+    def director(prompt, cwd, **kwargs):
         seen["chatlog"] = (work / "chatlog.md").read_text()
         calls.append(("director", prompt, cwd))
         return "director says hi"
@@ -1457,7 +1457,7 @@ def test_bmining_replaces_a_leftover_chatlog(monkeypatch, tmp_path):
     work.mkdir(parents=True)
     (work / "chatlog.md").write_text("stale conversation")
 
-    def director(prompt, cwd):
+    def director(prompt, cwd, **kwargs):
         seen["chatlog"] = (work / "chatlog.md").read_text()
         return "reply"
 
@@ -1507,7 +1507,7 @@ def test_a_failed_director_run_still_cleans_up_and_answers(monkeypatch, tmp_path
     calls = []
     _, work = bmining_paths(tmp_path)
 
-    def director(prompt, cwd):
+    def director(prompt, cwd, **kwargs):
         raise zulip_listener.ListenerError("boom")
 
     wire_bmining(monkeypatch, tmp_path, calls, director=director)
@@ -1857,7 +1857,7 @@ def test_a_plan_written_for_a_pattern_managed_project_reaches_plane(monkeypatch,
     wire_response(monkeypatch, tmp_path, calls)
     monkeypatch.setattr(project_init, "PROJECTS_ROOT", tmp_path / "projects")
 
-    def run(prompt, cwd):
+    def run(prompt, cwd, **kwargs):
         calls.append(("superdirector", prompt, cwd))
         (superdirector_dir(tmp_path) / zulip_listener.PLAN_FILE).write_text(PLAN_TEXT)
         return "made a plan"

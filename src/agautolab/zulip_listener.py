@@ -299,6 +299,7 @@ def serve(context) -> TopicResult:
         run_superdirector(
             superdirector_prompt(context.bot_name, workspace, plane_files),
             project_directory(project),
+            conversation=(context.channel, context.topic),
         )
     ]
 
@@ -354,7 +355,19 @@ def project_directory(project: str) -> Path:
     return PROJECTS_ROOT / project
 
 
-def run_superdirector(prompt: str, cwd: Path) -> str:
+def conversation_meta(conversation: tuple[str, str] | None) -> dict | None:
+    """`channel`/`topic` for the run record of a run that happens *outside*
+    its conversation's workspace — autolab's roles run in the project clone,
+    so `agag.topics.workspace_identity` finds nothing in their cwd and the
+    cost gauge would have to guess from mtimes."""
+    if conversation is None:
+        return None
+    channel, topic = conversation
+    return {"channel": channel, "topic": topic}
+
+
+def run_superdirector(prompt: str, cwd: Path,
+                      conversation: tuple[str, str] | None = None) -> str:
     """One mission-planning run in the project folder, with its record.
 
     Planning a mission means weighing the chatlog against the code, the
@@ -369,6 +382,7 @@ def run_superdirector(prompt: str, cwd: Path) -> str:
         cwd=cwd,
         timeout=SUPERDIRECTOR_TIMEOUT_SECONDS,
         record=record,
+        extra_meta=conversation_meta(conversation),
     )
     if exit_code != 0:
         raise ListenerError(f"superdirector run exited {exit_code}: {output.strip()[:500]}")
@@ -744,6 +758,10 @@ def workrun_supercoder(prompt: str, cwd: Path,
         record=record,
         home=home,
         on_event=on_event,
+        # `home` is the task's conversation, which is also where this run
+        # is filed for the cost gauge; the project clone it runs in says
+        # nothing about that (`gauge_panel` step 4).
+        extra_meta=conversation_meta(home),
     )
     if exit_code != 0:
         raise ListenerError(f"supercoder run exited {exit_code}: {output.strip()[:500]}")
@@ -1110,7 +1128,8 @@ def bmining_prompt(bot_name: str) -> str:
     )
 
 
-def run_director(prompt: str, cwd: Path) -> str:
+def run_director(prompt: str, cwd: Path,
+                 conversation: tuple[str, str] | None = None) -> str:
     """One discussion run in the direction clone, with its record."""
     record = next_record_path(RECORDS_ROOT / "director")
     output, _, exit_code = run_role(
@@ -1119,6 +1138,7 @@ def run_director(prompt: str, cwd: Path) -> str:
         cwd=cwd,
         timeout=DIRECTOR_TIMEOUT_SECONDS,
         record=record,
+        extra_meta=conversation_meta(conversation),
     )
     if exit_code != 0:
         raise ListenerError(f"director run exited {exit_code}: {output.strip()[:500]}")
@@ -1158,7 +1178,8 @@ def serve_bmining(context) -> TopicResult:
         )
 
         context.step = "director"
-        sections = [run_director(bmining_prompt(context.bot_name), direction_dir)]
+        sections = [run_director(bmining_prompt(context.bot_name), direction_dir,
+                                 conversation=(context.channel, context.topic))]
 
         context.step = "recording"
         if commit_all_and_push(
