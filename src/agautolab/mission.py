@@ -684,5 +684,10 @@ def reconcile_task_files(
         )
 
     if not lines:
-        lines.append("the superdirector wrote no task files; the mission has no sub-work")
+        lines.append(
+            "the superdirector wrote no task files, so the mission has no "
+            "sub-work and nothing can run: a mission runs only through its "
+            "`task[N].md` files, and a single-task mission still needs "
+            "`task1.md`. Re-plan with the task file(s) written."
+        )
     return lines, changes

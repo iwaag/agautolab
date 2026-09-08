@@ -240,7 +240,10 @@ def test_reconcile_registers_a_first_split_keyed_by_serial(plane, tmp_path):
 def test_reconcile_reports_an_empty_split(plane, tmp_path):
     plane.add(name="Work", external_id=WORK_KEY)
     lines, changes = mission.reconcile_task_files("demo", CHANNEL, TOPIC, tmp_path)
-    assert lines == ["the superdirector wrote no task files; the mission has no sub-work"]
+    assert len(lines) == 1 and lines[0].startswith(
+        "the superdirector wrote no task files, so the mission has no sub-work"
+    )
+    assert "task1.md" in lines[0]
     assert changes == []
 
 
