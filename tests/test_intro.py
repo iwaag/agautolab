@@ -9,6 +9,9 @@ def test_the_intro_is_posted_for_this_instance(monkeypatch):
     sent = []
 
     class Client:
+        def whoami(self):
+            return {"user_id": 11, "full_name": "autolab-test"}
+
         def send_to_channel(self, channel, topic, text):
             sent.append((channel, topic, text))
 
