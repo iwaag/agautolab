@@ -54,6 +54,7 @@ from agag.plane import (
     starting_state_id,
     state_groups,
     state_id_for_group,
+    sub_works,
     update_issue,
 )
 
@@ -250,20 +251,10 @@ def ensure_label(config: PlaneConfig, project_id: str, name: str = AUTO_LABEL) -
 # --- sub-works -------------------------------------------------------------
 
 
-def sub_works(issues: list[dict], parent_id: str, groups: dict[str, str]) -> list[dict]:
-    """Non-cancelled children of one issue, in sequence order.
-
-    Plane CE v1.4.1 ignores a `?parent=` filter and 404s the `sub-issues`
-    endpoint, so children are filtered out of the full list client-side.
-    """
-    children = [
-        row
-        for row in issues
-        if str(row.get("parent") or "") == parent_id
-        and groups.get(str(row.get("state") or "")) != "cancelled"
-    ]
-    children.sort(key=lambda row: (row.get("sequence_id") or 0, str(row.get("id"))))
-    return children
+# `sub_works` is `agag.plane`'s since `front_desk` p3: the Front Desk's
+# completion button needs the same parent/child rule for one named Work and
+# has no business importing this agent's whole-board CLI to get it. It is
+# still re-exported here, so every caller and every import is unchanged.
 
 
 def write_mission_workspace(directory: Path, project: str, channel: str, topic: str) -> bool:

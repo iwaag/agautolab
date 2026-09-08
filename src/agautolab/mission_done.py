@@ -28,6 +28,8 @@ import argparse
 import sys
 from dataclasses import dataclass
 
+from agag.plane import ALREADY_COMPLETED as ALREADY_DONE, reason_not_completed
+
 from .mission import (
     EXTERNAL_SOURCE,
     MissionError,
@@ -42,10 +44,10 @@ from .mission import (
     update_issue,
 )
 
-#: The refusal that means "you asked for a state it is already in". Like
-#: `agentchat resolve` on a resolved topic, that is an answer, not a failure,
-#: so it is reported and exits 0.
-ALREADY_DONE = "already Done"
+#: `ALREADY_DONE` and the rule itself are `agag.plane`'s since `front_desk`
+#: p3 (`ALREADY_COMPLETED`, `reason_not_completed`), so the Front Desk's
+#: completion button decides eligibility exactly as this command does. Both
+#: names stay here: this module's callers and tests know them.
 
 __all__ = [
     "ALREADY_DONE",
@@ -70,23 +72,9 @@ class Candidate:
 def reason_not_finished(issue: dict, children: list[dict], groups: dict[str, str]) -> str | None:
     """Why this Work may not be marked Done, or None when it may.
 
-    A Work with no live children is not a mission — it is a task, or a Work
-    nobody has planned yet — and closing one would be inventing a decision.
+    `agag.plane.reason_not_completed` under this module's own name.
     """
-    own = groups.get(str(issue.get("state") or ""))
-    if own == "completed":
-        return ALREADY_DONE
-    if own == "cancelled":
-        return "cancelled"
-    if not children:
-        return "no sub-work: this is not a mission"
-    open_children = [
-        child for child in children
-        if groups.get(str(child.get("state") or "")) != "completed"
-    ]
-    if open_children:
-        return f"{len(open_children)} of {len(children)} sub-works are not completed"
-    return None
+    return reason_not_completed(issue, children, groups)
 
 
 def finished_missions(issues: list[dict], groups: dict[str, str]) -> list[dict]:
