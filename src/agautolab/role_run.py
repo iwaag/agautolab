@@ -34,6 +34,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
+from typing import Mapping
 
 from agag.agent import resolve_spec_role, run_role as skeleton_run_role
 
@@ -119,11 +120,15 @@ def run_role(role: str, prompt: str, *, cwd: Path, timeout: float,
              project: str | None = None,
              home: tuple[str, str] | None = None,
              stream: bool = False,
-             on_event: Callable[[dict], None] | None = None) -> tuple[str, dict, int]:
+             on_event: Callable[[dict], None] | None = None,
+             extra_meta: Mapping[str, object] | None = None) -> tuple[str, dict, int]:
     """Resolve `role` (project profile first), run it once, return output, record, exit code.
 
     `on_event` is run_harness's live-progress seam: when set, the harness
-    streams its conversation events to it as the run proceeds.
+    streams its conversation events to it as the run proceeds. `extra_meta`
+    is stamped into the run record beside the project (61510bd passes the
+    conversation; until `front_desk` p1 this wrapper did not accept it and
+    every listener-started run failed before the harness).
     """
     project = project or (project_name_from_direction(cwd) if role == "director" else None)
     profile = profile or load_project_roles(project).get(role)
@@ -147,6 +152,6 @@ def run_role(role: str, prompt: str, *, cwd: Path, timeout: float,
         or (agent.harness in ("gemini_cli", "codex") and role not in READONLY_ROLES),
         extra_args=harness_args(agent.harness, role, timeout),
         on_event=on_event,
-        extra_meta={"project": project},
+        extra_meta={"project": project, **dict(extra_meta or {})},
         agent=agent,
     )

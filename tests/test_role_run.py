@@ -192,3 +192,18 @@ def test_every_role_is_given_the_provisioner_credential_path_not_its_value():
     assert environment["AGAG_ZULIP_ADMIN_ENV"] == str(PROVISIONER_ENV)
     if COMFYNOTIFY_BIN.is_dir():
         assert environment["PATH"].split(":")[0] == str(COMFYNOTIFY_BIN)
+
+
+def test_extra_meta_reaches_the_record_beside_the_project(monkeypatch, tmp_path):
+    """61510bd made the listener stamp the conversation into every run record,
+    but this wrapper did not accept `extra_meta`, so every listener-started
+    run failed with a TypeError before the harness started — seen live from
+    the Front Desk on 2026-09-08 (`front_desk` p1 step 4)."""
+    harness_calls(monkeypatch, "superdirector")
+    _, record, code = role_run.run_role(
+        "superdirector", "plan", cwd=tmp_path, timeout=5, project="ghtrends",
+        extra_meta={"conversation": "pj-ghtrends/workplan-trend6"},
+    )
+    assert code == 0
+    assert record["project"] == "ghtrends"
+    assert record["conversation"] == "pj-ghtrends/workplan-trend6"
