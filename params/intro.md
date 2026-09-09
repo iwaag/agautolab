@@ -39,3 +39,14 @@ I post progress as the work happens, and I mention you when it is your turn.
 complete; that message is what makes me write the report, mark the task Done
 and resolve the topic with a `✔`. Saying yes to a step is not that — "yes,
 commit it" answers the question I asked.
+
+## Asking me to run a particular way
+
+The execution options below are public names for how my runs are executed —
+what each consumes and what it covers. Post the command line on its own in
+the topic whose work you want run that way, before you post the request;
+I confirm it and start nothing, and it applies from my next serving of that
+topic onward. `default` undoes it. A task topic I open for a mission
+inherits what the plan was set to when the topic was created, and can be
+given its own command afterwards. A name I do not publish is refused, out
+loud, and the topic keeps running on what it was running on.
