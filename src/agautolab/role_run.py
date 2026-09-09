@@ -8,6 +8,12 @@ What is autolab's own:
 - the per-project profile override (`.local/projects/<p>/agents.toml`, read by
   `project_settings.load_project_roles`), and for `director` the project
   inferred from the direction clone it runs in;
+- the conversation's **execution option** (`ag.exec-options.v1`), which sits
+  above the project setting and below an explicit `profile=` argument: an
+  option is what somebody asked this topic to run under, a project setting is
+  a standing default, and a `profile=` from a caller is that caller having
+  already decided. The public name is recorded beside the profile that served
+  it, so a record says both;
 - `ROLE_WORKSPACES`: `mediator` runs in its fixed workspace, everything else
   where the caller points it;
 - agcode's budget (`--max-turns`, `--max-tokens`, `--deadline-s`, and
@@ -37,6 +43,7 @@ from pathlib import Path
 from typing import Mapping
 
 from agag.agent import resolve_spec_role, run_role as skeleton_run_role
+from agag.execopt import Selection
 
 from .instance import AGAUTOLAB_ROOT, SPEC
 from .project_settings import load_project_roles, project_name_from_direction
@@ -121,6 +128,7 @@ def run_role(role: str, prompt: str, *, cwd: Path, timeout: float,
              home: tuple[str, str] | None = None,
              stream: bool = False,
              on_event: Callable[[dict], None] | None = None,
+             selection: Selection | None = None,
              extra_meta: Mapping[str, object] | None = None) -> tuple[str, dict, int]:
     """Resolve `role` (project profile first), run it once, return output, record, exit code.
 
@@ -131,7 +139,11 @@ def run_role(role: str, prompt: str, *, cwd: Path, timeout: float,
     every listener-started run failed before the harness).
     """
     project = project or (project_name_from_direction(cwd) if role == "director" else None)
-    profile = profile or load_project_roles(project).get(role)
+    # The conversation's selection outranks the project's standing setting:
+    # somebody asked *this* topic to run this way, and every role a mission
+    # uses is covered, so the auxiliary roles do not quietly stay behind on
+    # another pool.
+    profile = profile or SPEC.profile_for(selection, role) or load_project_roles(project).get(role)
     # The harness is decided by the profile; agcode's budget and claude_code's
     # bypass are decided here from that same resolution.
     agent = resolve_spec_role(SPEC, role, profile_override=profile, home=home)
@@ -152,6 +164,7 @@ def run_role(role: str, prompt: str, *, cwd: Path, timeout: float,
         or (agent.harness in ("gemini_cli", "codex") and role not in READONLY_ROLES),
         extra_args=harness_args(agent.harness, role, timeout),
         on_event=on_event,
+        selection=selection,
         extra_meta={"project": project, **dict(extra_meta or {})},
         agent=agent,
     )

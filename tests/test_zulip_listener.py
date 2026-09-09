@@ -16,9 +16,9 @@ CHANNEL = "pj-demo-project"
 TOPIC = "workplan-one"
 
 
-def history_message(sender_id=HUMAN_ID, name="Developer", content="Build it"):
+def history_message(sender_id=HUMAN_ID, name="Developer", content="Build it", id=1):
     return {
-        "id": 1,
+        "id": id,
         "type": "stream",
         "sender_id": sender_id,
         "sender_full_name": name,
@@ -232,27 +232,35 @@ def test_handle_topic_acks_then_runs_the_steps_in_order(monkeypatch, tmp_path):
 
     zulip_listener.handle_topic(client, CHANNEL, TOPIC)
 
-    # The trailing history read is the post-run re-check for human messages
-    # that arrived during the run (none here, so the handler leaves).
+    # The second `whoami` is the execution menu, addressed by the name a
+    # mention matches (`ag.exec-options.v1`); a real client answers it from
+    # cache, this fake counts every call. The topic is then read **before**
+    # the ack — a configuration-only post must buy neither an ack nor a run —
+    # and that same read is the serving's chatlog, so obeying the contract
+    # costs no extra Zulip call. The trailing history read is the post-run
+    # re-check for human messages that arrived during the run.
     assert [call[0] for call in calls] == [
-        "whoami", "write", "history", "init", "plane", "superdirector",
+        "whoami", "whoami", "history", "write",
+        "init", "plane", "superdirector",
         # the handoff lookup, the reply, then the post-run re-check
         "history", "write", "history",
     ]
-    # The ack is the first post, before any work: it makes the bot the last
-    # poster so a later sweep skips the topic while this run is in flight.
-    assert calls[1][1:3] == (TOPIC, zulip_listener.ACK_TEXT)
+    # The ack is still the first post, before any work: it makes the bot the
+    # last poster so a later sweep skips the topic while this run is in flight.
+    assert calls[3][1:3] == (TOPIC, zulip_listener.ACK_TEXT)
     # The chatlog lands in this generation's superdirector workspace.
     workspace = superdirector_dir(tmp_path)
     assert (workspace / "chatlog.md").read_text() == "[Developer] Build it\n"
     # The Plane mirror goes to `current/`, and an empty mirror leaves nothing.
-    assert calls[4][1] == workspace / "current"
+    assert next(call for call in calls if call[0] == "plane")[1] == workspace / "current"
     assert not (workspace / "current").exists()
     # The run happens in the project folder; the workspace travels by path.
-    assert calls[5][2] == project_dir(tmp_path)
-    assert str(workspace) in calls[5][1]
-    assert "currently registered mission" not in calls[5][1]
-    assert calls[7][1:3] == (TOPIC, HANDOFF + "planner says hi")
+    assert next(call for call in calls if call[0] == "superdirector")[2] == project_dir(tmp_path)
+    assert str(workspace) in next(call for call in calls if call[0] == "superdirector")[1]
+    assert "currently registered mission" not in next(
+        call for call in calls if call[0] == "superdirector")[1]
+    assert [call for call in calls if call[0] == "write"][-1][1:3] == (
+        TOPIC, HANDOFF + "planner says hi")
 
 
 def test_serving_files_the_project_channel_in_its_own_folder(monkeypatch, tmp_path):
@@ -950,7 +958,7 @@ def wire_run(monkeypatch, tmp_path, calls, *, target=TARGET, report=None,
         lambda topic, text, **kwargs: calls.append(("write", topic, text, kwargs)) or "success",
     )
 
-    def supercoder(prompt, cwd, on_event=None, home=None):
+    def supercoder(prompt, cwd, on_event=None, home=None, selection=None):
         calls.append(("supercoder", prompt, cwd, home))
         workspace = Path(re.search(r'is placed in "([^"]+)"', prompt).group(1))
         if report is not None:
@@ -1224,7 +1232,7 @@ def test_a_failed_supercoder_run_is_reported_into_the_topic(monkeypatch, tmp_pat
     calls = []
     wire_run(monkeypatch, tmp_path, calls)
 
-    def explode(prompt, cwd, on_event=None, home=None):
+    def explode(prompt, cwd, on_event=None, home=None, selection=None):
         raise zulip_listener.ListenerError("claude_code timed out")
 
     monkeypatch.setattr(zulip_listener, "workrun_supercoder", explode)
@@ -1338,12 +1346,16 @@ def test_the_routes_are_the_three_prefixes_and_the_guards_are_the_handlers_own(m
     monkeypatch.setattr(zulip_listener, "serve_topic", lambda c, ch, t, *a, **k: served.append((ch, t)))
     monkeypatch.setenv("AUTOLAB_INSTANCE_NAME", "autolab-here1")
 
-    zulip_listener.handle_workrun(None, "general", "workrun-1")
-    zulip_listener.handle_workrun(None, CHANNEL, "workrun-2")
-    zulip_listener.handle_topic(None, CHANNEL, TOPIC)
-    zulip_listener.handle_topic(None, "general", "workplan-stray")  # silently ignored
-    zulip_listener.handle_bmining(None, CHANNEL, "bmining-idea")
-    zulip_listener.handle_bmining(None, "general", "bmining-stray")  # silently ignored
+    # Every handler builds its execution menu from the account it speaks as,
+    # so the routing check needs a client that can say who that is.
+    who = Client([])
+
+    zulip_listener.handle_workrun(who, "general", "workrun-1")
+    zulip_listener.handle_workrun(who, CHANNEL, "workrun-2")
+    zulip_listener.handle_topic(who, CHANNEL, TOPIC)
+    zulip_listener.handle_topic(who, "general", "workplan-stray")  # silently ignored
+    zulip_listener.handle_bmining(who, CHANNEL, "bmining-idea")
+    zulip_listener.handle_bmining(who, "general", "bmining-stray")  # silently ignored
 
     assert served == [
         ("general", "workrun-1"),
@@ -1429,8 +1441,10 @@ def test_handle_bmining_places_chatlog_runs_director_and_replies(monkeypatch, tm
     zulip_listener.handle_bmining(Client(calls), CHANNEL, BMINING_TOPIC)
 
     kinds = [call[0] for call in calls if call[0] != "history"]
-    assert kinds == ["whoami", "write", "init", "director", "push", "write"]
-    assert calls[1][2] == zulip_listener.ACK_TEXT
+    # Two `whoami`: the serving's own, and the execution menu's — addressed by
+    # the name a mention matches, and answered from cache by a real client.
+    assert kinds == ["whoami", "whoami", "write", "init", "director", "push", "write"]
+    assert next(call for call in calls if call[0] == "write")[2] == zulip_listener.ACK_TEXT
     assert "[Developer] Build it" in seen["chatlog"]
     directed = next(call for call in calls if call[0] == "director")
     assert directed[2] == direction
@@ -1566,7 +1580,7 @@ def test_a_serving_posts_the_progress_tail_before_the_outcome(monkeypatch, tmp_p
     calls = []
     wire_run(monkeypatch, tmp_path, calls)
 
-    def streaming_run(prompt, cwd, on_event=None, home=None):
+    def streaming_run(prompt, cwd, on_event=None, home=None, selection=None):
         on_event({"type": "assistant", "message": {"role": "assistant", "content": [
             {"type": "tool_use", "id": "t1", "name": "Bash",
              "input": {"command": "uv run pytest"}}]}})
@@ -1840,11 +1854,12 @@ def test_a_marked_workspace_is_served_with_only_its_plane_project_ensured(monkey
     # The Plane project is ensured before the read-back, and the Gitea scaffold
     # never runs — the folders are the agent's.
     assert [call[0] for call in calls] == [
-        "whoami", "write", "history", "plane-project", "plane", "superdirector",
+        "whoami", "whoami", "history", "write",
+        "plane-project", "plane", "superdirector",
         "history", "write", "history",
     ]
     assert next(call[2] for call in calls if call[0] == "superdirector") == workspace
-    assert calls[7][2] == HANDOFF + "made it"
+    assert calls[8][2] == HANDOFF + "made it"
     # Nothing was scaffolded into the workspace.
     assert sorted(p.name for p in workspace.iterdir()) == [project_init.PATTERN_MARKER]
 
@@ -1872,3 +1887,213 @@ def test_a_plan_written_for_a_pattern_managed_project_reaches_plane(monkeypatch,
     reply = next(call[2] for call in calls if call[0] == "write" and call[1] == TOPIC
                  and call[2].startswith(HANDOFF))
     assert "pattern-managed" not in reply
+
+
+# --- execution options (ag.exec-options.v1, runtime-profile step3) ---------
+
+from types import SimpleNamespace  # noqa: E402
+
+from agag import execopt  # noqa: E402
+from agautolab import instance, role_run  # noqa: E402
+from agag.execopt import Option, Selection  # noqa: E402
+
+
+def exec_command(option, bot="Autolab"):
+    return f"@**{bot}** use {option}"
+
+
+def test_autolab_publishes_only_profiles_it_actually_has(tmp_path):
+    config = tmp_path / "agents.toml"
+    config.write_text(
+        'schema = "ag.agent-config.v2"\n'
+        '[models."antigravity/g"]\n'
+        '[profiles.agy]\nharness = "agy"\nmodel = "antigravity/g"\n',
+        encoding="utf-8",
+    )
+    names = [option.name for option in instance.exec_options(config)]
+    # `default` and `agy` are there; `codex` and `gemini` are not configured
+    # here, and a name whose profile is gone must not be advertised.
+    assert names == ["default", "agy"]
+
+
+def test_an_unreadable_config_publishes_nothing_rather_than_a_wrong_menu(tmp_path):
+    assert instance.exec_options(tmp_path / "nothing.toml") == ()
+
+
+def test_every_published_option_covers_the_working_roles_not_just_the_entrance():
+    for option in instance.SPEC.exec_options:
+        assert "mission planning" in option.covers and "task work" in option.covers
+
+
+def test_the_default_option_names_the_pool_it_consumes():
+    published = instance.SPEC.published_options("Autolab")
+    assert published.get("default").pool == "anthropic"
+    assert published.get("agy").pool == "antigravity"
+
+
+def test_a_selection_reaches_the_planning_run(monkeypatch, tmp_path):
+    calls = []
+    seen = {}
+    wire(monkeypatch, tmp_path, calls)
+
+    def run(prompt, cwd, conversation=None, selection=None):
+        seen["selection"] = selection
+        calls.append(("superdirector", prompt, cwd))
+        return "planned"
+
+    monkeypatch.setattr(zulip_listener, "run_superdirector", run)
+    client = Client(calls, history=[
+        history_message(content=exec_command("agy"), id=7),
+        history_message(content="plan it", id=8),
+    ])
+    zulip_listener.handle_topic(client, CHANNEL, TOPIC)
+    assert seen["selection"].option == "agy"
+
+
+def test_a_selection_reaches_the_task_run(monkeypatch, tmp_path):
+    calls = []
+    seen = {}
+    wire_run(monkeypatch, tmp_path, calls)
+
+    def supercoder(prompt, cwd, on_event=None, home=None, selection=None):
+        seen["selection"] = selection
+        return "did it"
+
+    monkeypatch.setattr(zulip_listener, "workrun_supercoder", supercoder)
+    client = RunClient(calls, history=anchored(
+        history_message(content=exec_command("agy"), id=90),
+        history_message(content="go", id=91),
+    ))
+    zulip_listener.handle_workrun(client, WORK_CHANNEL, WORKRUN_TOPIC)
+    assert seen["selection"].option == "agy"
+
+
+def test_a_task_inherits_the_plans_selection_when_its_topic_is_opened(monkeypatch, tmp_path):
+    calls = []
+    client = Client(calls)
+    wire_response(monkeypatch, tmp_path, calls)
+    workspace = superdirector_dir(tmp_path)
+    workspace.mkdir(parents=True)
+    (workspace / "plan.md").write_text(PLAN_TEXT)
+
+    zulip_listener.handle_superdirector_response(
+        client, CHANNEL, TOPIC, PROJECT, workspace, BOT_ID,
+        Selection("agy", "topic", 5731),
+    )
+
+    notes = [call[3] for call in calls
+             if call[0] == "post" and str(call[3]).startswith("[selfnote][exec]")]
+    assert notes == [f"[selfnote][exec] agy from {CHANNEL}/{TOPIC}#5731"]
+    parsed = execopt.parse_exec_note(notes[0])
+    assert parsed[0] == "agy" and parsed[2] == 5731
+
+
+def test_a_plan_with_no_selection_writes_no_snapshot(monkeypatch, tmp_path):
+    calls = []
+    client = Client(calls)
+    wire_response(monkeypatch, tmp_path, calls)
+    workspace = superdirector_dir(tmp_path)
+    workspace.mkdir(parents=True)
+    (workspace / "plan.md").write_text(PLAN_TEXT)
+
+    zulip_listener.handle_superdirector_response(
+        client, CHANNEL, TOPIC, PROJECT, workspace, BOT_ID, Selection()
+    )
+    assert not [call for call in calls
+                if call[0] == "post" and str(call[3]).startswith("[selfnote][exec]")]
+
+
+def test_a_child_topic_runs_on_what_it_inherited(monkeypatch, tmp_path):
+    calls = []
+    seen = {}
+    wire_run(monkeypatch, tmp_path, calls)
+
+    def supercoder(prompt, cwd, on_event=None, home=None, selection=None):
+        seen["selection"] = selection
+        return "did it"
+
+    monkeypatch.setattr(zulip_listener, "workrun_supercoder", supercoder)
+    history = [
+        history_message(sender_id=BOT_ID, name="Autolab", content=ROOT_NOTE),
+        history_message(sender_id=BOT_ID, name="Autolab", content=WORK_NOTE),
+        history_message(sender_id=BOT_ID, name="Autolab",
+                        content=f"[selfnote][exec] agy from {CHANNEL}/{TOPIC}#5731"),
+        history_message(sender_id=BOT_ID, name="Autolab", content="# Add the README"),
+        history_message(content="go", id=99),
+    ]
+    zulip_listener.handle_workrun(RunClient(calls, history=history), WORK_CHANNEL, WORKRUN_TOPIC)
+    assert seen["selection"].option == "agy"
+    assert seen["selection"].source == "inherited"
+    assert str(seen["selection"].inherited_from) == f"{CHANNEL}/{TOPIC}"
+
+
+def test_a_child_command_overrides_what_it_inherited(monkeypatch, tmp_path):
+    calls = []
+    seen = {}
+    wire_run(monkeypatch, tmp_path, calls)
+
+    def supercoder(prompt, cwd, on_event=None, home=None, selection=None):
+        seen["selection"] = selection
+        return "did it"
+
+    monkeypatch.setattr(zulip_listener, "workrun_supercoder", supercoder)
+    history = [
+        history_message(sender_id=BOT_ID, name="Autolab", content=ROOT_NOTE),
+        history_message(sender_id=BOT_ID, name="Autolab", content=WORK_NOTE),
+        history_message(sender_id=BOT_ID, name="Autolab",
+                        content=f"[selfnote][exec] agy from {CHANNEL}/{TOPIC}#5731"),
+        history_message(sender_id=BOT_ID, name="Autolab", content="# Add the README"),
+        history_message(content=exec_command("codex"), id=98),
+        history_message(content="go", id=99),
+    ]
+    zulip_listener.handle_workrun(RunClient(calls, history=history), WORK_CHANNEL, WORKRUN_TOPIC)
+    assert seen["selection"].option == "codex"
+    assert seen["selection"].source == "topic"
+
+
+def test_the_selection_outranks_the_projects_standing_setting(monkeypatch, tmp_path):
+    seen = {}
+    monkeypatch.setattr(role_run, "load_project_roles", lambda project: {"supercoder": "gemini"})
+    monkeypatch.setattr(
+        role_run, "resolve_spec_role",
+        lambda spec, role, **kw: seen.update(profile=kw.get("profile_override"))
+        or SimpleNamespace(harness="agy", role=role, profile=kw.get("profile_override")),
+    )
+    monkeypatch.setattr(
+        role_run, "skeleton_run_role",
+        lambda *a, **k: seen.update(passed=k.get("profile")) or ("out", {}, 0),
+    )
+    role_run.run_role("supercoder", "p", cwd=tmp_path, timeout=1,
+                      selection=Selection("agy", "topic", 3), project="demo")
+    assert seen["profile"] == "agy" and seen["passed"] == "agy"
+
+
+def test_the_project_setting_still_applies_when_nothing_was_selected(monkeypatch, tmp_path):
+    seen = {}
+    monkeypatch.setattr(role_run, "load_project_roles", lambda project: {"supercoder": "gemini"})
+    monkeypatch.setattr(
+        role_run, "resolve_spec_role",
+        lambda spec, role, **kw: seen.update(profile=kw.get("profile_override"))
+        or SimpleNamespace(harness="gemini_cli", role=role, profile=kw.get("profile_override")),
+    )
+    monkeypatch.setattr(role_run, "skeleton_run_role", lambda *a, **k: ("out", {}, 0))
+    role_run.run_role("supercoder", "p", cwd=tmp_path, timeout=1,
+                      selection=Selection(), project="demo")
+    assert seen["profile"] == "gemini"
+
+
+def test_a_configuration_only_post_in_a_task_topic_starts_no_run(monkeypatch, tmp_path):
+    calls = []
+    ran = []
+    wire_run(monkeypatch, tmp_path, calls)
+    monkeypatch.setattr(
+        zulip_listener, "workrun_supercoder",
+        lambda *a, **k: ran.append(1) or "never",
+    )
+    history = anchored() + [
+        history_message(sender_id=BOT_ID, name="Autolab", content="done", id=88),
+        history_message(content=exec_command("agy"), id=89),
+    ]
+    zulip_listener.handle_workrun(RunClient(calls, history=history), WORK_CHANNEL, WORKRUN_TOPIC)
+    assert ran == []
+    assert "Execution option set to `agy`" in calls_of(calls, "write")[-1][2]

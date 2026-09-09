@@ -57,8 +57,9 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from agag.agent import SWEEP_ACK as ACK_TEXT
+from agag.agent import SWEEP_ACK as ACK_TEXT, exec_options_for
 from agag.entrance import EMPTY_REPLY, NO_ANSWER as NO_CLOSING_MESSAGE, handle_entrance
+from agag.execopt import Selection, exec_note
 from agag.intro import agents_file_path, write_agents_md
 from agag.topics import (
     TopicContext,
@@ -300,13 +301,14 @@ def serve(context) -> TopicResult:
             superdirector_prompt(context.bot_name, workspace, plane_files),
             project_directory(project),
             conversation=(context.channel, context.topic),
+            selection=context.selection,
         )
     ]
 
     context.step = "response handling"
     response_sections, resolve_after = handle_superdirector_response(
         context.client, context.channel, context.topic, project, workspace,
-        context.self_id,
+        context.self_id, context.selection,
     )
     sections.extend(response_sections)
     return TopicResult(sections, resolve_after=resolve_after)
@@ -346,7 +348,8 @@ def handle_topic(client: ZulipClient, channel: str, topic: str) -> None:
     if at_the_entrance(client, channel, topic) or not in_project_channel(channel, topic):
         return
     log(f"workplan topic {channel!r}/{topic!r}")
-    serve_topic(client, channel, topic, serve, ack_text=ACK_TEXT, empty_reply=EMPTY_REPLY)
+    serve_topic(client, channel, topic, serve, ack_text=ACK_TEXT, empty_reply=EMPTY_REPLY,
+                exec_options=exec_options_for(SPEC, client))
 
 
 def project_directory(project: str) -> Path:
@@ -367,7 +370,8 @@ def conversation_meta(conversation: tuple[str, str] | None) -> dict | None:
 
 
 def run_superdirector(prompt: str, cwd: Path,
-                      conversation: tuple[str, str] | None = None) -> str:
+                      conversation: tuple[str, str] | None = None,
+                      selection: Selection | None = None) -> str:
     """One mission-planning run in the project folder, with its record.
 
     Planning a mission means weighing the chatlog against the code, the
@@ -382,6 +386,7 @@ def run_superdirector(prompt: str, cwd: Path,
         cwd=cwd,
         timeout=SUPERDIRECTOR_TIMEOUT_SECONDS,
         record=record,
+        selection=selection,
         extra_meta=conversation_meta(conversation),
     )
     if exit_code != 0:
@@ -532,15 +537,24 @@ def anchor_run_topic(
     mission: Conversation,
     issue_id: str,
     self_id: int,
+    selection: Selection | None = None,
 ) -> None:
-    """Write the two selfnotes that say what this `workrun-` topic is for.
+    """Write the selfnotes that say what this `workrun-` topic is for.
 
     Before the visible task description, so the description stays the topic's
     last real post and opening a topic fires nothing — a selfnote is never
     somebody speaking. `agautolab.anchor` has the shape and the reasoning.
 
+    Since `runtime-profile` step3 there is a third note when the mission
+    conversation had an execution option: `[selfnote][exec]`, a **snapshot**
+    of what the plan was running under (`ag.exec-options.v1` §5). A snapshot,
+    not a reference — a child's work is already under way, so a later change
+    in the plan reaches the *next* task topic and not this one — and a child
+    overrides it by carrying its own command, which is newer and wins by
+    message order alone.
+
     Idempotent by the work note: a topic already anchored is left alone, so a
-    re-plan that re-creates a serial does not write a second pair.
+    re-plan that re-creates a serial does not write a second set.
     """
     try:
         history = client.topic_history(channel, topic, num_before=HISTORY_MESSAGES)
@@ -552,11 +566,18 @@ def anchor_run_topic(
     topic_write(topic, rootchat_note(mission), channel=channel, client=client)
     if issue_id:
         topic_write(topic, work_note(issue_id), channel=channel, client=client)
+    if selection is not None and selection.explicit:
+        topic_write(
+            topic,
+            exec_note(selection.option, mission, selection.message_id),
+            channel=channel,
+            client=client,
+        )
 
 
 def mirror_task_changes(
     client: ZulipClient, channel: str, label: str, changes: list[TaskChange],
-    mission: Conversation, self_id: int,
+    mission: Conversation, self_id: int, selection: Selection | None = None,
 ) -> list[str]:
     """Mirror one re-plan onto the mission's `workrun-` topics, one to one.
 
@@ -567,12 +588,18 @@ def mirror_task_changes(
     available again, while a human post in the new topic still starts it.
     Unchanged tasks are left silent, so a re-plan that only touched task 3
     does not disturb tasks 1 and 2.
+
+    `selection` is what the planning serving was running under, snapshotted
+    into every topic this opens. A re-plan therefore hands its *current*
+    selection to the tasks it creates now, and leaves the ones it created
+    before with what they were opened with.
     """
     lines: list[str] = []
     for change in changes:
         topic = run_topic(change.serial, label)
         if change.action == "created":
-            anchor_run_topic(client, channel, topic, mission, change.issue_id, self_id)
+            anchor_run_topic(client, channel, topic, mission, change.issue_id, self_id,
+                             selection)
             topic_write(topic, change.document, channel=channel, client=client)
             # Saying where is not enough: agforge learned in p8 to say that
             # posting there is what starts it, and p9 watched a supervisor
@@ -593,7 +620,8 @@ def mirror_task_changes(
             lines.append(f"cancelled and resolved {channel}/{topic}")
         elif change.action == "changed-after-done":
             redo = rerun_topic(change.serial, label)
-            anchor_run_topic(client, channel, redo, mission, change.issue_id, self_id)
+            anchor_run_topic(client, channel, redo, mission, change.issue_id, self_id,
+                             selection)
             topic_write(
                 redo,
                 f"{CHANGED_AFTER_DONE}\n\n{change.document}",
@@ -606,7 +634,7 @@ def mirror_task_changes(
 
 def prepare_run_surfaces(
     client: ZulipClient, slug: str, channel: str, topic: str, label: str,
-    changes: list[TaskChange], self_id: int,
+    changes: list[TaskChange], self_id: int, selection: Selection | None = None,
 ) -> list[str]:
     """The whole Zulip side of one planning round.
 
@@ -619,7 +647,7 @@ def prepare_run_surfaces(
     mission = Conversation(channel, topic)
     return [
         f"work channel {name} is ready",
-        *mirror_task_changes(client, name, label, changes, mission, self_id),
+        *mirror_task_changes(client, name, label, changes, mission, self_id, selection),
     ]
 
 
@@ -640,7 +668,7 @@ def archive_work_channel(client: ZulipClient, label: str) -> str:
 
 def handle_superdirector_response(
     client: ZulipClient, channel: str, topic: str, project: str, workspace: Path,
-    self_id: int,
+    self_id: int, selection: Selection | None = None,
 ) -> tuple[list[str], bool]:
     """Act on what the superdirector wrote: `plan.md`, then the flags.
 
@@ -678,7 +706,7 @@ def handle_superdirector_response(
         sections.extend(lines)
         sections.extend(
             prepare_run_surfaces(
-                client, project, channel, topic, label, changes, self_id
+                client, project, channel, topic, label, changes, self_id, selection
             )
         )
 
@@ -739,7 +767,8 @@ def supercoder_prompt(bot_name: str, workspace: Path, task: str, threads=()) -> 
 
 def workrun_supercoder(prompt: str, cwd: Path,
                    on_event: Callable[[dict], None] | None = None,
-                   home: tuple[str, str] | None = None) -> str:
+                   home: tuple[str, str] | None = None,
+                   selection: Selection | None = None) -> str:
     """One task-serving run in the project folder, with its record.
 
     Like the superdirector it runs where `main/`, `direction/` and `devlog/`
@@ -758,6 +787,7 @@ def workrun_supercoder(prompt: str, cwd: Path,
         record=record,
         home=home,
         on_event=on_event,
+        selection=selection,
         # `home` is the task's conversation, which is also where this run
         # is filed for the cost gauge; the project clone it runs in says
         # nothing about that (`gauge_panel` step 4).
@@ -1054,6 +1084,7 @@ def serve_run(context) -> TopicResult:
                 project_directory(slug),
                 on_event=progress,
                 home=(context.channel, context.topic),
+                selection=context.selection,
             )
         )
     finally:
@@ -1097,6 +1128,7 @@ def handle_workrun(client: ZulipClient, channel: str, topic: str) -> None:
     serve_topic(
         client, channel, topic, serve_run,
         ack_text=ACK_TEXT, empty_reply=EMPTY_REPLY,
+        exec_options=exec_options_for(SPEC, client),
     )
 
 
@@ -1129,7 +1161,8 @@ def bmining_prompt(bot_name: str) -> str:
 
 
 def run_director(prompt: str, cwd: Path,
-                 conversation: tuple[str, str] | None = None) -> str:
+                 conversation: tuple[str, str] | None = None,
+                 selection: Selection | None = None) -> str:
     """One discussion run in the direction clone, with its record."""
     record = next_record_path(RECORDS_ROOT / "director")
     output, _, exit_code = run_role(
@@ -1138,6 +1171,7 @@ def run_director(prompt: str, cwd: Path,
         cwd=cwd,
         timeout=DIRECTOR_TIMEOUT_SECONDS,
         record=record,
+        selection=selection,
         extra_meta=conversation_meta(conversation),
     )
     if exit_code != 0:
@@ -1179,7 +1213,8 @@ def serve_bmining(context) -> TopicResult:
 
         context.step = "director"
         sections = [run_director(bmining_prompt(context.bot_name), direction_dir,
-                                 conversation=(context.channel, context.topic))]
+                                 conversation=(context.channel, context.topic),
+                                 selection=context.selection)]
 
         context.step = "recording"
         if commit_all_and_push(
@@ -1198,7 +1233,8 @@ def handle_bmining(client: ZulipClient, channel: str, topic: str) -> None:
     if at_the_entrance(client, channel, topic) or not in_project_channel(channel, topic):
         return
     log(f"bmining topic {channel!r}/{topic!r}")
-    serve_topic(client, channel, topic, serve_bmining, ack_text=ACK_TEXT, empty_reply=EMPTY_REPLY)
+    serve_topic(client, channel, topic, serve_bmining, ack_text=ACK_TEXT,
+                empty_reply=EMPTY_REPLY, exec_options=exec_options_for(SPEC, client))
 
 
 def handle_mention(client: ZulipClient, channel: str, topic: str) -> None:
