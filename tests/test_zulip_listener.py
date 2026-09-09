@@ -2097,3 +2097,67 @@ def test_a_configuration_only_post_in_a_task_topic_starts_no_run(monkeypatch, tm
     zulip_listener.handle_workrun(RunClient(calls, history=history), WORK_CHANNEL, WORKRUN_TOPIC)
     assert ran == []
     assert "Execution option set to `agy`" in calls_of(calls, "write")[-1][2]
+
+
+def test_a_callback_runs_on_the_tasks_selection_not_the_remote_topics(monkeypatch, tmp_path):
+    """A callback's remote topic is not the task's execution context.
+
+    The answer arrives in somebody else's conversation, which may carry a
+    command addressed to somebody else entirely; what runs is the task, and
+    the task's own topic is where its selection lives.
+    """
+    calls = []
+    seen = {}
+    wire_run(monkeypatch, tmp_path, calls)
+
+    def supercoder(prompt, cwd, on_event=None, home=None, selection=None):
+        seen["selection"] = selection
+        return "did it"
+
+    monkeypatch.setattr(zulip_listener, "workrun_supercoder", supercoder)
+
+    class Callback(RunClient):
+        """`workrun-` carries the task's selection; the remote topic carries
+        a command for another agent and the root note pointing home."""
+
+        def topic_history(self, channel, topic, num_before):
+            if topic == "assetplan-x":
+                self.calls.append(("history", channel, topic, num_before))
+                return [
+                    history_message(sender_id=BOT_ID, name="Autolab",
+                                    content=f"[selfnote][rootchat] {WORK_CHANNEL}/{WORKRUN_TOPIC}"),
+                    history_message(sender_id=13, name="Forge",
+                                    content=exec_command("codex", bot="Forge"), id=70),
+                    history_message(sender_id=13, name="Forge",
+                                    content="@**Autolab** here is your asset", id=71),
+                ]
+            return super().topic_history(channel, topic, num_before)
+
+    history = anchored(
+        history_message(content=exec_command("agy"), id=60),
+        history_message(content="go", id=61),
+    )
+    zulip_listener.handle_mention(Callback(calls, history=history), "agforge-x", "assetplan-x")
+    assert seen["selection"].option == "agy"
+
+
+def test_two_missions_keep_their_own_selections(monkeypatch, tmp_path):
+    """The setting is a property of one conversation, so two topics served in
+    turn do not leak into each other."""
+    calls = []
+    seen = []
+    wire(monkeypatch, tmp_path, calls)
+    monkeypatch.setattr(
+        zulip_listener, "run_superdirector",
+        lambda prompt, cwd, conversation=None, selection=None: seen.append(selection) or "planned",
+    )
+    zulip_listener.handle_topic(
+        Client(calls, history=[history_message(content=exec_command("agy"), id=7),
+                               history_message(content="plan it", id=8)]),
+        CHANNEL, TOPIC,
+    )
+    zulip_listener.handle_topic(
+        Client(calls, history=[history_message(content="plan it too", id=9)]),
+        CHANNEL, "workplan-two",
+    )
+    assert [selection.option for selection in seen] == ["agy", None]
