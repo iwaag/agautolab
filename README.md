@@ -22,7 +22,7 @@ its agent configuration:
   | prefix | swept where | means |
   |---|---|---|
   | `workplan-` | `#pj-<name>` | plan a mission; never executes it |
-  | `workrun-` | a `work-<label>` channel, as `workrun-task<N>-<label>` | execute one Sub-Work |
+  | `workrun-` | a `work-m<id>` channel, as `workrun-task<N>-m<id>` | execute one task |
   | `bmining-` | `#pj-<name>` | unchanged by p3 |
 
   These were `mission-` and `run-`. There is no compatibility
@@ -65,25 +65,46 @@ its agent configuration:
   it describes changes** — an agent that reads a stale introduction will act
   on it. Proven in p4: agfront reached this agent for the first time knowing
   nothing but that post.
-- **Marking a finished mission Done** (`agent_standardize` p10, 2026-08-21).
-  A task's Sub-Work is closed by the run that executed it; nothing ever
-  closed the mission Work above them, so p9 finished a mission and left its
-  Work `unstarted` with four completed children. `mission_done` is the
+- **The work record is the conversation** (`refactor` p1). A mission is the
+  `workplan-` topic that asked for it, a task is the `workrun-` topic that
+  runs it, and a result is a post where the task ran. There is no Plane Work
+  and no Sub-Work: `agautolab.worklog` is the model, and `agautolab.anchor`
+  is the four selfnotes a conversation carries about itself —
+
+  | note | written in | says |
+  |---|---|---|
+  | `[selfnote][mission] <slug>` | a `workplan-` topic | this is a mission; **its own message id is the mission** |
+  | `[selfnote][task] <mission id>#<serial>` | a `workrun-` topic | this is a task; **its own message id is the task** |
+  | `[selfnote][doc] <message id>` | either | which post is the current plan or description |
+  | `[selfnote][state] <word>` | either | where the work has got to; the newest wins |
+
+  Identity is a **message id**, never a name: a topic may be resolved,
+  renamed by hand, moved or replaced by other work of the same name, and the
+  record still says which conversation is which. A deleted anchor is absent —
+  not whatever took its name.
+
+  A task is `open`, `completed`, `cancelled` or `accepted`. The three that
+  are not `cancelled` are kept apart on purpose: `completed` is the run and
+  the developer agreeing the work is done and is what the next task's gate
+  waits for, `accepted` is a human accepting the request, and Zulip's `✔ ` is
+  neither — it closes the conversation. A mission is `planned`, `started`,
+  `cancelled` or `done`.
+- **Marking a finished mission done** (`agent_standardize` p10, rebuilt in
+  `refactor` p1). A task is closed by the run that executed it; nothing ever
+  closed the mission above them, so p9 finished a mission and left it with
+  four completed tasks and no state of its own. `mission_done` is the
   counting that closes it:
 
   ```bash
-  uv run python -m agautolab.mission_done            # sweep [AUTO] projects
-  uv run python -m agautolab.mission_done S2-30      # one Work, label or id
+  uv run python -m agautolab.mission_done            # sweep pj- channels
+  uv run python -m agautolab.mission_done m5512      # one mission, label or id
   uv run python -m agautolab.mission_done --dry-run  # say, move nothing
   ```
 
-  It moves only Works this agent registered (`external_source`) that have at
-  least one live Sub-Work and whose every live Sub-Work is completed;
-  cancelled children do not hold a mission open. One line per Work, moved or
-  not. A named Work that is not finished says how far it is and exits 1;
-  one already Done is reported and exits 0. **This is the only Plane
-  operation the entrance performs** — everything else it needs is in the
-  chat, and the mission Work's state is the one thing that is not.
+  It moves only missions whose every live task is finished; cancelled tasks
+  do not hold a mission open, and a mission with no task never ran. One line
+  per mission, moved or not. A named mission that is not finished says how
+  far it is and exits 1; one already done is reported and exits 0.
 - **The board harvest** (`agent_standardize` p6, 2026-08-21). Before a
   `workplan-` run and before a `workrun-` run, the latest introduction of
   every live `intro-*` topic in `#agents` is written verbatim into that run's

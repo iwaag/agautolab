@@ -5,7 +5,6 @@ import pytest
 from agautolab import project_archive
 from agautolab.project_archive import ABSENT, ALREADY, ARCHIVED
 
-PLANE = project_archive.PlaneConfig("http://plane", "key", "workspace")
 GITEA = project_archive.GiteaConfig("http://gitea", "token", "autodev")
 
 
@@ -36,28 +35,6 @@ class FakeClient:
             raise self._error
         self.archived_folders.append(folder_id)
         return {"result": "success"}
-
-
-def test_archive_plane_project_archives_once_and_recognizes_the_second_run(monkeypatch):
-    rows = [{"id": "p1", "name": "Whack A Mole"}]
-    calls = []
-
-    def request(method, url, **kwargs):
-        calls.append((method, url))
-        if method == "GET":
-            return 200, {"results": rows}
-        rows[0]["archived_at"] = "2026-08-17T00:00:00Z"
-        return 204, {}
-
-    monkeypatch.setattr(project_archive, "_request_json", request)
-    assert project_archive.archive_plane_project(PLANE, "whack-a-mole") == ARCHIVED
-    assert calls[-1] == ("POST", "http://plane/api/v1/workspaces/workspace/projects/p1/archive/")
-    assert project_archive.archive_plane_project(PLANE, "whack-a-mole") == ALREADY
-
-
-def test_archive_plane_project_reports_an_unknown_project_as_absent(monkeypatch):
-    monkeypatch.setattr(project_archive, "_request_json", lambda *a, **k: (200, {"results": []}))
-    assert project_archive.archive_plane_project(PLANE, "whack-a-mole") == ABSENT
 
 
 def test_archive_gitea_repo_patches_only_a_live_repository(monkeypatch):
@@ -150,15 +127,9 @@ def test_archive_workspace_refuses_to_merge_two_copies(tmp_path):
 
 def test_archive_project_covers_all_four_surfaces(monkeypatch, tmp_path):
     calls = []
-    monkeypatch.setattr(project_archive, "load_plane_config", lambda: PLANE)
     monkeypatch.setattr(project_archive, "load_gitea_config", lambda: GITEA)
     monkeypatch.setattr(
         project_archive.ZulipClient, "from_env", classmethod(lambda cls, path: FakeClient([]))
-    )
-    monkeypatch.setattr(
-        project_archive,
-        "archive_plane_project",
-        lambda config, name: calls.append(("plane", name)) or ARCHIVED,
     )
     monkeypatch.setattr(
         project_archive,
@@ -184,7 +155,6 @@ def test_archive_project_covers_all_four_surfaces(monkeypatch, tmp_path):
     report = project_archive.archive_project("demo-project")
     assert report == {
         "project": "demo-project",
-        "plane": ARCHIVED,
         "gitea": {
             "demo-project": ARCHIVED,
             "demo-project-direction": ARCHIVED,
@@ -195,7 +165,6 @@ def test_archive_project_covers_all_four_surfaces(monkeypatch, tmp_path):
         "workspace": ARCHIVED,
     }
     assert calls == [
-        ("plane", "demo-project"),
         ("repo", "demo-project"),
         ("repo", "demo-project-direction"),
         ("repo", "demo-project-devlog"),
@@ -215,7 +184,7 @@ def test_main_reports_one_line_per_project_and_survives_one_failure(monkeypatch,
     def archive(project, *, zulip_env=None):
         if project == "broken":
             raise project_archive.ProjectArchiveError("no such channel")
-        return {"project": project, "plane": ARCHIVED}
+        return {"project": project, "zulip": ARCHIVED}
 
     monkeypatch.setattr(project_archive, "archive_project", archive)
     assert project_archive.main(["spike", "broken", "phase2local"]) == 1

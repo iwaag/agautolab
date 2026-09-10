@@ -15,9 +15,9 @@ The command "autolab doc patterns" explains how project structure should be mana
 
 Read the project's index in `main/` first. If an existing or finished investigation already covers or answers the request, say so and point at it instead of planning new work.
 
-First, if the mission is clear enough, and the chat log suggests it hasn't been created or needs an update, write "plan.md" to complete the mission. It will be recorded as a new mission or overwrite the previous plan.
+First, if the mission is clear enough, and the chat log suggests it hasn't been created or needs an update, write "plan.md" to complete the mission. It is posted into this conversation as the mission's current plan, replacing the previous one.
 
-And next, create one file per task named "task[N].md" — "task1.md", "task2.md", "task3.md", ... — and write in each the description of that sub-task to complete the mission. **A mission runs only through its task files**: each "task[N].md" becomes a Sub-Work with its own run topic, and "plan.md" alone runs nothing. A mission that is one piece of work still gets a "task1.md" (its text may be the plan's steps). Seen live 2026-09-08 (workplan-trend7): a plan with no task file was reported as started, nothing could run, and the requester had to ask for a re-plan.
+And next, create one file per task named "task[N].md" — "task1.md", "task2.md", "task3.md", ... — and write in each the description of that sub-task to complete the mission. **A mission runs only through its task files**: each "task[N].md" becomes a task with its own run topic, and "plan.md" alone runs nothing. A mission that is one piece of work still gets a "task1.md" (its text may be the plan's steps). Seen live 2026-09-08 (workplan-trend7): a plan with no task file was reported as started, nothing could run, and the requester had to ask for a re-plan.
 
 The first line of "plan.md" and "task[N].md" is a Markdown heading ("# ...") and becomes the title,
 and the rest of the file becomes the description.

@@ -1,16 +1,21 @@
-"""Idempotent archival of a project's Plane, Gitea, Zulip and local surfaces.
+"""Idempotent archival of a project's Gitea, Zulip and local surfaces.
 
 The inverse of `project_init`, one surface at a time and in the reverse order:
-`init_project` creates a Plane project and three Gitea repositories, and a
-project channel `pj-<slug>` is created beside them. A verification project that
-has served its purpose keeps costing attention in four listings, so archiving
-it means retiring all four.
+`init_project` creates three Gitea repositories, and a project channel
+`pj-<slug>` is created beside them. A verification project that has served its
+purpose keeps costing attention in every listing, so archiving it means
+retiring all of them.
 
-Nothing here deletes. Plane keeps the issues, Gitea keeps the repository
-read-only, Zulip keeps the messages of an archived channel, and the local
-workspace is moved aside rather than removed — every step is reversible by
-hand, which is what makes running this on a still-wanted project a nuisance
-rather than a loss.
+Since `refactor` p1 there is no Plane project to retire: a mission's record is
+the Zulip conversation it happened in, and archiving the channel is what
+retires it. Archiving a project that predates the change leaves its old Plane
+project alone — the boundary this phase draws is that autolab's own path no
+longer touches Plane, not that Plane's contents are migrated.
+
+Nothing here deletes. Gitea keeps the repository read-only, Zulip keeps the
+messages of an archived channel, and the local workspace is moved aside rather
+than removed — every step is reversible by hand, which is what makes running
+this on a still-wanted project a nuisance rather than a loss.
 
 Every step reports its own outcome, so a partially archived project can be run
 through again and the report says which surfaces were already done.
@@ -32,14 +37,10 @@ from .project_init import (
     GiteaConfig,
     PROJECT_NAME,
     PROJECTS_ROOT,
-    PlaneConfig,
     ProjectInitError,
     _gitea_headers,
-    _normalized_name,
     _request_json,
-    _rows,
     load_gitea_config,
-    load_plane_config,
 )
 
 ZULIP_ENV = SPEC.zulip_env
@@ -63,7 +64,6 @@ __all__ = [
     "KEPT",
     "ProjectArchiveError",
     "archive_gitea_repo",
-    "archive_plane_project",
     "archive_project",
     "archive_workspace",
     "archive_zulip_channel",
@@ -80,7 +80,6 @@ class ProjectArchiveError(RuntimeError):
 @dataclass(frozen=True)
 class ArchiveReport:
     project: str
-    plane: str
     gitea: dict[str, str]
     zulip: str
     zulip_folder: str
@@ -89,7 +88,6 @@ class ArchiveReport:
     def as_dict(self) -> dict:
         return {
             "project": self.project,
-            "plane": self.plane,
             "gitea": self.gitea,
             "zulip": self.zulip,
             "zulip_folder": self.zulip_folder,
@@ -99,37 +97,6 @@ class ArchiveReport:
 
 def project_channel(project: str) -> str:
     return f"{PROJECT_CHANNEL_PREFIX}{project}"
-
-
-def archive_plane_project(config: PlaneConfig, project: str) -> str:
-    """Archive the project's Plane project.
-
-    An archived project stays in the workspace listing with `archived_at`
-    set, so the already-archived case is recognized rather than repeated —
-    though Plane's archive endpoint is itself idempotent.
-    """
-    base = (
-        f"{config.url}/api/v1/workspaces/{urllib.parse.quote(config.workspace, safe='')}"
-        "/projects"
-    )
-    headers = {"X-API-Key": config.api_key, "Content-Type": "application/json"}
-    status, payload = _request_json("GET", f"{base}/?per_page=100", headers=headers)
-    if status != 200:
-        raise ProjectArchiveError(f"Plane project list returned HTTP {status}: {payload!r}")
-    wanted = _normalized_name(project)
-    row = next(
-        (r for r in _rows(payload) if _normalized_name(str(r.get("name", ""))) == wanted), None
-    )
-    if row is None:
-        return ABSENT
-    if row.get("archived_at"):
-        return ALREADY
-    status, payload = _request_json(
-        "POST", f"{base}/{row['id']}/archive/", headers=headers, timeout=60
-    )
-    if status not in {200, 201, 204}:
-        raise ProjectArchiveError(f"Plane project archive returned HTTP {status}: {payload!r}")
-    return ARCHIVED
 
 
 def archive_gitea_repo(config: GiteaConfig, name: str) -> str:
@@ -231,12 +198,10 @@ def archive_project(project: str, *, zulip_env: Path | None = None) -> dict:
             "project name must be 2-39 lowercase letters, digits, or hyphens "
             "and start with a letter or digit"
         )
-    plane = load_plane_config()
     gitea = load_gitea_config()
     client = ZulipClient.from_env(zulip_env or ZULIP_ENV)
     return ArchiveReport(
         project=project,
-        plane=archive_plane_project(plane, project),
         gitea={
             f"{project}{suffix}": archive_gitea_repo(gitea, f"{project}{suffix}")
             for suffix in REPO_SUFFIXES

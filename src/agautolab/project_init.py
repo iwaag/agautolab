@@ -1,4 +1,14 @@
-"""Idempotent Plane/Gitea/local-workspace project initialization."""
+"""Idempotent Gitea and local-workspace project initialization.
+
+Until `refactor` p1 this also created a Plane project for every project it
+touched, and did so *before* the agent had read the request — the listener
+runs it on every serving. A mission's record is the Zulip conversation now
+(`agautolab.worklog`), so a project needs no ledger to be created in a second
+system, and initialization is what its name says: repositories and folders.
+
+`[AUTO]` survives as the marker on the things this system makes — a commit
+message, a work channel's description. It is no longer a filter on anything.
+"""
 
 from __future__ import annotations
 
@@ -16,20 +26,18 @@ from pathlib import Path
 from .instance import AGAUTOLAB_ROOT as PROJECT_ROOT
 
 PROJECT_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{1,38}$")
-PLANE_ENV = PROJECT_ROOT.parent / ".local" / "plane-credentials.env"
 GITEA_TOKEN = PROJECT_ROOT / ".local" / "gitea" / "autolab-agent.token"
 GITEA_ASKPASS = PROJECT_ROOT / ".local" / "gitea" / "askpass.sh"
 PROJECTS_ROOT = PROJECT_ROOT / ".local" / "projects"
 
 AUTO_MARKER = "[AUTO]"
-AUTO_DESCRIPTION_PREFIX = f"{AUTO_MARKER} autolab project: "
 IGNORE_LINE = ".local/"
 
 #: A workspace holding this file is pattern-managed: its folders were decided
 #: by the agent from `agent/project_pattern.md` on the developer's request, and
 #: `init_project` is not the thing that creates them.
 PATTERN_MARKER = "README_PROJECT.md"
-PATTERN_MANAGED_RESULT = "pattern-managed, Plane project ensured, folders untouched"
+PATTERN_MANAGED_RESULT = "pattern-managed, folders untouched"
 
 GIT_AUTHOR_NAME = "autolab-agent"
 GIT_AUTHOR_EMAIL = "autolab-agent@agautolab.invalid"
@@ -37,13 +45,6 @@ GIT_AUTHOR_EMAIL = "autolab-agent@agautolab.invalid"
 
 class ProjectInitError(RuntimeError):
     """One project initialization step failed."""
-
-
-@dataclass(frozen=True)
-class PlaneConfig:
-    url: str
-    api_key: str
-    workspace: str
 
 
 @dataclass(frozen=True)
@@ -67,19 +68,6 @@ def read_env(path: Path) -> dict[str, str]:
     return values
 
 
-def load_plane_config(path: Path = PLANE_ENV) -> PlaneConfig:
-    values = read_env(path)
-    required = ("PLANE_URL", "PLANE_API_KEY", "PLANE_WORKSPACE_SLUG")
-    missing = [key for key in required if not values.get(key)]
-    if missing:
-        raise ProjectInitError(f"{path} is missing {', '.join(missing)}")
-    return PlaneConfig(
-        os.environ.get("PLANE_URL", values["PLANE_URL"]).rstrip("/"),
-        os.environ.get("PLANE_API_KEY", values["PLANE_API_KEY"]),
-        os.environ.get("PLANE_WORKSPACE_SLUG", values["PLANE_WORKSPACE_SLUG"]),
-    )
-
-
 def load_gitea_config(token_path: Path = GITEA_TOKEN) -> GiteaConfig:
     try:
         token = token_path.read_text(encoding="utf-8").strip()
@@ -92,55 +80,6 @@ def load_gitea_config(token_path: Path = GITEA_TOKEN) -> GiteaConfig:
         token,
         os.environ.get("GITEA_ORG", "autodev"),
     )
-
-
-def plane_identifier(project: str) -> str:
-    parts = [part for part in re.split(r"[^a-z0-9]+", project.lower()) if part]
-    return "".join(part if part.isdigit() else part[0] for part in parts).upper()[:12]
-
-
-def plane_project_name(project: str) -> str:
-    """Plane rejects hyphens in names; keep its display form deterministic."""
-    return " ".join(part.capitalize() for part in project.split("-"))
-
-
-def auto_description(project: str) -> str:
-    """The description of an autolab-created Plane project.
-
-    It carries two things: the `[AUTO]` marker that makes the project eligible
-    for automatic work execution, and the local slug — Plane stores a
-    prettified display name, but the workspace lives at
-    `PROJECTS_ROOT / <slug> / main`, so the slug has to travel somewhere.
-    """
-    return f"{AUTO_DESCRIPTION_PREFIX}{project}"
-
-
-def project_slug(row: dict) -> str | None:
-    """Recover the local slug of an `[AUTO]` Plane project, or None.
-
-    The description is the primary source; when it carries only the marker
-    (hand-edited, older convention), the prettified name is normalized back —
-    a lossy fallback, correct for every name `plane_project_name` produces.
-    """
-    description = str(row.get("description") or "").strip()
-    if not description.upper().startswith(AUTO_MARKER):
-        return None
-    remainder = description[len(AUTO_MARKER):].strip()
-    _, _, tail = remainder.partition(":")
-    slug = _normalized_name(tail if tail.strip() else str(row.get("name", "")))
-    return slug or None
-
-
-def _normalized_name(value: str) -> str:
-    return "-".join(re.findall(r"[a-z0-9]+", value.lower()))
-
-
-def _rows(payload: object) -> list[dict]:
-    if isinstance(payload, list):
-        return [row for row in payload if isinstance(row, dict)]
-    if isinstance(payload, dict) and isinstance(payload.get("results"), list):
-        return [row for row in payload["results"] if isinstance(row, dict)]
-    raise ProjectInitError("API response did not contain a result list")
 
 
 def _request_json(
@@ -166,59 +105,6 @@ def _request_json(
         return error.code, payload
     except (OSError, TimeoutError) as error:
         raise ProjectInitError(f"{method} {url} failed: {error}") from error
-
-
-def ensure_plane_project(config: PlaneConfig, project: str) -> dict:
-    base = (
-        f"{config.url}/api/v1/workspaces/{urllib.parse.quote(config.workspace, safe='')}"
-        "/projects"
-    )
-    headers = {"X-API-Key": config.api_key, "Content-Type": "application/json"}
-
-    def list_projects() -> list[dict]:
-        status, payload = _request_json("GET", f"{base}/?per_page=100", headers=headers)
-        if status != 200:
-            raise ProjectInitError(f"Plane project list returned HTTP {status}: {payload!r}")
-        return _rows(payload)
-
-    rows = list_projects()
-    wanted = _normalized_name(project)
-    if existing := next(
-        (row for row in rows if _normalized_name(str(row.get("name", ""))) == wanted), None
-    ):
-        return existing
-
-    used = {str(row.get("identifier", "")).upper() for row in rows}
-    base_identifier = plane_identifier(project)
-    for suffix in range(1, 101):
-        tail = "" if suffix == 1 else str(suffix)
-        identifier = f"{base_identifier[:12 - len(tail)]}{tail}"
-        if identifier in used:
-            continue
-        status, payload = _request_json(
-            "POST",
-            f"{base}/",
-            headers=headers,
-            body={
-                "name": plane_project_name(project),
-                "identifier": identifier,
-                "description": auto_description(project),
-            },
-            timeout=60,
-        )
-        if status in {200, 201} and isinstance(payload, dict):
-            return payload
-        if status in {409, 422}:
-            rows = list_projects()
-            if existing := next(
-                (row for row in rows if _normalized_name(str(row.get("name", ""))) == wanted),
-                None,
-            ):
-                return existing
-            used.update(str(row.get("identifier", "")).upper() for row in rows)
-            continue
-        raise ProjectInitError(f"Plane project create returned HTTP {status}: {payload!r}")
-    raise ProjectInitError("Plane identifier collision retries exhausted")
 
 
 def _gitea_headers(config: GiteaConfig) -> dict[str, str]:
@@ -411,9 +297,9 @@ def init_project(project: str, *, main_only: bool | None = None) -> str:
     they are. `main_only=False` on an existing main-only project is refused
     rather than turning the local record into a clone.
 
-    A workspace holding `README_PROJECT.md` is pattern-managed: its Plane
-    project is ensured (so its missions have a ledger to bind to) and nothing
-    else is touched — no Gitea repository, no clone, not even a folder. The
+    A workspace holding `README_PROJECT.md` is pattern-managed: its folders
+    were decided by the agent on the developer's request, and nothing here
+    touches them — no Gitea repository, no clone, not even a folder. The
     listener runs this on *every* serving, before the agent has read the
     request; without this gate a fresh pattern project would be scaffolded
     into the fixed layout before anyone asked for one.
@@ -425,7 +311,6 @@ def init_project(project: str, *, main_only: bool | None = None) -> str:
         )
     project_root = PROJECTS_ROOT / project
     if (project_root / PATTERN_MARKER).exists():
-        ensure_plane_project(load_plane_config(), project)
         return PATTERN_MANAGED_RESULT
     on_disk_main_only = is_main_only(project_root)
     if main_only is None:
@@ -435,9 +320,7 @@ def init_project(project: str, *, main_only: bool | None = None) -> str:
             f"{project} is a main-only project (devlog/ is a plain folder); "
             "refusing to turn it into a clone — re-run with --main-only"
         )
-    plane = load_plane_config()
     gitea = load_gitea_config()
-    ensure_plane_project(plane, project)
     repos = [(project, "main")]
     if not main_only:
         repos += [(f"{project}-direction", "direction"), (f"{project}-devlog", "devlog")]

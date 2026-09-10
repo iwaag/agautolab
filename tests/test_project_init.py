@@ -5,55 +5,11 @@ import pytest
 from agautolab import project_init
 
 
-def test_plane_identifier_is_readable_and_bounded():
-    assert project_init.plane_identifier("whack-a-mole") == "WAM"
-    assert project_init.plane_identifier("whack-a-mole-2") == "WAM2"
-    assert len(project_init.plane_identifier("one-two-three-four-five-six-seven-eight-nine")) <= 12
-    assert project_init.plane_project_name("whack-a-mole-2") == "Whack A Mole 2"
-
-
-def test_ensure_plane_project_reuses_normalized_name(monkeypatch):
-    calls = []
-    monkeypatch.setattr(
-        project_init,
-        "_request_json",
-        lambda *args, **kwargs: (
-            calls.append((args, kwargs)) or (200, {"results": [{"id": "p1", "name": "Whack A Mole", "identifier": "WAM"}]})
-        ),
-    )
-    result = project_init.ensure_plane_project(
-        project_init.PlaneConfig("http://plane", "key", "workspace"), "whack-a-mole"
-    )
-    assert result["id"] == "p1"
-    assert len(calls) == 1
-
-
-def test_ensure_plane_project_adds_suffix_on_identifier_collision(monkeypatch):
-    calls = []
-
-    def request(method, url, **kwargs):
-        calls.append((method, kwargs.get("body")))
-        if method == "GET":
-            return 200, {"results": [{"name": "Wild Active Meadow", "identifier": "WAM"}]}
-        return 201, {"id": "p2", **kwargs["body"]}
-
-    monkeypatch.setattr(project_init, "_request_json", request)
-    result = project_init.ensure_plane_project(
-        project_init.PlaneConfig("http://plane", "key", "workspace"), "whack-a-mole"
-    )
-    assert result["identifier"] == "WAM2"
-
-
 def test_init_project_runs_every_idempotent_step_in_order(monkeypatch, tmp_path):
     calls = []
-    plane = project_init.PlaneConfig("http://plane", "key", "workspace")
     gitea = project_init.GiteaConfig("http://gitea", "token", "autodev")
     monkeypatch.setattr(project_init, "PROJECTS_ROOT", tmp_path)
-    monkeypatch.setattr(project_init, "load_plane_config", lambda: plane)
     monkeypatch.setattr(project_init, "load_gitea_config", lambda: gitea)
-    monkeypatch.setattr(
-        project_init, "ensure_plane_project", lambda config, name: calls.append(("plane", name))
-    )
     monkeypatch.setattr(
         project_init, "ensure_gitea_repo", lambda config, name: calls.append(("repo", name))
     )
@@ -71,7 +27,6 @@ def test_init_project_runs_every_idempotent_step_in_order(monkeypatch, tmp_path)
     assert project_init.init_project("demo-project") == "success"
     # Every clone gets the same treatment: a `.gitignore` and nothing else.
     assert calls == [
-        ("plane", "demo-project"),
         ("repo", "demo-project"),
         ("clone", "demo-project", Path("demo-project/main")),
         ("gitignore", Path("demo-project/main")),
@@ -85,14 +40,9 @@ def test_init_project_runs_every_idempotent_step_in_order(monkeypatch, tmp_path)
 
 
 def wire_init(monkeypatch, tmp_path, calls):
-    plane = project_init.PlaneConfig("http://plane", "key", "workspace")
     gitea = project_init.GiteaConfig("http://gitea", "token", "autodev")
     monkeypatch.setattr(project_init, "PROJECTS_ROOT", tmp_path)
-    monkeypatch.setattr(project_init, "load_plane_config", lambda: plane)
     monkeypatch.setattr(project_init, "load_gitea_config", lambda: gitea)
-    monkeypatch.setattr(
-        project_init, "ensure_plane_project", lambda config, name: calls.append(("plane", name))
-    )
     monkeypatch.setattr(
         project_init, "ensure_gitea_repo", lambda config, name: calls.append(("repo", name))
     )
@@ -115,7 +65,6 @@ def test_init_project_main_only_clones_main_and_makes_devlog_a_plain_folder(monk
 
     assert project_init.init_project("rtnotes", main_only=True) == "success"
     assert calls == [
-        ("plane", "rtnotes"),
         ("repo", "rtnotes"),
         ("clone", "rtnotes", Path("rtnotes/main")),
         ("gitignore", Path("rtnotes/main")),
@@ -128,7 +77,7 @@ def test_init_project_main_only_clones_main_and_makes_devlog_a_plain_folder(monk
     # A runtime re-run passes no layout and must read main-only off the disk.
     calls.clear()
     assert project_init.init_project("rtnotes") == "success"
-    assert [call[0] for call in calls] == ["plane", "repo", "clone", "gitignore"]
+    assert [call[0] for call in calls] == ["repo", "clone", "gitignore"]
     assert not (tmp_path / "rtnotes" / "direction").exists()
 
 
@@ -181,18 +130,6 @@ def test_ensure_gitignore_appends_to_an_existing_file(monkeypatch, tmp_path):
         project_init.GiteaConfig("http://gitea", "token", "autodev"), tmp_path
     ) is True
     assert (tmp_path / ".gitignore").read_text(encoding="utf-8") == "dist/\n.local/\n"
-
-
-def test_auto_description_carries_marker_and_slug():
-    assert project_init.auto_description("whack-a-mole") == "[AUTO] autolab project: whack-a-mole"
-    assert project_init.project_slug({"description": "[AUTO] autolab project: whack-a-mole"}) == (
-        "whack-a-mole"
-    )
-    # Case-insensitive marker, and the prettified name as the fallback source.
-    assert project_init.project_slug(
-        {"description": "[auto]", "name": "Whack A Mole"}
-    ) == "whack-a-mole"
-    assert project_init.project_slug({"description": "hand made", "name": "ProjectA"}) is None
 
 
 @pytest.mark.parametrize("name", ["x", "Bad Name", "../escape", "-leading"])
@@ -297,13 +234,14 @@ def test_commit_all_and_push_leaves_a_clean_workspace_alone(monkeypatch, tmp_pat
     assert [args[0] for args in commands] == ["status"]
 
 
-def test_init_project_ensures_only_the_plane_project_of_a_pattern_managed_workspace(
+def test_init_project_touches_nothing_of_a_pattern_managed_workspace(
     monkeypatch, tmp_path
 ):
     """The listener runs this on every serving, before the agent reads anything.
 
-    A pattern project's folders stay the agent's, but its missions need a
-    ledger to bind to, so the Plane project is the one thing ensured here.
+    A pattern project's folders are the agent's, and since `refactor` p1
+    there is no ledger to register either — a mission's record is its own
+    conversation — so this whole call is a no-op with a name.
     """
     calls = []
     wire_init(monkeypatch, tmp_path, calls)
@@ -315,7 +253,7 @@ def test_init_project_ensures_only_the_plane_project_of_a_pattern_managed_worksp
     (workspace / project_init.PATTERN_MARKER).write_text("pattern-managed\n", encoding="utf-8")
 
     assert project_init.init_project("studyarxiv") == project_init.PATTERN_MANAGED_RESULT
-    assert calls == [("plane", "studyarxiv")]
+    assert calls == []
     assert sorted(p.name for p in workspace.iterdir()) == [project_init.PATTERN_MARKER]
 
 
@@ -328,7 +266,7 @@ def test_init_project_still_scaffolds_a_marked_project_that_lost_its_marker(monk
 
     assert project_init.init_project("studyarxiv") == "success"
     assert [call[0] for call in calls] == [
-        "plane", "repo", "clone", "gitignore", "repo", "clone", "gitignore",
+        "repo", "clone", "gitignore", "repo", "clone", "gitignore",
         "repo", "clone", "gitignore",
     ]
 
@@ -343,4 +281,4 @@ def test_init_project_pattern_marker_wins_over_an_existing_layout(monkeypatch, t
     calls.clear()
     (tmp_path / "demo-project" / project_init.PATTERN_MARKER).write_text("x", encoding="utf-8")
     assert project_init.init_project("demo-project") == project_init.PATTERN_MANAGED_RESULT
-    assert calls == [("plane", "demo-project")]
+    assert calls == []
