@@ -57,6 +57,7 @@ TASK_VALUE = re.compile(r"^(?P<mission>\d+)\s*#\s*(?P<serial>\d+)$")
 
 __all__ = [
     "DOC_TAG",
+    "EXTERNAL_STATES",
     "MISSION_TAG",
     "REPLACES_TAG",
     "STATE_TAG",
@@ -160,6 +161,18 @@ def parse_replaces(content) -> int | None:
         return None
 
 
+#: The two state words somebody **other than this bot** may write.
+#:
+#: Every other state is this agent's own report of its own work, and a note
+#: from another sender claiming it would be somebody moving work they did not
+#: do. These two are the opposite: `accepted` and `done` are a *person*
+#: accepting the work, and the person accepts it from the operation room, with
+#: their own credential (`agentroom.close`). Read them from anyone or the
+#: acceptance never arrives — which is what `refactor` p1 step 4 met live, the
+#: room's own write invisible to the record it was written into.
+EXTERNAL_STATES = ("accepted", "done")
+
+
 def state_note(state: str) -> str:
     """`[selfnote][state] <word>` — where this work has got to.
 
@@ -240,5 +253,15 @@ def own_doc(messages, self_id: int) -> int | None:
 
 
 def own_state(messages, self_id: int) -> str | None:
-    """Where this work has got to, per its newest state note."""
-    return _newest(messages, self_id, parse_state)
+    """Where this work has got to, per its newest state note.
+
+    This bot's own notes, plus anyone's `accepted`/`done` — see
+    `EXTERNAL_STATES` for why the second half is not a hole.
+    """
+    for message in reversed(list(messages)):
+        state = parse_state(message.get("content"))
+        if state is None:
+            continue
+        if message.get("sender_id") == self_id or state in EXTERNAL_STATES:
+            return state
+    return None

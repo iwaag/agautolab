@@ -270,3 +270,36 @@ def test_the_read_back_is_the_plan_and_the_live_tasks(realm, tmp_path, monkeypat
 
 def test_nothing_is_read_back_before_a_plan_exists(realm, tmp_path):
     assert worklog.write_mission_workspace(realm, tmp_path, CHANNEL, TOPIC, BOT_ID) is False
+
+
+# --- acceptance, written by somebody else ----------------------------------
+
+
+def test_a_state_note_from_another_sender_counts_only_for_acceptance(realm):
+    """`refactor` p1 step 4 met this live: the operation room accepts a
+    request with the **human's** credential, and the note it wrote into the
+    mission's own topic was invisible to the record it was written into.
+
+    `accepted` and `done` are a person's word by definition, so they are read
+    from anyone. Everything else is this agent reporting its own work, and a
+    note from another sender claiming it is somebody moving work they did not
+    do — still ignored.
+    """
+    _, mission = plan(realm)
+    realm.post(CHANNEL, TOPIC, "[selfnote][state] cancelled", sender_id=HUMAN_ID)
+    assert worklog.read_mission(realm, CHANNEL, TOPIC, BOT_ID).state == (
+        worklog.MISSION_PLANNED)
+
+    realm.post(CHANNEL, TOPIC, "[selfnote][state] done", sender_id=HUMAN_ID)
+    assert worklog.read_mission(realm, CHANNEL, TOPIC, BOT_ID).state == worklog.MISSION_DONE
+
+
+def test_a_task_accepted_by_somebody_else_satisfies_the_gate(realm):
+    _, mission = plan(realm)
+    realm.add_channel(mission.work_channel)
+    topic = worklog.run_topic_name(mission.mission_id, 1)
+    worklog.anchor_task(realm, mission.work_channel, topic, mission.mission_id, 1, BOT_ID)
+    realm.post(mission.work_channel, topic, "[selfnote][state] accepted", sender_id=HUMAN_ID)
+
+    task = worklog.read_task(realm, mission.work_channel, topic, BOT_ID)
+    assert task.state == worklog.TASK_ACCEPTED and task.finished
