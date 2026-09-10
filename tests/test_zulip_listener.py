@@ -2223,3 +2223,80 @@ def test_two_missions_keep_their_own_selections(monkeypatch, tmp_path):
         CHANNEL, "workplan-two",
     )
     assert [selection.option for selection in seen] == ["agy", None]
+
+
+# --- derived usage pools (agag.execpool, refactor p3 ex1 step 3) -----------
+
+import tomllib as _tomllib  # noqa: E402
+
+from agag import execpool  # noqa: E402
+from agag.agent_config import load_config as _load_config  # noqa: E402
+
+
+def _real_config():
+    return _load_config(instance.SPEC.agents_config, instance.SPEC.agents_local_config)
+
+
+def test_the_named_options_resolve_to_the_pools_they_declare():
+    """A declaration is an assertion, and this is that assertion checked.
+
+    The named options depend only on the committed `agents.toml` — an
+    overlay moves *roles*, not the option-to-profile mapping — so this is
+    deterministic on any machine that can read the config.
+    """
+    declared = {o.name: o.pool for o in instance.SPEC.exec_options_with_default()}
+    published = {o.name: o.pool for o in instance.SPEC.published_options("Autolab").options}
+    assert set(declared) == set(published)
+    for name, pool in declared.items():
+        if name != "default":
+            assert published[name] == pool, name
+
+
+def test_the_default_is_priced_from_the_roles_this_machine_will_run():
+    assert instance.SPEC.published_options("Autolab").get("default").pool not in ("", "-")
+
+
+def test_every_covered_role_is_a_role_this_agent_has_configured():
+    """`exec_roles` is what the pool is derived from, so a name that is not a
+    role would silently price the menu from nothing."""
+    config, _ = _real_config()
+    for role in instance.SPEC.exec_roles:
+        assert role in config["roles"], role
+
+
+def test_a_role_moved_in_the_overlay_moves_the_derived_default(tmp_path):
+    """The failure the derivation exists for, on this agent's own roles.
+
+    One line in a machine's `agents.local.toml` sends `supercoder` to another
+    harness. Before `refactor` p3 ex1 the published default kept saying
+    `anthropic`; now it follows, and the stale declaration is named.
+    """
+    config, _ = _real_config()
+    overlay = _tomllib.loads(
+        'schema = "ag.agent-config.v2"\n[roles.supercoder]\nprofile = "agy"\n'
+    )
+    found = execpool.derive(
+        None, instance.SPEC.exec_roles, config, overlay, instance.SPEC.profile_for
+    )
+    assert execpool.JOIN in found.pool and "antigravity" in found.pool
+    declared = instance.SPEC.exec_options_with_default()[0]
+    lines = execpool.diagnose([declared], [found])
+    assert len(lines) == 1 and "supercoder -> agy/agy (antigravity)" in lines[0]
+
+
+def test_an_unavailable_harness_is_not_reported_as_a_wrong_declaration(monkeypatch):
+    """Availability is a runtime fact. A CLI that is not installed makes that
+    one option fail when it runs; it must not read as a broken contract, and
+    it must not take an unrelated conversation down."""
+    real = execpool.resolve_role
+
+    def flaky(config, overlay, role, *, profile_override=None, check_available=True):
+        if check_available:
+            raise execpool.AgentConfigError("E_UNAVAILABLE", "nothing is installed")
+        return real(config, overlay, role, profile_override=profile_override,
+                    check_available=False)
+
+    monkeypatch.setattr(execpool, "resolve_role", flaky)
+    published = instance.SPEC.published_options("Autolab")
+    assert published.get("default").pool not in ("", "-")
+    assert instance.SPEC.pool_diagnostics() == ()

@@ -75,6 +75,11 @@ PUBLIC_PROFILES = (
 #: supercoder that does a task, the director that mines. Auxiliary roles do
 #: not quietly stay on another pool, so there is no exception to explain.
 COVERS = "my entrance, mission planning, task work and brain-mining"
+#: The four roles that sentence is about, in the order a reader meets them,
+#: and the roles the published pool is **derived** from (`agag.execpool`).
+#: `mediator`, `coding` and `summarizer` are configured but no live serving
+#: launches them, so they are not covered and not derived from.
+EXEC_ROLES = ("front", "superdirector", "supercoder", "director")
 #: What running under no selection costs, published like any other option:
 #: a condition of the form "until the pool is N % used" cannot be judged
 #: against a menu whose default declines to name a pool.
@@ -126,6 +131,7 @@ SPEC = AgentSpec(
     extra_prefixes=(BMINING_TOPIC_PREFIX,),
     extra_environment=extra_environment,
     exec_options=exec_options(),
+    exec_roles=EXEC_ROLES,
 )
 
 __all__ = [
