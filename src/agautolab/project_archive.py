@@ -157,15 +157,26 @@ def archive_zulip_folder(client: ZulipClient, project: str) -> str:
     are retired one Work at a time, so a folder that is not yet empty is
     reported as `kept` rather than failed — running this again once the
     last work channel is gone finishes the job.
+
+    **An archived channel keeps its folder** (`refactor` p3 ex1). It is not
+    in `client.channels()`, so a folder holding nothing but retired channels
+    looks empty here and Zulip still answers 400 — which is how six orphaned
+    folders accumulated, one per archived project, without anybody seeing an
+    error. So every channel filed in the folder is taken out of it first,
+    archived ones included, and only then is the folder archived.
     """
     name = project_channel(project)
     folder = client.channel_folder_by_name(name)
     if folder is None:
         return ABSENT
     folder_id = int(folder["id"])
-    if any(row.get("folder_id") == folder_id for row in client.channels()):
+    filed = [row for row in client.channels(include_archived=True)
+             if row.get("folder_id") == folder_id]
+    if any(not row.get("is_archived") for row in filed):
         return KEPT
     try:
+        for row in filed:
+            client.clear_channel_folder(int(row["stream_id"]))
         client.archive_channel_folder(folder_id)
     except ZulipError as error:
         raise ProjectArchiveError(f"Zulip folder archive failed for {name}: {error}") from error

@@ -11,15 +11,25 @@ GITEA = project_archive.GiteaConfig("http://gitea", "token", "autodev")
 class FakeClient:
     """A ZulipClient stand-in with one archivable channel."""
 
-    def __init__(self, channels, error=None, folders=()):
+    def __init__(self, channels, error=None, folders=(), archived_channels=()):
         self._channels = channels
+        self._archived_channels = [
+            {**row, "is_archived": True} for row in archived_channels
+        ]
         self._error = error
         self._folders = list(folders)
         self.archived = []
         self.archived_folders = []
+        self.cleared_folders = []
 
-    def channels(self):
+    def channels(self, *, include_archived=False):
+        if include_archived:
+            return self._channels + self._archived_channels
         return self._channels
+
+    def clear_channel_folder(self, stream_id):
+        self.cleared_folders.append(stream_id)
+        return {"result": "success"}
 
     def archive_channel(self, stream_id):
         if self._error is not None:
@@ -78,11 +88,22 @@ def test_archive_zulip_channel_raises_when_the_bot_may_not_administer_it():
 
 
 def test_archive_zulip_folder_retires_an_emptied_folder():
+    """An archived channel keeps its `folder_id`, so it is cleared first.
+
+    `refactor` p3 ex1: Zulip counts a retired channel as still filed, and
+    answers 400 to a folder archive while one is there — so the folder looked
+    empty in `channels()` and six of them piled up unarchived.
+    """
     folders = [{"id": 4, "name": "pj-spike"}]
     # The project channel is already archived and gone from the listing;
     # only unrelated channels remain.
-    client = FakeClient([{"name": "general", "stream_id": 3, "folder_id": None}], folders=folders)
+    client = FakeClient(
+        [{"name": "general", "stream_id": 3, "folder_id": None}],
+        folders=folders,
+        archived_channels=[{"name": "pj-spike", "stream_id": 9, "folder_id": 4}],
+    )
     assert project_archive.archive_zulip_folder(client, "spike") == ARCHIVED
+    assert client.cleared_folders == [9]
     assert client.archived_folders == [4]
     assert project_archive.archive_zulip_folder(FakeClient([]), "spike") == ABSENT
 

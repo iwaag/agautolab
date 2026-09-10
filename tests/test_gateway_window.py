@@ -37,7 +37,13 @@ def test_answer_window_passes_text_through_and_persists_record(monkeypatch, tmp_
     assert saved["reply"] == "front reply"
 
 
-def test_guide_route_is_gone_and_retained_routes_still_answer(monkeypatch, tmp_path):
+def test_only_the_window_and_healthz_answer(monkeypatch, tmp_path):
+    """The stub surface is gone; the entrance and the liveness probe are not.
+
+    `refactor` p3 ex1 deleted `/status`, `/log`, `/jobs…`, `/projects`,
+    `/game` and `/monitor`: they existed for `agdevworld`'s deleted
+    `autolab / now` view and answered nobody else.
+    """
     gateway = load_gateway()
     gateway.WINDOW = tmp_path / "window"
     monkeypatch.setattr(
@@ -56,13 +62,10 @@ def test_guide_route_is_gone_and_retained_routes_still_answer(monkeypatch, tmp_p
     try:
         with urllib.request.urlopen(f"{base}/healthz") as response:
             assert json.load(response) == {"ok": True}
-        with urllib.request.urlopen(f"{base}/status") as response:
-            assert json.load(response)["type"] == "status"
-        with urllib.request.urlopen(f"{base}/jobs") as response:
-            assert json.load(response)["type"] == "jobs"
-        with pytest.raises(urllib.error.HTTPError) as error:
-            urllib.request.urlopen(f"{base}/guide")
-        assert error.value.code == 404
+        for gone in ("/status", "/log", "/jobs", "/projects", "/game", "/monitor", "/guide"):
+            with pytest.raises(urllib.error.HTTPError) as error:
+                urllib.request.urlopen(f"{base}{gone}")
+            assert error.value.code == 404, gone
         request = urllib.request.Request(
             f"{base}/window",
             data=json.dumps({"text": "hello"}).encode(),

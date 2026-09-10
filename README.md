@@ -1,17 +1,20 @@
 # agautolab
 
-agautolab is being rebuilt as a small chat-driven project and mission
-registration service. The old headless development loop was deleted
-(`discard_garbage` episode, `pj-agdev/devdocs/episodes/`); its empty read-side
-surface remains for existing consumers while the new path is added.
+agautolab is a small chat-driven project and mission registration service.
+The old headless development loop was deleted (`discard_garbage` episode,
+`pj-agdev/devdocs/episodes/`), and the empty read-side surface it left behind
+went with its last consumer in `refactor` p3 ex1.
 
 What is kept is what was worth keeping — this node's input/output surface and
 its agent configuration:
 
 - **The gateway** (`agent/gateway.py`, default `:8791`). `POST /window` runs
-  the real front agent with the request text unchanged. Existing `/status`,
-  `/jobs`, and `/projects` consumers retain their response surfaces; the
-  removed loop's read-side documents remain marked `"stub": true`.
+  the real front agent with the request text unchanged, and `GET /healthz` is
+  the deployment's liveness probe. Nothing else: the stub `/status`, `/log`,
+  `/jobs…`, `/projects`, `/game` and `/monitor` routes were kept alive for
+  `agdevworld`'s `autolab / now` view, which `refactor` p3 ex1 deleted, so
+  they were deleted with it. This window is *the node's*; development work is
+  asked for in the Zulip channel below.
 - **The chat entrance** (`src/agautolab/listener.py` — `agag.agent.listener_main`
   over autolab's `SPEC`, routing to the handlers in `zulip_listener.py`;
   `agag_builder` p2): `workplan-*`
@@ -130,8 +133,8 @@ its agent configuration:
   the offered agcode tool set for the `local` profile — `director` and
   `summarizer` get `--tools read-only`, everyone else the full four.
 
-Role resolution and execution are live: `GET /projects` and every window
-answer resolve through `ag.agent-config.v1`, so a broken profile, missing
+Role resolution and execution are live: every window answer and every listener
+serving resolve through `ag.agent-config.v1`, so a broken profile, missing
 harness, or project selection fails loudly. Front and mediator runs use their
 dedicated uv workspace directories.
 
