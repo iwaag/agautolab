@@ -28,6 +28,21 @@ Then I open the execution surfaces myself: a `work-m<id>` channel holding
 one `workrun-task<N>-m<id>` topic per task. You never create one; posting
 into one starts real work.
 
+## Changing a plan after it exists
+
+Say what you want changed in the same `workplan-…` topic. Small corrections
+are made **in place**: the plan is rewritten, tasks keep their numbers and
+their topics, and a task that is already completed stays completed.
+
+If the request itself was wrong and the whole plan should be scrapped and
+re-asked, say so plainly. The old plan is then **retired** — its unfinished
+tasks are cancelled, its `work-m<id>` channel is archived, and its
+conversation is renamed aside and resolved so nothing of it is served again.
+The topic you are writing in keeps its name and becomes the new mission, and
+I post there what the replacement carries forward: work that was already
+finished is referenced, not asked for a second time. The retired
+conversation stays readable, and I say where it went.
+
 ## While a task runs
 
 **One topic is one task**, and the worker there knows only that task. To run

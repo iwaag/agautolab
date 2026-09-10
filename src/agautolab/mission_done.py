@@ -37,6 +37,7 @@ from .instance import PROJECT_CHANNEL_PREFIX, SPEC, WORKPLAN_TOPIC_PREFIX
 from .worklog import (
     MISSION_CANCELLED,
     MISSION_DONE,
+    MISSION_REPLACED,
     Mission,
     Task,
     WorklogError,
@@ -81,11 +82,21 @@ def reason_not_finished(mission: Mission, tasks: list[Task]) -> str | None:
     against the conversations: a mission with no live task never ran, a
     mission with an unfinished task is still running, and a cancelled mission
     is not something to finish.
+
+    A **replaced** mission is the fourth (`refactor` p2), and it is the one
+    that could otherwise be closed by accident: retiring a mission cancels
+    its unfinished tasks and `mission_tasks` filters cancelled tasks out, so
+    what is left of a replaced mission is exactly the tasks that *did*
+    finish — a mission that counts as complete and never was. The state note
+    is what says so; the retired topic's name is not consulted, because a
+    name is not a fact about work.
     """
     if mission.state == MISSION_DONE:
         return ALREADY_DONE
     if mission.state == MISSION_CANCELLED:
         return "it is cancelled"
+    if mission.state == MISSION_REPLACED:
+        return "it was replaced, and its replacement is the work to finish"
     if not tasks:
         return "it has no task, so there is nothing that could have finished"
     unfinished = [task for task in tasks if not task.finished]

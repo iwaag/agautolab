@@ -22,6 +22,7 @@ and never counted as somebody speaking, so writing one never buys a run:
     [selfnote][task] <mission id>#<serial>  in a workrun- topic
     [selfnote][doc] <message id>            the visible document that is current
     [selfnote][state] <state word>          the newest one wins
+    [selfnote][replaces] <anchor id>        the work this one was opened to replace
 
 ## Identity is a message id, not a name
 
@@ -38,6 +39,28 @@ new topic of the same name is a different task, because the anchor is a
 different message; and a deleted anchor is **absent** — not the new work that
 happens to be called what the old work was called.
 
+## Replacing work that re-planning cannot fix
+
+Re-planning rewrites a mission in place: the serials keep their topics and a
+completed task stays completed. `refactor` p2 adds the other move, for when
+the request itself was wrong — **retire this conversation and open its
+replacement**. Retiring is two Zulip operations on the old topic, and both
+are deliberate: it is renamed out of the `workplan-`/`workrun-` vocabulary,
+so no listener matches it any more, and it is resolved, so no sweep looks at
+it at all. Its unfinished tasks are cancelled and resolved and its work
+channel is archived, which is how retired work leaves the execution queue.
+
+The replacement then takes the freed display name and says what it is:
+`[selfnote][replaces] <old anchor id>`, and a visible post listing what it
+carries forward (the tasks that were finished — referenced, not recreated as
+finished rows) and what it drops. The link is an id because the name now
+belongs to the replacement.
+
+Retiring does not interrupt anything. The listener serves one topic at a
+time, so a replacement decided while a task is running is applied after that
+run returns, and a run already under way finishes against the work it
+started on. Forced interruption is out of scope.
+
 ## The four states, and why they are four
 
 `open` → `completed` → `accepted` for a task, with `cancelled` off to one
@@ -49,7 +72,10 @@ side. They are deliberately not collapsed:
   in the operation room and not in the task's own topic.
 - resolving the topic (Zulip's `✔ `) is neither: it closes the conversation.
 
-A mission's own states are `planned`, `started`, `cancelled` and `done`.
+A mission's own states are `planned`, `started`, `cancelled`, `replaced` and
+`done`. `replaced` is not a kind of `cancelled`: the work was not called off,
+it was re-asked somewhere else, and the somewhere else is discoverable from
+the replacement's own `replaces` note.
 
 ## What is not here any more
 
@@ -80,8 +106,10 @@ from .anchor import (
     mission_note,
     own_doc,
     own_mission,
+    own_replaces,
     own_state,
     own_task,
+    replaces_note,
     state_note,
     task_note,
 )
@@ -107,6 +135,8 @@ TASK_FINISHED = (TASK_COMPLETED, TASK_ACCEPTED)
 MISSION_PLANNED = "planned"
 MISSION_STARTED = "started"
 MISSION_CANCELLED = "cancelled"
+#: The mission was re-asked as another conversation, which names this one.
+MISSION_REPLACED = "replaced"
 MISSION_DONE = "done"
 
 __all__ = [
@@ -114,8 +144,10 @@ __all__ = [
     "MISSION_CANCELLED",
     "MISSION_DONE",
     "MISSION_PLANNED",
+    "MISSION_REPLACED",
     "MISSION_STARTED",
     "Mission",
+    "Replacement",
     "Task",
     "TaskChange",
     "TASK_ACCEPTED",
@@ -135,10 +167,16 @@ __all__ = [
     "mission_tasks",
     "plan_changes",
     "post_document",
+    "predecessor",
     "read_mission",
     "read_task",
     "record_plan",
     "record_result",
+    "replace_mission",
+    "replacement_summary",
+    "retire_conversation",
+    "retire_task",
+    "retired_topic_name",
     "run_topic_name",
     "set_mission_state",
     "set_task_state",
@@ -260,6 +298,9 @@ class Mission:
     #: The plan as the superdirector wrote it, `# title` heading and all.
     plan: str = ""
     state: str = MISSION_PLANNED
+    #: The anchor id of the mission this one was opened to replace, if any.
+    #: An id and not a name, because this mission usually took that one's name.
+    replaces: int | None = None
 
     @property
     def label(self) -> str:
@@ -289,6 +330,8 @@ class Task:
     #: The executable description, `# title` heading and all.
     document: str = ""
     state: str = TASK_OPEN
+    #: The anchor id of the task this one reworks, if any (a rerun topic).
+    replaces: int | None = None
 
     @property
     def title(self) -> str:
@@ -320,6 +363,7 @@ def read_mission(client: ZulipClient, channel: str, topic: str, self_id: int) ->
         bare_topic(topic),
         _document_from(history, self_id),
         own_state(history, self_id) or MISSION_PLANNED,
+        own_replaces(history, self_id),
     )
 
 
@@ -339,6 +383,7 @@ def read_task(client: ZulipClient, channel: str, topic: str, self_id: int) -> Ta
         bare_topic(topic),
         _document_from(history, self_id),
         own_state(history, self_id) or TASK_OPEN,
+        own_replaces(history, self_id),
     )
 
 
@@ -535,6 +580,229 @@ def cancel_tasks(client: ZulipClient, tasks: dict[int, Task]) -> int:
         set_task_state(client, task, TASK_CANCELLED)
         moved += 1
     return moved
+
+
+# --- retiring a conversation and opening its replacement -------------------
+#
+# Re-planning is the cheap revision and it happens in place. This is the
+# expensive one: the request itself was wrong, so the conversation that
+# carried it is retired and a new one is opened in its place.
+#
+# Retirement is not deletion and not cancellation. The retired conversation
+# keeps every message it ever held and stays reachable through its anchor;
+# what it gives up is its **display name** and its place in the execution
+# queue.
+
+#: What a retired conversation is renamed to. The `workplan-`/`workrun-`
+#: prefix is gone, so no listener's topic filter matches it any more, and the
+#: label keeps two retirements of the same name apart — a label is an anchor
+#: id, so it is unique by construction.
+RETIRED_TOPIC_PREFIX = "retired-"
+
+
+def retired_topic_name(topic: str, label: str) -> str:
+    """`retired-workplan-trend-m5512` — where a retired conversation goes."""
+    return f"{RETIRED_TOPIC_PREFIX}{bare_topic(topic)}-{label}"
+
+
+def retire_conversation(client: ZulipClient, channel: str, topic: str, label: str) -> str:
+    """Rename a conversation out of the queue and resolve it. Returns its name.
+
+    One rename does both, because Zulip's resolve *is* a rename: the new name
+    is `\u2714 retired-<old name>-<label>`. Two things are true of it and both
+    are needed —
+
+    - it no longer starts with a prefix any listener sweeps, so even an
+      unresolved read of it matches nothing;
+    - it is resolved, so `sweep_topics` never even reads it.
+
+    Renaming also **releases the old display name**, which the replacement
+    then takes. That ordering is not a preference: Zulip has one topic per
+    name in a channel, so a replacement created first would merge into the
+    conversation it was meant to replace.
+
+    A conversation with no messages cannot be renamed — there is nothing to
+    PATCH — and is already nothing to serve, so its name is returned unchanged.
+    """
+    live = live_topic_name(client, channel, topic)
+    try:
+        tail = client.topic_history(channel, live, num_before=1)
+    except ZulipError as error:
+        raise WorklogError(f"could not read {channel}/{live} to retire it: {error}") from error
+    if not tail:
+        return live
+    retired = retired_topic_name(topic, label)
+    if not retired.startswith(RESOLVED_TOPIC_PREFIX):
+        retired = f"{RESOLVED_TOPIC_PREFIX}{retired}"
+    client.rename_topic(int(tail[-1]["id"]), retired)
+    return retired
+
+
+RETIRED_BY_REPLACEMENT = (
+    "This task was not finished when its mission was replaced, so it is "
+    "cancelled here. The replacement conversation says what carries forward."
+)
+
+
+def retire_task(client: ZulipClient, task: Task) -> str:
+    """Take one unfinished task out of the queue. One report line.
+
+    Cancelled and resolved, which is the same retirement the planner already
+    performs on a task a re-plan dropped. The topic is *not* renamed: a task
+    topic's name is minted from its mission's anchor id, so no later work can
+    ever want it, and a late callback still has to find this conversation
+    under the name it was delegated from.
+    """
+    live = live_topic_name(client, task.channel, task.topic)
+    message_id = client.send_to_channel(task.channel, live, RETIRED_BY_REPLACEMENT)
+    set_task_state(client, task, TASK_CANCELLED)
+    client.resolve_topic(int(message_id), live)
+    return f"cancelled and resolved {task.channel}/{task.topic}"
+
+
+@dataclass(frozen=True)
+class Replacement:
+    """One mission retired, one opened in its place, and what moved."""
+
+    retired: Mission
+    #: Where the retired conversation is now — its resolved, renamed topic.
+    retired_topic: str
+    #: The new mission. Its `replaces` names `retired.mission_id`.
+    mission: Mission
+    #: Tasks that were finished and are referenced rather than repeated.
+    carried: tuple[Task, ...] = ()
+    #: Tasks that were unfinished and were cancelled with the old mission.
+    dropped: tuple[Task, ...] = ()
+
+
+def _task_reference(task: Task) -> str:
+    title = task.title or f"task {task.serial}"
+    return f"- task {task.serial} \u201c{title}\u201d \u2014 {task.channel}/{task.topic}"
+
+
+def replacement_summary(replacement: Replacement, reason: str = "") -> str:
+    """The visible post that says what a replacement carries and what it drops.
+
+    Prose, because it is what a human reads to understand why the topic they
+    were talking in became a different mission. The machine-readable half is
+    the `[selfnote][replaces]` note; this is the half with the reasons in it.
+    """
+    retired = replacement.retired
+    lines = [
+        f"# Replacing mission {retired.label}",
+        "",
+        f"The previous plan for this request is retired. Its conversation is "
+        f"`{retired.channel}/{replacement.retired_topic}` and its work channel "
+        f"`{retired.work_channel}` is archived; this topic is now mission "
+        f"{replacement.mission.label}.",
+    ]
+    if reason.strip():
+        lines += ["", reason.strip()]
+    if replacement.carried:
+        lines += [
+            "",
+            "**Carried forward.** These tasks were finished before the "
+            "replacement and are not repeated here; the new plan should build "
+            "on them rather than re-ask for them:",
+            *[_task_reference(task) for task in replacement.carried],
+        ]
+    else:
+        lines += ["", "**Carried forward.** Nothing: no task of the retired "
+                  "mission had been finished."]
+    if replacement.dropped:
+        lines += [
+            "",
+            "**Dropped.** These tasks were unfinished and were cancelled with "
+            "the mission they belonged to:",
+            *[_task_reference(task) for task in replacement.dropped],
+        ]
+    return "\n".join(lines)
+
+
+def replace_mission(
+    client: ZulipClient, mission: Mission, self_id: int, reason: str = "",
+    mention: str = "",
+) -> Replacement:
+    """Retire `mission` and open its replacement under the name it frees.
+
+    In this order, and the order is the workflow:
+
+    1. every unfinished task is cancelled and resolved, and the finished ones
+       are read out to be carried forward by reference;
+    2. the mission is marked `replaced` and its work channel archived — from
+       here nothing of the old mission is in anybody's queue;
+    3. its conversation is renamed out of the `workplan-` vocabulary and
+       resolved, which releases the display name;
+    4. the replacement is opened under that freed name, with its own mission
+       anchor, a `[selfnote][replaces]` note naming the retired anchor, and a
+       visible post saying what it carries and what it drops.
+
+    The caller then plans into the returned mission's conversation exactly as
+    it would into a fresh one: it is a fresh one, with a predecessor.
+    """
+    tasks = mission_tasks(client, mission, self_id)
+    carried = tuple(tasks[serial] for serial in sorted(tasks) if tasks[serial].finished)
+    dropped = tuple(
+        tasks[serial] for serial in sorted(tasks)
+        if not tasks[serial].finished and tasks[serial].state != TASK_CANCELLED
+    )
+    for task in dropped:
+        retire_task(client, task)
+    set_mission_state(client, mission, MISSION_REPLACED)
+    archived = _archive_work_channel(client, mission)
+    log(f"retiring mission {mission.label}: {archived}")
+
+    freed = mission.topic
+    retired_topic = retire_conversation(client, mission.channel, mission.topic, mission.label)
+
+    anchor = client.send_to_channel(mission.channel, freed, mission_note(mission.slug))
+    client.send_to_channel(mission.channel, freed, replaces_note(mission.mission_id))
+    replacement = Mission(
+        int(anchor), mission.slug, mission.channel, freed,
+        state=MISSION_PLANNED, replaces=mission.mission_id,
+    )
+    result = Replacement(mission, retired_topic, replacement, carried, dropped)
+    summary = replacement_summary(result, reason)
+    client.send_to_channel(
+        mission.channel, freed, f"{mention}\n\n{summary}" if mention else summary
+    )
+    return result
+
+
+def _archive_work_channel(client: ZulipClient, mission: Mission) -> str:
+    """Archive a retired mission's `work-` channel, if it has one.
+
+    An archived channel leaves every subscription list, so its `workrun-`
+    topics leave the sweep whether or not each one was resolved. That is the
+    coarse half of "retired work leaves the execution queue"; cancelling the
+    tasks first is the half that is still true if the archive fails.
+    """
+    name = mission.work_channel
+    try:
+        existing = next(
+            (row for row in client.channels() if str(row.get("name")) == name), None
+        )
+    except ZulipError as error:
+        return f"could not look for {name}: {error}"
+    if not existing or existing.get("stream_id") is None:
+        return f"no {name} channel to archive"
+    try:
+        client.archive_channel(int(existing["stream_id"]))
+    except ZulipError as error:
+        return f"could not archive {name}: {error}"
+    return f"archived {name}"
+
+
+def predecessor(client: ZulipClient, mission: Mission, self_id: int) -> Mission | None:
+    """The mission this one replaced, or None.
+
+    None covers both "this mission replaced nothing" and "the mission it
+    replaced has been deleted". A caller must not fall back to the topic name
+    for the second case: this mission is very probably wearing that name.
+    """
+    if mission.replaces is None:
+        return None
+    return mission_at(client, mission.replaces, self_id)
 
 
 # --- reconciling a fresh plan against the tasks that exist -----------------

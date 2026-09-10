@@ -11,7 +11,13 @@ the record is shaped the way it is:
   channel, which is what makes an id usable as an anchor;
 - **a deleted message is gone**, and a topic of the same name is not it.
 
-`Realm` does all three. What it deliberately does *not* model is markdown
+`refactor` p2 adds the fourth, which is what replacement is built on:
+
+- **a topic can be renamed**, which moves every message in it and *releases
+  the name* for whatever is opened next — and an archived channel leaves
+  every subscription, so nothing in it is swept any more.
+
+`Realm` does all of them. What it deliberately does *not* model is markdown
 rendering, permissions or ordering subtleties — nothing under test depends on
 them.
 """
@@ -69,7 +75,11 @@ class Realm:
     def delete(self, message_id: int) -> None:
         self.messages.pop(int(message_id), None)
 
-    def rename_topic(self, channel: str, topic: str, new_name: str) -> None:
+    def move_topic(self, channel: str, topic: str, new_name: str) -> None:
+        """Rename a topic in place. Messages already under `new_name` stay
+        where they are and the two conversations merge — which is Zulip's
+        behaviour, and the reason a name must be released before it is
+        claimed."""
         for message in self.messages.values():
             if message["display_recipient"] == channel and message["subject"] == topic:
                 message["subject"] = new_name
@@ -107,7 +117,7 @@ class Realm:
 
     def stream_id(self, name: str) -> int:
         self.calls += 1
-        if name not in self.streams:
+        if name not in self.streams or name in self.archived:
             from agag.zulip import ZulipError
 
             raise ZulipError(f"no such channel {name}")
@@ -126,7 +136,10 @@ class Realm:
 
     def channels(self) -> list[dict]:
         self.calls += 1
-        return [dict(row) for row in self.channel_rows.values()]
+        return [
+            dict(row) for name, row in self.channel_rows.items()
+            if name not in self.archived
+        ]
 
     def channel_subscribers(self, stream_id: int) -> list[int]:
         self.calls += 1
@@ -145,9 +158,24 @@ class Realm:
         self.archived.append(name)
         return {"result": "success"}
 
+    def rename_topic(self, message_id: int, new_name: str) -> None:
+        self.calls += 1
+        message = self.messages[int(message_id)]
+        self.move_topic(message["display_recipient"], message["subject"], new_name)
+
     def resolve_topic(self, message_id: int, topic: str) -> None:
         self.calls += 1
         if topic.startswith(RESOLVED_TOPIC_PREFIX):
             return
         channel = self.messages[int(message_id)]["display_recipient"]
-        self.rename_topic(channel, topic, f"{RESOLVED_TOPIC_PREFIX}{topic}")
+        self.move_topic(channel, topic, f"{RESOLVED_TOPIC_PREFIX}{topic}")
+
+    def subscriptions(self) -> list[dict]:
+        """What the sweep walks. An archived channel is not in it — which is
+        how a whole mission's worth of `workrun-` topics leaves the queue in
+        one operation."""
+        self.calls += 1
+        return [
+            dict(row) for name, row in self.channel_rows.items()
+            if name not in self.archived
+        ]

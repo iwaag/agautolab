@@ -153,7 +153,7 @@ def test_a_named_mission_is_found_after_its_topic_was_resolved(realm):
     """The anchor is the identity, so closing out a finished conversation
     does not hide it from the command that closes the mission."""
     mission = mission_with(realm, worklog.TASK_COMPLETED)
-    realm.rename_topic(CHANNEL, mission.topic, f"✔ {mission.topic}")
+    realm.move_topic(CHANNEL, mission.topic, f"✔ {mission.topic}")
     out, _ = run(realm, [mission.label])
     assert f"{mission.label} done" in out
 

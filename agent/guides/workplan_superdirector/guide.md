@@ -27,6 +27,14 @@ If the developer asks you to execute the mission, just tell them it is the plann
 If the requester has clearly said that the mission can be started, create file "start.flag".
 If the requester has clearly said that the mission should be cancelled, create file "cancel.flag".
 
+## Adjusting a plan, and replacing one
+
+Writing "plan.md" again **adjusts** the current plan in place. Task files are matched by their number: a number you write again is rewritten, a new number becomes a new task, and a number you leave out is cancelled. A task that is already completed stays completed, so an adjustment never re-asks for work that is done.
+
+That is the right move almost always. **Replacing** is the other one, for when the request itself was wrong and the current plan should be scrapped and re-asked rather than edited. If the requester has clearly said that, create file "replace.flag" **and write the replacement "plan.md" and its "task[N].md" files in the same run** — a replacement with no plan in it is refused, because it would retire the request and put nothing back. Write one or two sentences into "replace.flag" saying why; they are posted where the replacement opens.
+
+Replacing retires the old plan: its unfinished tasks are cancelled, its work channel is archived, and its conversation is renamed aside and resolved. This topic keeps its name and becomes the new mission. Tasks that were **already finished are carried forward by reference** and listed where the replacement opens — do not write task files that re-ask for them.
+
 If you think you need more discussion before creating a plan, just ask questions in your reply without editing any files.
 
 ## In case the plan include outsourcing to other agents

@@ -29,6 +29,17 @@ the work is in — is a selfnote (`anchor.py`), and a mission's identity is the
 message id of its own note, so no name decides anything. `agautolab.worklog`
 holds the model and the reasoning.
 
+`refactor` p2 adds the second way a plan changes. Writing `plan.md` again
+revises a mission in place — the serials keep their topics and a completed
+task stays completed. `replace.flag` beside it does the other thing: the
+mission is retired (unfinished tasks cancelled and resolved, work channel
+archived, conversation renamed out of the `workplan-` vocabulary and
+resolved) and a replacement is opened under the name that frees, carrying
+the finished tasks forward **by reference** and naming its predecessor in a
+`[selfnote][replaces]` note. The plan of that same run is then recorded into
+the replacement, so everything downstream is the ordinary planning path
+pointed at a new conversation.
+
 A `workrun-` topic still **says what it is for**: it is opened with a
 `[selfnote][rootchat]` note naming the mission conversation and a
 `[selfnote][task]` note naming the mission and the serial, before the visible
@@ -66,6 +77,7 @@ from pathlib import Path
 from agag.agent import SWEEP_ACK as ACK_TEXT, exec_options_for
 from agag.entrance import EMPTY_REPLY, NO_ANSWER as NO_CLOSING_MESSAGE, handle_entrance
 from agag.execopt import Selection, exec_note
+from agag.selfnote import last_real_message
 from agag.intro import agents_file_path, write_agents_md
 from agag.topics import (
     TopicContext,
@@ -93,7 +105,7 @@ from agag.zulip import (
     topic_write,
 )
 
-from .anchor import Conversation, own_rootchat, rootchat_note
+from .anchor import Conversation, own_rootchat, replaces_note, rootchat_note
 
 from .worklog import (
     MISSION_CANCELLED,
@@ -113,6 +125,7 @@ from .worklog import (
     read_task,
     record_plan,
     record_result,
+    replace_mission,
     rerun_topic_name,
     run_target,
     run_topic_name,
@@ -225,6 +238,7 @@ __all__ = [
     "project_channel",
     "project_directory",
     "record_task_in_devlog",
+    "requester_mention",
     "run_director",
     "run_superdirector",
     "superdirector_prompt",
@@ -332,9 +346,31 @@ def serve(context) -> TopicResult:
     response_sections, resolve_after = handle_superdirector_response(
         context.client, context.channel, context.topic, project, workspace,
         context.self_id, context.selection,
+        # Read from the history this serving already has, because a
+        # replacement moves the conversation this reply would be read from
+        # out from under `handoff_mention` — the requester has to be named in
+        # the post that opens the replacement, not only in the final reply.
+        requester_mention=requester_mention(context.history, context.self_id),
     )
     sections.extend(response_sections)
     return TopicResult(sections, resolve_after=resolve_after)
+
+
+def requester_mention(history: list[dict], self_id: int) -> str:
+    """`@**Name**` of the last person who really spoke, or `""`.
+
+    `agag.topics.handoff_mention` asks the *chat* this question and is right
+    to: it runs after the handler, against the topic the reply goes into. A
+    replacement moves that conversation away mid-handler, so the requester
+    has to be named from the history this serving already read — otherwise
+    the post that opens the replacement names nobody and the developer is
+    never told their request moved.
+    """
+    last = last_real_message(history)
+    if last is None or last.get("sender_id") == self_id:
+        return ""
+    name = str(last.get("sender_full_name") or "").strip()
+    return f"@**{name}**" if name else ""
 
 
 def at_the_entrance(client: ZulipClient, channel: str, topic: str) -> bool:
@@ -433,6 +469,13 @@ CANCELLED_BY_PLANNER = "Cancelled by planner."
 CHANGED_AFTER_DONE = (
     "This task was changed by the planner after it had been completed. This "
     "fresh topic is the approved rework; post here to start it."
+)
+#: A replacement with nothing to replace it *with* would retire the request
+#: and leave the topic empty, which is worse than not replacing it.
+NO_REPLACEMENT_PLAN = (
+    "the superdirector asked to replace this mission but wrote no `plan.md`, "
+    "so there is nothing to open in its place; the mission is left as it is. "
+    "Re-plan with the replacement plan written."
 )
 #: A plan with no task file runs nothing, and saying so is the whole answer.
 #: Seen live 2026-09-08 (workplan-trend7): the mission was reported started,
@@ -570,6 +613,7 @@ def anchor_run_topic(
     serial: int,
     self_id: int,
     selection: Selection | None = None,
+    replaces: int | None = None,
 ) -> Task:
     """Write the selfnotes that say what this `workrun-` topic is for.
 
@@ -597,6 +641,11 @@ def anchor_run_topic(
     extra = [rootchat_note(conversation)]
     if selection is not None and selection.explicit:
         extra.append(exec_note(selection.option, conversation, selection.message_id))
+    if replaces is not None:
+        # A rerun topic: `[selfnote][replaces]` names the completed task this
+        # one reworks, so the finished record and its rework are one chain
+        # rather than two topics that happen to share a serial.
+        extra.append(replaces_note(int(replaces)))
     return anchor_task(
         client, channel, topic, mission.mission_id, serial, self_id, extra_notes=extra
     )
@@ -649,7 +698,10 @@ def mirror_task_changes(
             lines.append(f"cancelled and resolved {task.channel}/{task.topic}")
         elif change.action == "changed-after-done":
             redo = rerun_topic(mission, change.serial)
-            anchor_run_topic(client, channel, redo, mission, change.serial, self_id, selection)
+            anchor_run_topic(
+                client, channel, redo, mission, change.serial, self_id, selection,
+                replaces=change.task.task_id if change.task else None,
+            )
             post_document(client, channel, redo, change.document, preface=CHANGED_AFTER_DONE)
             lines.append(f"opened {channel}/{redo}; post there to start the rework")
     return lines
@@ -690,7 +742,7 @@ def archive_work_channel(client: ZulipClient, mission: Mission) -> str:
 
 def handle_superdirector_response(
     client: ZulipClient, channel: str, topic: str, project: str, workspace: Path,
-    self_id: int, selection: Selection | None = None,
+    self_id: int, selection: Selection | None = None, requester_mention: str = "",
 ) -> tuple[list[str], bool]:
     """Act on what the superdirector wrote: `plan.md`, then the flags.
 
@@ -710,18 +762,52 @@ def handle_superdirector_response(
 
     A run that wrote no `plan.md` and no flag asked a question instead;
     nothing changes state.
+
+    `replace.flag` is read **before** the plan, because it decides *which
+    conversation the plan is recorded in*. It retires the mission this topic
+    holds and opens its replacement under the name this topic frees, and the
+    plan that follows is the replacement's first plan. Everything after that
+    point is the ordinary planning path pointed at the new conversation —
+    which is the whole reason replacement is a retirement plus a fresh start
+    rather than a second kind of plan.
     """
     sections: list[str] = []
     resolve_after = False
     mission: Mission | None = None
+    plan_topic = topic
 
     plan = workspace / PLAN_FILE
+
+    replace_flag = workspace / "replace.flag"
+    if replace_flag.is_file():
+        if not plan.is_file():
+            # Retiring a mission and leaving the topic with no plan in it
+            # would take the request out of the queue and put nothing back.
+            sections.append(NO_REPLACEMENT_PLAN)
+        else:
+            retired = _mission_or_error(client, channel, topic, self_id, mission)
+            replacement = replace_mission(
+                client, retired, self_id,
+                reason=replace_flag.read_text(encoding="utf-8").strip(),
+                mention=requester_mention,
+            )
+            mission = replacement.mission
+            plan_topic = replacement.mission.topic
+            sections.append(
+                f"mission {retired.label} is retired at "
+                f"{retired.channel}/{replacement.retired_topic} and its work "
+                f"channel {retired.work_channel} is archived; this topic is now "
+                f"mission {mission.label}, which carries forward "
+                f"{len(replacement.carried)} finished task(s) and drops "
+                f"{len(replacement.dropped)} unfinished one(s)"
+            )
+
     if plan.is_file():
         # The whole file travels, heading included: the plan is what the
         # superdirector decided the mission means, and the conversation holds
         # it verbatim.
         line, mission = record_plan(
-            client, channel, topic, project, plan.read_text(encoding="utf-8"), self_id
+            client, channel, plan_topic, project, plan.read_text(encoding="utf-8"), self_id
         )
         sections.append(line)
         changes = plan_changes(mission_tasks(client, mission, self_id), workspace)
@@ -732,7 +818,7 @@ def handle_superdirector_response(
 
     start_flag = workspace / "start.flag"
     if start_flag.is_file():
-        mission = _mission_or_error(client, channel, topic, self_id, mission)
+        mission = _mission_or_error(client, channel, plan_topic, self_id, mission)
         set_mission_state(client, mission, MISSION_STARTED)
         sections.append(
             f"mission {mission.label} is now in progress; each task waits for a "
@@ -744,7 +830,7 @@ def handle_superdirector_response(
     if cancel_flag.is_file():
         # The only remaining cancel-everything path: the mission is over, so
         # its live tasks are cancelled and its whole channel is retired.
-        mission = _mission_or_error(client, channel, topic, self_id, mission)
+        mission = _mission_or_error(client, channel, plan_topic, self_id, mission)
         cancelled = cancel_tasks(client, mission_tasks(client, mission, self_id))
         set_mission_state(client, mission, MISSION_CANCELLED)
         suffix = f" along with {cancelled} task(s)" if cancelled else ""

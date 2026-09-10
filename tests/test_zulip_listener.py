@@ -618,6 +618,9 @@ def test_a_task_changed_after_completion_gets_a_fresh_anchored_rerun_topic(monke
     assert sends(calls) == [
         (redo, f"[selfnote][task] {MISSION.mission_id}#1"),
         (redo, f"[selfnote][rootchat] {CHANNEL}/{TOPIC}"),
+        # The rework names the completed task it reworks, so a reader has one
+        # chain rather than two topics that happen to share a serial.
+        (redo, f"[selfnote][replaces] {task_at(1).task_id}"),
         (redo, zulip_listener.CHANGED_AFTER_DONE + "\n\n# First\n\na\n"),
         (redo, "[selfnote][doc] 42"),
     ]

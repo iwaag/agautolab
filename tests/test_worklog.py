@@ -88,7 +88,7 @@ def test_a_topic_with_no_plan_holds_no_mission(realm):
 
 def test_an_anchor_follows_its_conversation_through_a_rename(realm):
     _, mission = plan(realm)
-    realm.rename_topic(CHANNEL, TOPIC, "✔ workplan-ship-it")
+    realm.move_topic(CHANNEL, TOPIC, "✔ workplan-ship-it")
     found = worklog.mission_at(realm, mission.mission_id, BOT_ID)
     assert found is not None
     assert found.mission_id == mission.mission_id
