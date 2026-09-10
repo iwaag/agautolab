@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Initialize one autolab project across Plane, Gitea, and local clones."""
+"""Initialize one autolab project across Gitea and local clones."""
 
 import argparse
 
@@ -8,7 +8,7 @@ from agautolab.project_init import ProjectInitError, init_project
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Idempotently create an autolab project: Plane project, Gitea repositories, local clones."
+        description="Idempotently create an autolab project: Gitea repositories, local clones."
     )
     parser.add_argument("project", help="lowercase project name, for example whack-a-mole")
     parser.add_argument(

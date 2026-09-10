@@ -7,8 +7,9 @@ that never imports the Plane client cannot call it, whatever the credentials
 on the node say — and *not importing* is a property that quietly decays, so
 it is asserted rather than remembered.
 
-`agag.plane` itself stays: forge and cagent still use it, and this phase's
-boundary is autolab's path, not Plane's removal from the realm.
+`agag.plane` itself is gone since `refactor` p3 — forge, cagent and this
+agent all keep their records in Zulip now — so this assertion is no longer
+about one agent's restraint. It is what stops the module coming back.
 """
 
 import importlib
