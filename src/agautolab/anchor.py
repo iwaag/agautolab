@@ -31,6 +31,15 @@ would point at the replacement itself. A `replaces` pointer whose target has
 been deleted reads as **absent**, which is the honest answer for a
 predecessor nobody kept.
 
+**Since `routine_tests` p2 ex1 that relation is shared** (`agag.selfnote`).
+Retiring a conversation renames it, and a rename moves *every* message in it,
+including root notes other agents wrote there — so the party that most needs
+to read this note is never the party that wrote it. Front was anchored in a
+workplan topic autolab retired, found no note of its own under the reused
+name, and ignored two correct mentions. The tag, the format and the parser
+therefore live in pyagag and are re-exported here; what stays autolab's is
+`own_replaces`, which is this agent's own record of what it replaced.
+
 The `[rootchat]` note stays exactly as it was — it is the shared convention
 that routes a callback home, and it says which conversation autolab is
 speaking on behalf of. The two answer different questions: `rootchat` is
@@ -43,14 +52,27 @@ from __future__ import annotations
 
 import re
 
-from agag.selfnote import Conversation, note, own_rootchat, parse_note, rootchat_note
+from agag.selfnote import (
+    REPLACES_TAG,
+    Conversation,
+    note,
+    own_rootchat,
+    parse_note,
+    parse_replaces,
+    replaces_note,
+    rootchat_note,
+)
 
 #: autolab's own selfnote tags, beside the shared `rootchat` and `served`.
 MISSION_TAG = "mission"
 TASK_TAG = "task"
 DOC_TAG = "doc"
 STATE_TAG = "state"
-REPLACES_TAG = "replaces"
+#: `replaces` is **shared** since `routine_tests` p2 ex1 (`agag.selfnote`):
+#: the relation autolab writes here is read by every agent that was anchored
+#: in the conversation the replacement took the name of, so its spelling
+#: cannot live in one consumer. Re-exported under the name this module's
+#: callers already use.
 
 #: `<mission id>#<serial>` — what a task note carries.
 TASK_VALUE = re.compile(r"^(?P<mission>\d+)\s*#\s*(?P<serial>\d+)$")
@@ -132,27 +154,6 @@ def doc_note(message_id: int) -> str:
 def parse_doc(content) -> int | None:
     """The message id a doc note names, or None for anything else."""
     value = parse_note(content, DOC_TAG)
-    if value is None:
-        return None
-    try:
-        return int(value.strip())
-    except ValueError:
-        return None
-
-
-def replaces_note(anchor_id: int) -> str:
-    """`[selfnote][replaces] <message id>` — what this work was opened for.
-
-    Written once, when the replacement conversation is opened, beside the
-    note that gives it its own identity. It is the only link back: the
-    retired conversation has usually given up its display name to this one.
-    """
-    return note(REPLACES_TAG, str(int(anchor_id)))
-
-
-def parse_replaces(content) -> int | None:
-    """The anchor id a replaces note names, or None for anything else."""
-    value = parse_note(content, REPLACES_TAG)
     if value is None:
         return None
     try:
