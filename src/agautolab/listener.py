@@ -1,7 +1,9 @@
 """autolab's chat entrance: the agag skeleton with autolab's routes.
 
-`listener_main` sweeps every topic in this instance's own channel and
-`workplan-`/`workrun-`/`bmining-` topics in any subscribed channel. A topic
+`listener_main` serves every topic in this instance's own channel and
+`workplan-`/`workrun-`/`bmining-` topics in any public channel
+(`agag.listen`: a mirror of the realm on this instance's own credential
+feeds a durable queue; nothing is swept). A topic
 matching no route is in the own channel and goes to `agag.entrance`: a
 `front` run that reads the conversation and answers about this instance's
 work (`agent/guides/entrance_front/guide.md` is its guide). Mentions of this

@@ -16,7 +16,7 @@ matter: a topic renamed onto a name that already exists merges into it.
 
 import pytest
 
-from agag.zulip import sweep_topics
+from agag.selfnote import last_real_sender
 from agautolab import worklog
 from agautolab.worklog import (
     MISSION_REPLACED,
@@ -32,7 +32,26 @@ PLAN = "# Ship it\n\nTwo tasks.\n"
 NEW_PLAN = "# Ship something else\n\nOne task.\n"
 
 
+def awaiting_topics(realm, self_id, prefixes):
+    """What a listener starting from nothing would serve: every unresolved
+    topic under `prefixes` in a subscribed channel whose last real speaker is
+    somebody else (`agag.listen.Listener.recover`'s owner rule, over this
+    fixture's realm)."""
+    found = []
+    for subscription in realm.subscriptions():
+        channel = subscription["name"]
+        for topic in realm.channel_topics(subscription["stream_id"]):
+            if not topic.startswith(prefixes) or topic.startswith("\u2714 "):
+                continue
+            history = realm.topic_history(channel, topic, num_before=30)
+            if history and last_real_sender(history) in (None, self_id):
+                continue
+            found.append((channel, topic))
+    return found
+
+
 @pytest.fixture
+
 def realm():
     room = Realm()
     room.add_channel(CHANNEL)
@@ -179,7 +198,7 @@ def test_a_restart_finds_the_replacement_and_nothing_that_was_retired(realm):
     ]:
         realm.post(channel, topic, "anything", sender_id=HUMAN_ID)
 
-    awaiting = sweep_topics(realm, BOT_ID, ("workplan-", "workrun-"))
+    awaiting = awaiting_topics(realm, BOT_ID, ("workplan-", "workrun-"))
 
     assert awaiting == [(CHANNEL, TOPIC)]
     # The work channel is gone from the subscriptions, so its task topics are
