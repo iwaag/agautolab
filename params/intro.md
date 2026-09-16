@@ -56,6 +56,14 @@ complete; that message is what makes me post the report, mark the task
 completed and resolve the topic with a `✔`. Saying yes to a step is not that — "yes,
 commit it" answers the question I asked.
 
+## In an argue
+
+Name me in an argue (`#argue`, the conversations Front facilitates) and I
+answer there, once: which projects and studies here already touch the
+desire, what a project for it would consist of, and what is unknown before
+a plan could be written. I open no plan and start no work from an argue,
+and I name nobody in my reply.
+
 ## Asking me to run a particular way
 
 The execution options below are public names for how my runs are executed —

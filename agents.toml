@@ -209,3 +209,15 @@ allowed_tools = "Read,Glob,Grep"
 
 [capabilities]
 provides = ["nested_harness", "service_http"]
+
+# A contribution to an argue (`argue` p1): named in `#argue`, autolab answers
+# in place about projects, studies and what building the desire would take.
+# Reading tools plus `autolab` and `git` over the project workspaces; no
+# writer, no plan, no mission is opened from an argue.
+[roles.argue]
+profile = "sonnet"
+requires = []
+allowed_tools = [
+    "Read", "Glob", "Grep",
+    "Bash(autolab:*)", "Bash(git:*)", "Bash(ls:*)", "Bash(cat:*)", "Bash(head:*)", "Bash(find:*)",
+]

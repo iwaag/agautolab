@@ -1382,6 +1382,12 @@ def handle_mention(client: ZulipClient, channel: str, topic: str) -> None:
     Only `workrun-` topics delegate today, so a root note pointing anywhere
     else is logged and dropped rather than guessed at.
     """
+    from .argue import handle_argue_mention
+
+    # An argue invitation (`argue` p1) is answered in place and is not a
+    # callback: nothing there is a task of ours, and the reply belongs there.
+    if handle_argue_mention(client, channel, topic):
+        return
     self_id = int(client.whoami()["user_id"])
     home = rootchat_home(client, channel, topic, self_id)
     if home is None:
