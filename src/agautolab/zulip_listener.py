@@ -75,6 +75,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from agag.agent import SWEEP_ACK as ACK_TEXT, exec_options_for
+from agag.reply import repair_with
 from agag.entrance import EMPTY_REPLY, NO_ANSWER as NO_CLOSING_MESSAGE, handle_entrance
 from agag.execopt import Selection, exec_note
 from agag.selfnote import last_real_message
@@ -291,8 +292,10 @@ def superdirector_prompt(bot_name: str, workspace: Path, current_files: bool) ->
         f'the flags — into "{workspace}".'
     )
     lines.append("Your working directory is the project itself.")
+    # The reply mark (`agag.reply`): the covering note the director says
+    # to the conversation is what it marks; its planning notes are its own.
     return prompt_with_guide(
-        lines, guide("workplan_superdirector", "guide.md")
+        lines, guide("workplan_superdirector", "guide.md"), reply=True
     )
 
 
@@ -333,14 +336,10 @@ def serve(context) -> TopicResult:
         current.rmdir()
 
     context.step = "superdirector"
-    sections = [
-        run_superdirector(
-            superdirector_prompt(context.bot_name, workspace, current_files),
-            project_directory(project),
-            conversation=(context.channel, context.topic),
-            selection=context.selection,
-        )
-    ]
+    prompt = superdirector_prompt(context.bot_name, workspace, current_files)
+    conversation = (context.channel, context.topic)
+    output = run_superdirector(prompt, project_directory(project), conversation=conversation,
+                               selection=context.selection)
 
     context.step = "response handling"
     response_sections, resolve_after = handle_superdirector_response(
@@ -352,8 +351,16 @@ def serve(context) -> TopicResult:
         # the post that opens the replacement, not only in the final reply.
         requester_mention=requester_mention(context.history, context.self_id),
     )
-    sections.extend(response_sections)
-    return TopicResult(sections, resolve_after=resolve_after)
+    # The director's covering note is model output under the reply contract
+    # (`agag.reply`): only what it marked is posted; the deterministic
+    # response lines follow as literal sections. A repair reruns the
+    # director for the reply alone — the plan and flags it wrote are already
+    # handled above and are not re-read.
+    return TopicResult(
+        response_sections, resolve_after=resolve_after, output=output,
+        repair=repair_with(lambda again: run_superdirector(again, project_directory(project), conversation=conversation,
+                                                           selection=context.selection), output),
+    )
 
 
 def requester_mention(history: list[dict], self_id: int) -> str:
@@ -1275,6 +1282,7 @@ def bmining_prompt(bot_name: str) -> str:
             f"working directory. You are {bot_name!r} in the chatlog.",
         ],
         guide("bmining_director", "guide.md"),
+        reply=True,
     )
 
 
@@ -1330,9 +1338,10 @@ def serve_bmining(context) -> TopicResult:
         )
 
         context.step = "director"
-        sections = [run_director(bmining_prompt(context.bot_name), direction_dir,
-                                 conversation=(context.channel, context.topic),
-                                 selection=context.selection)]
+        conversation = (context.channel, context.topic)
+        output = run_director(bmining_prompt(context.bot_name), direction_dir, conversation=conversation,
+                              selection=context.selection)
+        sections: list[str] = []
 
         context.step = "recording"
         if commit_all_and_push(
@@ -1341,7 +1350,11 @@ def serve_bmining(context) -> TopicResult:
             f"{AUTO_MARKER} bmining notes from {context.topic}",
         ):
             sections.append("recorded notes committed and pushed")
-        return TopicResult(sections)
+        return TopicResult(
+            sections, output=output,
+            repair=repair_with(lambda again: run_director(again, direction_dir, conversation=conversation,
+                                                          selection=context.selection), output),
+        )
     finally:
         remove_work_directory(work_dir)
 

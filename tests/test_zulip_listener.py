@@ -136,6 +136,15 @@ class Client:
         return []
 
 
+def marked(answer: str) -> str:
+    """A stub run's output under the reply contract (`agag.reply`): the
+    answer inside an `ag-reply` mark after a line of the run's own, unless
+    the test wrote the marks itself."""
+    if "```ag-reply" in answer:
+        return answer
+    return f"thinking about it first.\n\n```ag-reply\n{answer}\n```"
+
+
 def wire(monkeypatch, tmp_path, calls, *, current_files=False, superdirector="planner says hi"):
     monkeypatch.setattr(zulip_listener, "TOPICS_ROOT", tmp_path / "topics")
     monkeypatch.setattr(zulip_listener, "RECORDS_ROOT", tmp_path / "records")
@@ -156,12 +165,17 @@ def wire(monkeypatch, tmp_path, calls, *, current_files=False, superdirector="pl
     monkeypatch.setattr(
         zulip_listener,
         "run_superdirector",
-        lambda prompt, cwd, **kwargs: calls.append(("superdirector", prompt, cwd)) or superdirector,
+        lambda prompt, cwd, **kwargs: calls.append(("superdirector", prompt, cwd)) or marked(superdirector),
     )
     monkeypatch.setattr(
         topics,
         "topic_write",
         lambda topic, text, **kwargs: calls.append(("write", topic, text, kwargs)) or "success",
+    )
+    monkeypatch.setattr(
+        topics,
+        "deliver",
+        lambda client, channel, topic, text, **kwargs: calls.append(("write", topic, text, {"channel": channel, **kwargs})) or 900,
     )
     guides = tmp_path / "guides"
     (guides / "workplan_superdirector").mkdir(parents=True)
@@ -274,8 +288,9 @@ def test_handle_topic_acks_then_runs_the_steps_in_order(monkeypatch, tmp_path):
     assert [call[0] for call in calls] == [
         "whoami", "whoami", "history", "write",
         "init", "readback", "superdirector",
-        # the handoff lookup, the reply, then the post-run re-check
-        "history", "write", "history",
+        # the reply (the requester is read from the processed input, not
+        # looked up at send time), then the post-run re-check
+        "write", "history",
     ]
     # The ack is still the first post, before any work: it makes the bot the
     # last poster so a later sweep skips the topic while this run is in flight.
@@ -387,7 +402,7 @@ def test_handle_topic_mentions_the_read_back_when_it_was_written(monkeypatch, tm
     prompt = next(call[1] for call in calls if call[0] == "superdirector")
     current = superdirector_dir(tmp_path) / "current"
     assert f'The currently registered mission and tasks are placed in "{current}".' in prompt
-    assert prompt.endswith("GUIDE TEXT")
+    assert "\n\nGUIDE TEXT\n\n" in prompt and "How your reply is posted" in prompt
     assert current.is_dir()
 
 
@@ -851,7 +866,9 @@ def test_handle_topic_resolves_the_topic_after_the_final_reply(monkeypatch, tmp_
     zulip_listener.handle_topic(client, CHANNEL, TOPIC)
 
     # The ✔ rename comes after the final reply so the whole thread moves.
-    assert [call[0] for call in calls][-3:] == ["write", "history", "resolve"]
+    # the reply, the check for input that arrived during the run, the tail
+    # read the resolve needs, then the resolve
+    assert [call[0] for call in calls][-4:] == ["write", "history", "history", "resolve"]
     assert calls[-1] == ("resolve", 1, TOPIC)
 
 
@@ -889,10 +906,10 @@ def test_handle_topic_reprocesses_when_a_human_posted_during_the_run(monkeypatch
     class ScriptedClient(Client):
         def __init__(self):
             super().__init__(calls)
-            # per round: chatlog read, handoff lookup, re-check — twice.
+            # per round: chatlog read, re-check — twice.
             self.scripts = [
-                [first], [first], [first, mid_run],
-                [first, mid_run], [first, mid_run], [first, mid_run],
+                [first], [first, mid_run],
+                [first, mid_run], [first, mid_run],
             ]
 
         def topic_history(self, channel, topic, num_before):
@@ -921,7 +938,7 @@ def test_superdirector_prompt_points_at_the_workspace(monkeypatch, tmp_path):
     assert f'"plan.md", "task[N].md", the flags — into "{workspace}"' in prompt
     assert "Your working directory is the project itself." in prompt
     assert "currently registered" not in prompt
-    assert prompt.endswith("GUIDE TEXT")
+    assert "\n\nGUIDE TEXT\n\n" in prompt and "How your reply is posted" in prompt
 
     prompt = zulip_listener.superdirector_prompt("Autolab", workspace, current_files=True)
     assert (
@@ -1035,6 +1052,11 @@ def wire_run(monkeypatch, tmp_path, calls, *, target=TARGET, binding=TASK, repor
         topics,
         "topic_write",
         lambda topic, text, **kwargs: calls.append(("write", topic, text, kwargs)) or "success",
+    )
+    monkeypatch.setattr(
+        topics,
+        "deliver",
+        lambda client, channel, topic, text, **kwargs: calls.append(("write", topic, text, {"channel": channel, **kwargs})) or 900,
     )
     monkeypatch.setattr(
         zulip_listener,
@@ -1478,7 +1500,7 @@ def wire_bmining(monkeypatch, tmp_path, calls, *, reply="director says hi",
     monkeypatch.setattr(
         zulip_listener,
         "run_director",
-        director or (lambda prompt, cwd, **kwargs: calls.append(("director", prompt, cwd)) or reply),
+        director or (lambda prompt, cwd, **kwargs: calls.append(("director", prompt, cwd)) or marked(reply)),
     )
     monkeypatch.setattr(zulip_listener, "load_gitea_config", lambda: "gitea-config")
     monkeypatch.setattr(
@@ -1492,6 +1514,11 @@ def wire_bmining(monkeypatch, tmp_path, calls, *, reply="director says hi",
         topics,
         "topic_write",
         lambda topic, text, **kwargs: calls.append(("write", topic, text, kwargs)) or "success",
+    )
+    monkeypatch.setattr(
+        topics,
+        "deliver",
+        lambda client, channel, topic, text, **kwargs: calls.append(("write", topic, text, {"channel": channel, **kwargs})) or 900,
     )
     guides = tmp_path / "guides"
     (guides / "bmining_director").mkdir(parents=True)
@@ -1511,7 +1538,7 @@ def test_handle_bmining_places_chatlog_runs_director_and_replies(monkeypatch, tm
     def director(prompt, cwd, **kwargs):
         seen["chatlog"] = (work / "chatlog.md").read_text()
         calls.append(("director", prompt, cwd))
-        return "director says hi"
+        return marked("director says hi")
 
     wire_bmining(monkeypatch, tmp_path, calls, director=director)
     zulip_listener.handle_bmining(Client(calls), CHANNEL, BMINING_TOPIC)
@@ -1923,10 +1950,10 @@ def test_a_marked_workspace_is_served_without_being_touched(monkeypatch, tmp_pat
     assert [call[0] for call in calls] == [
         "whoami", "whoami", "history", "write",
         "readback", "superdirector",
-        "history", "write", "history",
+        "write", "history",
     ]
     assert next(call[2] for call in calls if call[0] == "superdirector") == workspace
-    assert calls[7][2] == HANDOFF + "made it"
+    assert calls[6][2] == HANDOFF + "made it"
     # Nothing was scaffolded into the workspace.
     assert sorted(p.name for p in workspace.iterdir()) == [project_init.PATTERN_MARKER]
 
@@ -2216,7 +2243,7 @@ def test_two_missions_keep_their_own_selections(monkeypatch, tmp_path):
     wire(monkeypatch, tmp_path, calls)
     monkeypatch.setattr(
         zulip_listener, "run_superdirector",
-        lambda prompt, cwd, conversation=None, selection=None: seen.append(selection) or "planned",
+        lambda prompt, cwd, conversation=None, selection=None: seen.append(selection) or marked("planned"),
     )
     zulip_listener.handle_topic(
         Client(calls, history=[history_message(content=exec_command("agy"), id=7),
