@@ -93,6 +93,8 @@ allowed_tools = [
     # How a run reaches another agent. `tools/agents.md` says who is there;
     # this is what lets a run write to them.
     "Bash(agentchat:*)",
+    # Human-authored references, by name at a pinned revision (`agrefs`, agag.refs).
+    "Bash(agrefs:*)",
 ]
 
 [roles.director]
@@ -113,6 +115,8 @@ allowed_tools = [
     # How a run reaches another agent. `tools/agents.md` says who is there;
     # this is what lets a run write to them.
     "Bash(agentchat:*)",
+    # Human-authored references, by name at a pinned revision (`agrefs`, agag.refs).
+    "Bash(agrefs:*)",
 ]
 
 [roles.mediator]
@@ -133,6 +137,8 @@ allowed_tools = [
     # How a run reaches another agent. `tools/agents.md` says who is there;
     # this is what lets a run write to them.
     "Bash(agentchat:*)",
+    # Human-authored references, by name at a pinned revision (`agrefs`, agag.refs).
+    "Bash(agrefs:*)",
 ]
 
 [roles.coding]
@@ -153,6 +159,8 @@ allowed_tools = [
     # How a run reaches another agent. `tools/agents.md` says who is there;
     # this is what lets a run write to them.
     "Bash(agentchat:*)",
+    # Human-authored references, by name at a pinned revision (`agrefs`, agag.refs).
+    "Bash(agrefs:*)",
 ]
 
 # Reads the whole project — main/, direction/, devlog/ — to plan one mission,
@@ -176,6 +184,8 @@ allowed_tools = [
     # How a run reaches another agent. `tools/agents.md` says who is there;
     # this is what lets a run write to them.
     "Bash(agentchat:*)",
+    # Human-authored references, by name at a pinned revision (`agrefs`, agag.refs).
+    "Bash(agrefs:*)",
 ]
 
 # Serves one `workrun-` topic as a conversation with the developer, in the
@@ -199,6 +209,8 @@ allowed_tools = [
     # How a run reaches another agent. `tools/agents.md` says who is there;
     # this is what lets a run write to them.
     "Bash(agentchat:*)",
+    # Human-authored references, by name at a pinned revision (`agrefs`, agag.refs).
+    "Bash(agrefs:*)",
 ]
 
 # Only reads. Under agcode the same is said by `--tools read-only` (role_run).
@@ -220,4 +232,5 @@ requires = []
 allowed_tools = [
     "Read", "Glob", "Grep",
     "Bash(autolab:*)", "Bash(git:*)", "Bash(ls:*)", "Bash(cat:*)", "Bash(head:*)", "Bash(find:*)",
+    "Bash(agrefs:*)",
 ]

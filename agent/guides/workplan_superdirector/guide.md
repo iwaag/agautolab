@@ -44,3 +44,30 @@ does. A task may be a request to one of them: say which agent and what to
 ask, in words they can act on without this project.
 
 Keep it to one request per task.
+
+# Human-authored references
+
+`agrefs` reads what the developer has published for a project to be built
+from — stories, images, templates, runnable examples — by name at a pinned
+revision: `<source>@<revision>[:<path>]`. `agrefs list` shows the sources on
+this host; `agrefs sync <source>` fetches the newest published revision and
+prints the commit it is; `agrefs show <source>@<rev>[:<path>]` prints a text
+file, lists a directory, or says what a binary is; `agrefs path …` is the
+file itself, which your own image reader can open (`agrefs --help` has the
+rest). A request that names a reference names *that* revision: work from
+it, quote what you used as `<source>@<rev>:<path>` in what you write, and
+never put a newer revision or a summary of your own in the place of the
+original without saying so. The originals are read-only; derivatives go
+into your own workspace. When a reference and the request disagree, or a
+reference cannot be reached, say so rather than inventing.
+
+When the request names a reference source, `agrefs sync <source>[@<rev>]`
+first, and record the adoption in `direction/REFERENCES.md`: the source,
+the commit, the date, why, and which mission adopted it. Each `task[N].md`
+names the paths it works from at that revision, so the run can open the
+originals rather than your summary of them. A mission keeps its adopted
+revision until a request adopts a new one; then `agrefs changes
+<source>@<old>..<new>` says which files moved, and the plan says which
+tasks, assets and code that touches — unrelated finished work is not
+redone. Interpretation, scope and decisions about the references go in
+`direction/`; derivatives and implementation in `main/`.
