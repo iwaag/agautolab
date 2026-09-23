@@ -649,7 +649,9 @@ def anchor_run_topic(
     stands, so a re-plan that re-creates a serial does not write a second set.
     """
     conversation = Conversation(mission.channel, mission.topic)
-    extra = [rootchat_note(conversation)]
+    # Anchored by the mission's own id (robust_workflow p2 step 2), so the
+    # task stays under *this* mission after a retirement frees its name.
+    extra = [rootchat_note(Conversation(mission.channel, mission.topic, int(mission.mission_id)))]
     if selection is not None and selection.explicit:
         extra.append(exec_note(selection.option, conversation, selection.message_id))
     if replaces is not None:
@@ -998,10 +1000,13 @@ class RunProgress:
     """
 
     def __init__(self, client: ZulipClient, channel: str, topic: str,
-                 interval_s: float = PROGRESS_INTERVAL_SECONDS):
+                 interval_s: float = PROGRESS_INTERVAL_SECONDS, *, anchor: int = 0):
         self.client = client
         self.channel = channel
         self.topic = topic
+        #: A post in the task topic (the serving's home anchor): where the
+        #: topic is now is where that post is.
+        self.anchor = int(anchor or 0)
         self.interval_s = interval_s
         self.pending: list[str] = []
         self.last_post = time.monotonic()
@@ -1027,10 +1032,15 @@ class RunProgress:
         self.pending = []
         self.last_post = time.monotonic()
         try:
-            # Under its live name: a ✔ landing during the run renamed the
-            # task, and a post under the old name opens a twin beside it
-            # (robust_workflow p1, trial N3).
-            live = live_topic_name(self.client, self.channel, self.topic)
+            # Where the task is now: a ✔ landing during the run renamed it,
+            # and a post under the old name opens a twin beside it
+            # (robust_workflow p1, trial N3). By its anchor first, so a
+            # rename or a twin under the bare name cannot divert it (p2).
+            from agag.zulip import locate
+
+            found = locate(self.client, Conversation(self.channel, self.topic, self.anchor or None)) \
+                if self.anchor else None
+            live = found.topic if found is not None else live_topic_name(self.client, self.channel, self.topic)
             topic_write(live, body, channel=self.channel, client=self.client)
         except Exception as error:  # noqa: BLE001 - progress never kills a run
             log(
@@ -1203,7 +1213,7 @@ def serve_run(context) -> TopicResult:
         [
             conversation.as_pair()
             for conversation in remotes_for_home(
-                context.client, context.channel, context.topic
+                context.client, context.channel, context.topic, home_messages=context.history
             )
         ],
         context.self_id,
@@ -1216,7 +1226,7 @@ def serve_run(context) -> TopicResult:
     task_text = target.task.document
     # Into the task's own topic, whichever conversation this serving answers
     # in: progress belongs where the task lives.
-    progress = RunProgress(context.client, context.channel, context.topic)
+    progress = RunProgress(context.client, context.channel, context.topic, anchor=getattr(context, "anchor", 0))
     try:
         sections.append(
             workrun_supercoder(
@@ -1551,10 +1561,31 @@ def handle_mention(client: ZulipClient, channel: str, topic: str) -> None:
     if not home.topic.startswith(WORKRUN_TOPIC_PREFIX):
         log(f"mention in {channel!r}/{topic!r} is for {home}, which is not a task; ignoring")
         return
-    log(f"mention in {channel!r}/{topic!r} serves {home}")
-    handle_workrun(client, home.channel, home.topic)
-    served = note_served(client, home, channel, topic)
-    if served is None:
-        log(f"nothing to mark served in {channel!r}/{topic!r}")
+    # Home by its anchor, like Front's callback route (robust_workflow p2
+    # step 2): a renamed task is still found, a reused name is not taken for
+    # it, and a finished (✔) one is not reopened — serving it by its bare
+    # name used to open a twin task topic beside the real one.
+    from agag import serving as serving_record
+    from agag.zulip import RESOLVED_TOPIC_PREFIX, locate
+
+    located = locate(client, home)
+    if located is None:
+        log(f"mention in {channel!r}/{topic!r} is for {home}, which no longer exists; ignoring")
+        return
+    finished = located.topic.startswith(RESOLVED_TOPIC_PREFIX)
+    home = Conversation(home.channel, located.topic, home.anchor)
+    if finished:
+        log(f"mention in {channel!r}/{topic!r} belongs to {home}, which is finished; not reopening it")
     else:
-        log(f"marked {channel!r}/{topic!r} served up to {served} in {home}")
+        log(f"mention in {channel!r}/{topic!r} serves {home}")
+        handle_workrun(client, home.channel, home.topic)
+    if serving_record.current() is None or finished:
+        # Under `agag.listen` the executor writes the mark after the reply's
+        # delivery is confirmed, bound to the mention that triggered it; a
+        # mark written here from the newest post would also spend a mention
+        # that arrived during the run.
+        served = note_served(client, home, channel, topic)
+        if served is None:
+            log(f"nothing to mark served in {channel!r}/{topic!r}")
+        else:
+            log(f"marked {channel!r}/{topic!r} served up to {served} in {home}")
