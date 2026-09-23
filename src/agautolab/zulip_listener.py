@@ -1263,6 +1263,19 @@ def serve_run(context) -> TopicResult:
 
 
 HOLD_FILE = "hold.flag"
+#: A one-shot fault for controlled trials (`robust_workflow` p1 step 5): while
+#: this file exists the next automatic start is skipped — as a crash or a bug
+#: would skip it — and the file is removed. Nothing creates it but a person.
+SKIP_START_FAULT = SPEC.local / "faults" / "skip-next-start"
+
+
+def _injected_skip() -> bool:
+    try:
+        SKIP_START_FAULT.unlink()
+    except FileNotFoundError:
+        return False
+    log("fault injected: the next automatic start is skipped (skip-next-start)")
+    return True
 
 
 def _started(history: list[dict], self_id: int) -> bool:
@@ -1353,6 +1366,8 @@ def start_first_task(client: ZulipClient, mission: Mission, self_id: int, reques
 
 def _start(client: ZulipClient, mission: Mission, task: Task, where: str, requester: dict, because: str) -> str:
     """The start itself: one visible line naming nobody, then the note."""
+    if _injected_skip():
+        return f"task {task.serial} of {mission.label} was not started (injected fault)"
     name = str(requester.get("sender_full_name") or "").strip()
     live = where.split("/", 1)[1]
     client.send_to_channel(

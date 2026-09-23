@@ -113,3 +113,17 @@ def test_starting_the_mission_starts_its_first_task(realm, tmp_path):
     assert owed_start(realm.topic_history(first.channel, first.topic), BOT_ID)["sender_id"] == FRONT
     assert owed_start(realm.topic_history(tasks[2].channel, tasks[2].topic), BOT_ID) is None
     assert "already under way" in start_first_task(realm, mission, BOT_ID, requester)
+
+
+def test_the_injected_skip_fault_skips_one_start_and_is_spent(realm, tmp_path, monkeypatch):
+    from agautolab import zulip_listener
+
+    fault = tmp_path / "faults" / "skip-next-start"
+    fault.parent.mkdir()
+    fault.touch()
+    monkeypatch.setattr(zulip_listener, "SKIP_START_FAULT", fault)
+    target, second, requester = closed_first(realm, tmp_path)
+    assert "injected fault" in start_next_task(realm, target, BOT_ID, requester)
+    assert not fault.exists()
+    assert owed_start(realm.topic_history(second.channel, second.topic), BOT_ID) is None
+    assert "starts now" in start_next_task(realm, target, BOT_ID, requester)
