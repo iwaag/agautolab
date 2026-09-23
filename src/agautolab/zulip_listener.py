@@ -691,7 +691,7 @@ def mirror_task_changes(
             # posting there is what starts it, and p9 watched a supervisor
             # read "opened work-…/workrun-task1-…" as "it is running now" and
             # then wait for a task nobody had triggered.
-            lines.append(f"opened {channel}/{topic}; post there to start it")
+            lines.append(f"opened {channel}/{topic}")
         elif change.action == "updated" and change.task is not None:
             post_document(
                 client, change.task.channel, change.task.topic, change.document,

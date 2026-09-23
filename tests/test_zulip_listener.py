@@ -507,7 +507,7 @@ def test_a_plan_reconciles_the_split_and_builds_the_run_surfaces(monkeypatch, tm
         f"recorded the plan for {MISSION.label}",
         'created task 1 "First"',
         f"work channel {WORK_CHANNEL} is ready",
-        f"opened {WORK_CHANNEL}/{run_topic}; post there to start it",
+        f"opened {WORK_CHANNEL}/{run_topic}",
     ]
     assert resolve_after is False
 
@@ -606,7 +606,7 @@ def test_a_replan_mirrors_each_change_onto_its_own_run_topic(monkeypatch, tmp_pa
     ]
     assert sections[-3:] == [
         f"updated {WORK_CHANNEL}/{topic_of(2)}",
-        f"opened {WORK_CHANNEL}/{topic_of(3)}; post there to start it",
+        f"opened {WORK_CHANNEL}/{topic_of(3)}",
         f"cancelled and resolved {WORK_CHANNEL}/{topic_of(4)}",
     ]
 
