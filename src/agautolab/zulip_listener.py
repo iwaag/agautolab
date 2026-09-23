@@ -1027,7 +1027,11 @@ class RunProgress:
         self.pending = []
         self.last_post = time.monotonic()
         try:
-            topic_write(self.topic, body, channel=self.channel, client=self.client)
+            # Under its live name: a ✔ landing during the run renamed the
+            # task, and a post under the old name opens a twin beside it
+            # (robust_workflow p1, trial N3).
+            live = live_topic_name(self.client, self.channel, self.topic)
+            topic_write(live, body, channel=self.channel, client=self.client)
         except Exception as error:  # noqa: BLE001 - progress never kills a run
             log(
                 f"could not post progress to {self.channel!r}/{self.topic!r}, "

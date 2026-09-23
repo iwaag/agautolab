@@ -127,3 +127,20 @@ def test_the_injected_skip_fault_skips_one_start_and_is_spent(realm, tmp_path, m
     assert not fault.exists()
     assert owed_start(realm.topic_history(second.channel, second.topic), BOT_ID) is None
     assert "starts now" in start_next_task(realm, target, BOT_ID, requester)
+
+
+def test_progress_lines_follow_a_resolve_landing_during_the_run(realm, monkeypatch):
+    """robust_workflow p1 N3: a ✔ during the run, then a progress flush under
+    the old name, opened a twin that blocked the un-resolve."""
+    from agautolab import zulip_listener
+
+    realm.add_channel("work-m1")
+    first = realm.post("work-m1", "workrun-task1-m1", "# Task 1")
+    realm.resolve_topic(first, "workrun-task1-m1")
+    written = []
+    monkeypatch.setattr(zulip_listener, "topic_write",
+                        lambda topic, body, channel=None, client=None: written.append(topic))
+    progress = zulip_listener.RunProgress(realm, "work-m1", "workrun-task1-m1", interval_s=0)
+    progress({"type": "assistant", "message": {"content": [{"type": "text", "text": "working"}]}})
+    progress.flush()
+    assert written and all(topic == "✔ workrun-task1-m1" for topic in written)
