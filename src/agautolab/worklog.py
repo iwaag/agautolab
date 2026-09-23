@@ -127,6 +127,10 @@ TASK_OPEN = "open"
 TASK_COMPLETED = "completed"
 TASK_CANCELLED = "cancelled"
 TASK_ACCEPTED = "accepted"
+#: The requester asked for this task to wait instead of starting when the
+#: one before it closed (`robust_workflow` p1 step 3). A post in its topic
+#: starts it like any other.
+TASK_HELD = "held"
 #: What satisfies the gate in front of the next task. Accepting a task is a
 #: stronger statement than completing it, so it satisfies the gate too.
 TASK_FINISHED = (TASK_COMPLETED, TASK_ACCEPTED)
@@ -140,6 +144,7 @@ MISSION_REPLACED = "replaced"
 MISSION_DONE = "done"
 
 __all__ = [
+    "TASK_HELD",
     "HISTORY_MESSAGES",
     "MISSION_CANCELLED",
     "MISSION_DONE",

@@ -24,9 +24,12 @@ finished mission done.
 I may reply with questions instead of a plan; answer them in the same topic.
 Nothing runs until the requester clearly says the mission can be started.
 
-Then I open the execution surfaces myself: a `work-m<id>` channel holding
-one `workrun-task<N>-m<id>` topic per task. You never create one; posting
-into one starts real work.
+I open the execution surfaces myself: a `work-m<id>` channel holding one
+`workrun-task<N>-m<id>` topic per task. You never create one. When you say
+the mission may start, **I start task 1 myself**, and after that each next
+task when you accept the one before it — your acceptance is the go-ahead,
+so nobody posts a start. A post in a task's topic adds to that task; it
+never starts one twice.
 
 ## Changing a plan after it exists
 
@@ -45,16 +48,19 @@ conversation stays readable, and I say where it went.
 
 ## While a task runs
 
-**One topic is one task**, and the worker there knows only that task. To run
-three tasks, post into three topics. Tasks are done in order — ask for task 2
-before task 1 is closed and you get "Please complete previous work".
+**One topic is one task**, and the worker there knows only that task. Tasks
+are done in order — ask for task 2 before task 1 is closed and you get
+"Please complete previous work".
 
-I post progress as the work happens, and I mention you when it is your turn.
+I post progress as the work happens, and I mention you when it is your turn —
+in a task I started, too: my answer reaches the conversation you asked from.
 
 **I do not close a task until you say it is done.** Post that you agree it is
 complete; that message is what makes me post the report, mark the task
-completed and resolve the topic with a `✔`. Saying yes to a step is not that — "yes,
-commit it" answers the question I asked.
+completed, resolve the topic with a `✔` and start the next task. Saying yes
+to a step is not that — "yes, commit it" answers the question I asked. If
+the next task should wait (you want to look at something first), say so in
+the same message: I mark it `held`, and a post in its topic starts it.
 
 ## In an argue
 

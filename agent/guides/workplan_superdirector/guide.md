@@ -24,7 +24,7 @@ and the rest of the file becomes the description.
 
 If the developer asks you to execute the mission, just tell them it is the planning phase, not the execution phase.
 
-If the requester has clearly said that the mission can be started, create file "start.flag".
+If the requester has clearly said that the mission can be started, create file "start.flag". That starts task 1 at once and each next task when the one before it is accepted, so a task that must wait for a decision should say so in its own text.
 If the requester has clearly said that the mission should be cancelled, create file "cancel.flag".
 
 ## Adjusting a plan, and replacing one

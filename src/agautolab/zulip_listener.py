@@ -78,7 +78,7 @@ from agag.agent import SWEEP_ACK as ACK_TEXT, exec_options_for
 from agag.reply import repair_with
 from agag.entrance import EMPTY_REPLY, NO_ANSWER as NO_CLOSING_MESSAGE, handle_entrance
 from agag.execopt import Selection, exec_note
-from agag.selfnote import last_real_message
+from agag.selfnote import is_speech, last_real_message, parse_start, start_note
 from agag.intro import agents_file_path, write_agents_md
 from agag.topics import (
     TopicContext,
@@ -90,6 +90,7 @@ from agag.topics import (
     next_generation,
     next_record_path,
     prompt_with_guide,
+    requester_of,
     serve_topic,
     threads_placement,
     topic_workspace,
@@ -103,6 +104,7 @@ from agag.zulip import (
     note_served,
     remotes_for_home,
     rootchat_home,
+    topic_history_across_resolve,
     topic_write,
 )
 
@@ -111,6 +113,7 @@ from .anchor import Conversation, own_rootchat, replaces_note, rootchat_note
 from .worklog import (
     MISSION_CANCELLED,
     MISSION_STARTED,
+    TASK_HELD,
     Mission,
     RunTarget,
     Task,
@@ -350,6 +353,7 @@ def serve(context) -> TopicResult:
         # out from under `handoff_mention` — the requester has to be named in
         # the post that opens the replacement, not only in the final reply.
         requester_mention=requester_mention(context.history, context.self_id),
+        requester=requester_of(context.history, context.self_id, context.processed_up_to),
     )
     # The director's covering note is model output under the reply contract
     # (`agag.reply`): only what it marked is posted; the deterministic
@@ -750,6 +754,7 @@ def archive_work_channel(client: ZulipClient, mission: Mission) -> str:
 def handle_superdirector_response(
     client: ZulipClient, channel: str, topic: str, project: str, workspace: Path,
     self_id: int, selection: Selection | None = None, requester_mention: str = "",
+    requester: dict | None = None,
 ) -> tuple[list[str], bool]:
     """Act on what the superdirector wrote: `plan.md`, then the flags.
 
@@ -826,12 +831,16 @@ def handle_superdirector_response(
     start_flag = workspace / "start.flag"
     if start_flag.is_file():
         mission = _mission_or_error(client, channel, plan_topic, self_id, mission)
-        set_mission_state(client, mission, MISSION_STARTED)
+        mission = set_mission_state(client, mission, MISSION_STARTED)
         sections.append(
-            f"mission {mission.label} is now in progress; each task waits for a "
-            f"post in its own `{WORKRUN_TOPIC_PREFIX}…` topic, and nothing runs "
-            f"until somebody makes it"
+            f"mission {mission.label} is now in progress; each next task starts "
+            "when the one before it is accepted"
         )
+        try:
+            sections.append(start_first_task(client, mission, self_id, requester))
+        except Exception as error:  # noqa: BLE001 - the mission is started; say what did not follow
+            log(f"could not start the first task of {mission.label}: {error!r}")
+            sections.append(f"its first task was not started ({error}); a post in its topic starts it")
 
     cancel_flag = workspace / "cancel.flag"
     if cancel_flag.is_file():
@@ -1238,7 +1247,121 @@ def serve_run(context) -> TopicResult:
 
     context.step = "devlog record"
     sections.append(record_task_in_devlog(target, workspace, report))
+
+    context.step = "the next task"
+    hold_path = workspace / HOLD_FILE
+    hold = hold_path.read_text(encoding="utf-8").strip() or "no reason given" if hold_path.is_file() else None
+    requester = requester_of(context.history, context.self_id, context.processed_up_to)
+    try:
+        sections.append(start_next_task(context.client, target, context.self_id, requester, hold=hold))
+    except Exception as error:  # noqa: BLE001 - the task is closed; say what did not follow
+        log(f"could not start the task after {target.task.serial} of {target.mission.label}: {error!r}")
+        sections.append(
+            f"the next task of {target.mission.label} was not started ({error}); a post in its topic starts it"
+        )
     return TopicResult(sections, resolve_after=True)
+
+
+HOLD_FILE = "hold.flag"
+
+
+def _started(history: list[dict], self_id: int) -> bool:
+    """Whether a task topic is already under way: somebody else has posted
+    in it, or this bot has acknowledged or started it. Only its opening
+    description and notes means nobody has."""
+    for message in history:
+        content = str(message.get("content") or "")
+        if message.get("sender_id") == self_id:
+            if parse_start(content) is not None or content.strip() == ACK_TEXT:
+                return True
+            continue
+        if is_speech(message):
+            return True
+    return False
+
+
+def start_next_task(
+    client: ZulipClient, target: RunTarget, self_id: int, requester: dict | None,
+    *, hold: str | None = None,
+) -> str:
+    """Start the task after the one just closed, when the mission allows it.
+    One close-out line saying what happened.
+
+    `robust_workflow` p1 step 3. A mission the requester said may start is
+    authorised as a whole, and the acceptance that closed this task is the
+    requester's word on it; until now the next task still waited for a post
+    in its own topic, and relaying that post was the step adventure_game p3
+    lost 24 minutes to (and several earlier episodes before it). Now the
+    close-out starts it: a visible line naming nobody — a mention would buy
+    the requester a run to read it — and `[selfnote][start]`, which is what
+    makes this listener serve the topic and what hands its report to the
+    requester who accepted this one. Written inside the close-out, so a crash
+    after it is recovered like any other owed start, and never repeated: a
+    task already under way is left alone.
+
+    Not started, and said so: the mission was never started (planning only),
+    the requester asked for this task to wait (`hold.flag` — it is marked
+    `held`, and a post in its topic starts it), or nothing is left.
+    """
+    mission = target.mission
+    remaining = [
+        task for serial, task in sorted(mission_tasks(client, mission, self_id).items())
+        if serial > target.task.serial and not task.finished
+    ]
+    if not remaining:
+        return (
+            f"every task of {mission.label} is finished; the mission waits for your acceptance in "
+            f"{mission.channel}/{mission.topic}"
+        )
+    following = remaining[0]
+    where = f"{following.channel}/{live_topic_name(client, following.channel, following.topic)}"
+    if mission.state != MISSION_STARTED:
+        return f"task {following.serial} waits for a post in {where}: {mission.label} was not started"
+    history = topic_history_across_resolve(client, following.channel, following.topic, 200)
+    if _started(history, self_id):
+        return f"task {following.serial} of {mission.label} is already under way in {where}"
+    if hold is not None:
+        set_task_state(client, following, TASK_HELD)
+        return f"task {following.serial} of {mission.label} is held, as asked ({hold}); a post in {where} starts it"
+    if following.state == TASK_HELD:
+        return f"task {following.serial} of {mission.label} is held; a post in {where} starts it"
+    if requester is None or requester.get("sender_id") is None:
+        return f"task {following.serial} waits for a post in {where}: nobody accepted this one by name"
+    return _start(client, mission, following, where, requester,
+                  f"task {target.task.serial} was accepted (#{int(requester.get('id') or 0)})")
+
+
+def start_first_task(client: ZulipClient, mission: Mission, self_id: int, requester: dict | None) -> str:
+    """Start a mission's first task when the requester says the mission may
+    start (`start.flag`). The same rule as `start_next_task`: that word is the
+    authorisation, and a second post into task 1 would only relay it."""
+    tasks = [task for _, task in sorted(mission_tasks(client, mission, self_id).items()) if not task.finished]
+    if not tasks:
+        return f"{mission.label} has no open task to start"
+    first = tasks[0]
+    where = f"{first.channel}/{live_topic_name(client, first.channel, first.topic)}"
+    history = topic_history_across_resolve(client, first.channel, first.topic, 200)
+    if _started(history, self_id):
+        return f"task {first.serial} of {mission.label} is already under way in {where}"
+    if first.state == TASK_HELD:
+        return f"task {first.serial} of {mission.label} is held; a post in {where} starts it"
+    if requester is None or requester.get("sender_id") is None:
+        return f"task {first.serial} waits for a post in {where}: nobody asked for the start by name"
+    return _start(client, mission, first, where, requester,
+                  f"the mission was started (#{int(requester.get('id') or 0)})")
+
+
+def _start(client: ZulipClient, mission: Mission, task: Task, where: str, requester: dict, because: str) -> str:
+    """The start itself: one visible line naming nobody, then the note."""
+    name = str(requester.get("sender_full_name") or "").strip()
+    live = where.split("/", 1)[1]
+    client.send_to_channel(
+        task.channel, live,
+        f"Task {task.serial} of {mission.label} starts now: {because}, and the mission is authorised to run. "
+        f"The report comes back to {name or 'the requester'}; a post here adds to this task.",
+    )
+    client.send_to_channel(task.channel, live, start_note(int(requester.get("id") or 0), int(requester["sender_id"]), name))
+    return f"task {task.serial} of {mission.label} starts now in {where}"
 
 
 def handle_workrun(client: ZulipClient, channel: str, topic: str) -> None:

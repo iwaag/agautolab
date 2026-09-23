@@ -730,18 +730,25 @@ def test_start_flag_moves_the_mission_to_started(monkeypatch, tmp_path):
     workspace = superdirector_dir(tmp_path)
     workspace.mkdir(parents=True)
     (workspace / "start.flag").touch()
-
-    sections, resolve_after = zulip_listener.handle_superdirector_response(
-        Client(calls), CHANNEL, TOPIC, PROJECT, workspace, BOT_ID
+    requester = {"id": 70, "sender_id": 15, "sender_full_name": "Front"}
+    monkeypatch.setattr(
+        zulip_listener, "start_first_task",
+        lambda client, mission, self_id, who: calls.append(("start-first", who["sender_full_name"]))
+        or f"task 1 of {mission.label} starts now in work/workrun-task1",
     )
 
-    assert calls == [("read-mission", CHANNEL, TOPIC), ("mission-state", "started")]
-    # Starting the mission does not start a task: a task waits for a post in
-    # its own topic, and the line says so, because p9 watched a supervisor
-    # assume otherwise and wait for work nobody had triggered.
+    sections, resolve_after = zulip_listener.handle_superdirector_response(
+        Client(calls), CHANNEL, TOPIC, PROJECT, workspace, BOT_ID, requester=requester
+    )
+
+    assert calls == [("read-mission", CHANNEL, TOPIC), ("mission-state", "started"), ("start-first", "Front")]
+    # Starting the mission starts its first task (robust_workflow p1 step 3):
+    # "you may start" is the authorisation, and relaying it again into task
+    # 1's topic was one more post for the requester to forget. The line says
+    # how the rest proceed, because p9 watched a supervisor assume otherwise.
     assert sections == [
-        f"mission {MISSION.label} is now in progress; each task waits for a post "
-        "in its own `workrun-…` topic, and nothing runs until somebody makes it"
+        f"mission {MISSION.label} is now in progress; each next task starts when the one before it is accepted",
+        f"task 1 of {MISSION.label} starts now in work/workrun-task1",
     ]
     assert resolve_after is False
 
@@ -2332,3 +2339,42 @@ def test_an_unavailable_harness_is_not_reported_as_a_wrong_declaration(monkeypat
     published = instance.SPEC.published_options("Autolab")
     assert published.get("default").pool not in ("", "-")
     assert instance.SPEC.pool_diagnostics() == ()
+
+
+def test_the_close_out_starts_the_next_task_for_whoever_accepted(monkeypatch, tmp_path):
+    """robust_workflow p1 step 3: the acceptance that closes a task is what
+    starts the next one; the requester is the one who accepted."""
+    calls = []
+    wire_run(monkeypatch, tmp_path, calls, report="all good\n")
+    seen = []
+    monkeypatch.setattr(
+        zulip_listener, "start_next_task",
+        lambda client, target, self_id, requester, hold=None: (
+            seen.append((target.task.serial, requester.get("sender_full_name"), hold))
+            or "task 3 of M starts now in work/workrun-task3"
+        ),
+    )
+    zulip_listener.handle_workrun(RunClient(calls), WORK_CHANNEL, WORKRUN_TOPIC)
+    assert seen == [(2, "Developer", None)]
+    assert "task 3 of M starts now" in last_reply(calls)
+
+
+def test_a_hold_flag_is_passed_on_with_its_reason(monkeypatch, tmp_path):
+    calls = []
+    wire_run(monkeypatch, tmp_path, calls, report="all good\n")
+    seen = []
+    monkeypatch.setattr(
+        zulip_listener, "start_next_task",
+        lambda client, target, self_id, requester, hold=None: seen.append(hold) or "held",
+    )
+    real = zulip_listener.workrun_supercoder
+
+    def with_hold(prompt, cwd, **kwargs):
+        output = real(prompt, cwd, **kwargs)
+        workspace = Path(re.search(r'is placed in "([^"]+)"', prompt).group(1))
+        (workspace / "hold.flag").write_text("wait for the art review\n")
+        return output
+
+    monkeypatch.setattr(zulip_listener, "workrun_supercoder", with_hold)
+    zulip_listener.handle_workrun(RunClient(calls), WORK_CHANNEL, WORKRUN_TOPIC)
+    assert seen == ["wait for the art review"]
