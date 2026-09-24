@@ -64,6 +64,16 @@ read-back of what is currently registered are read from there, and `plan.md`,
 the task split and the flags are written back there, so
 everything one run wrote stays behind in its own generation as evidence and
 can never be acted on twice.
+
+**Since `robust_workflow` p3 ex1 a task runs in its mission's own copy**
+(`agautolab.missionspace`): concurrent missions no longer share a working
+tree, a cancelled mission's edits stay on its own branch, and a worker's
+commit is a checkpoint. The requester's agreement closes a task by binding
+exactly the copy's content to commits, integrating them into the project
+folder's shared branches under a per-project lock, and publishing them —
+only then is the task `completed`. What happened is written in the task's
+topic as `[selfnote][change]` notes, which is also how an interrupted
+close-out is finished without another run.
 """
 
 from __future__ import annotations
@@ -1008,10 +1018,12 @@ def workrun_supercoder(prompt: str, cwd: Path,
                    on_event: Callable[[dict], None] | None = None,
                    home: tuple[str, str] | None = None,
                    selection: Selection | None = None) -> str:
-    """One task-serving run in the project folder, with its record.
+    """One task-serving run in its mission's own copy, with its record.
 
-    Like the superdirector it runs where `main/`, `direction/` and `devlog/`
-    are real directories, and its serving workspace travels by absolute path.
+    Like the superdirector it runs where the repositories are real
+    directories — since robust_workflow p3 ex1 the mission's worktrees of
+    them (`agautolab.missionspace`), never the project folder — and its
+    serving workspace travels by absolute path.
 
     `home` is the `workrun-` conversation this task is. A request this run
     posts to another agent is recorded against it, so the answer brings the

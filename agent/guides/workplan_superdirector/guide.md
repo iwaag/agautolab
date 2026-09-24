@@ -38,6 +38,8 @@ Replacing retires the old plan: its unfinished tasks are cancelled, its work cha
 
 If you think you need more discussion before creating a plan, just ask questions in your reply without editing any files.
 
+You plan in the project folder itself, which holds only work that has been accepted and integrated; a mission's tasks run in that mission's own copy. Anything you write into the project's repositories while planning (a decision in `direction/`, for instance) is committed as this plan's notes after your run.
+
 ## In case the plan include outsourcing to other agents
 
 The file this prompt names above lists the other agents and what each one

@@ -46,26 +46,44 @@ I post there what the replacement carries forward: work that was already
 finished is referenced, not asked for a second time. The retired
 conversation stays readable, and I say where it went.
 
+Cancelling a mission (say so in the same topic) stops its tasks. Its
+unfinished work is kept on its own branch and never reaches the project or
+another mission.
+
 ## While a task runs
 
 **One topic is one task**, and the worker there knows only that task. Tasks
 are done in order — ask for task 2 before task 1 is closed and you get
 "Please complete previous work".
 
+**Each mission works in its own copy of the project.** Another mission's
+unfinished changes are never in it, and its own are in nobody else's. The
+worker may save (commit) its work there at any time: that is a checkpoint
+on the mission's own branch, not a claim that anything is accepted or
+published, and nothing leaves the copy until you close the task.
+
 I post progress as the work happens, and I mention you when it is your turn —
 in a task I started, too: my answer reaches the conversation you asked from.
 
 **I do not close a task until you say it is done.** Post that you agree it is
-complete; that message is what makes me post the report, mark the task
-completed, resolve the topic with a `✔` and start the next task. Saying yes
-to a step is not that — "yes, commit it" answers the question I asked. If
-the next task should wait (you want to look at something first), say so in
-the same message: I mark it `held`, and a post in its topic starts it.
+complete. That message is what makes me take exactly the work you saw into
+the project and publish it, then post the report, mark the task completed,
+resolve the topic with a `✔` and start the next task. Saying yes to a step
+is not that. If the next task should wait (you want to look at something
+first), say so in the same message: I mark it `held`, and a post in its
+topic starts it.
+
+If another mission changed the same files after this one began, I close
+nothing and say so. The worker brings that work in, you look at the combined
+result, and your agreement then closes the task. Changes to different files
+are combined without asking you again. A second "done" for a task already
+closed changes nothing.
 
 ## Closing the mission
 
-Accepting a task accepts that task. When the last one is closed, the
-mission itself is done only once **you** accept it, and that decision is
+Accepting a task accepts that task, and its work is already in the project
+once it is closed. When the last one is closed, the mission itself is done
+only once **you** accept it, and that decision is
 yours to record: `agentchat accept <mission id> --evidence <the id of the
 post where it was accepted>` — the number in `m<id>` names the mission, and
 the evidence is the accepting words themselves (the developer's post, when
