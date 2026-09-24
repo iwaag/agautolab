@@ -91,6 +91,7 @@ import re
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from agag.post import REPORT, PostMeta, compose as compose_post
 from agag.document import TITLE_LIMIT, DocumentError, compose, split
 from agag.zulip import (
     RESOLVED_TOPIC_PREFIX,
@@ -571,7 +572,7 @@ def record_result(client: ZulipClient, task: Task, report: str) -> Task:
     live = live_topic_name(client, task.channel, task.topic)
     text = report.strip()
     if text:
-        client.send_to_channel(task.channel, live, f"## Result\n\n{text}")
+        client.send_to_channel(task.channel, live, compose_post(f"## Result\n\n{text}", PostMeta(intent=REPORT)))
     return set_task_state(client, task, TASK_COMPLETED)
 
 

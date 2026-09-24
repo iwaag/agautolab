@@ -86,6 +86,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from agag.agent import SWEEP_ACK as ACK_TEXT, exec_options_for
+from agag.post import PROGRESS, REPORT, RESPONSE_REQUEST, PostMeta, compose
 from agag.reply import repair_with
 from agag.entrance import EMPTY_REPLY, NO_ANSWER as NO_CLOSING_MESSAGE, handle_entrance
 from agag.execopt import Selection, exec_note
@@ -1003,7 +1004,10 @@ def supercoder_prompt(bot_name: str, workspace: Path, task: str, threads=(), vie
         "",
         task.strip(),
     ]
-    return prompt_with_guide(lines, guide("workrun_supercoder", "guide.md"))
+    # A task run speaks to the requester like every conversational role: its
+    # reply is what it marks, and it says whether it asks them something
+    # (`agag.reply`, `agag.post`) — clearer_chat_ui step 4.
+    return prompt_with_guide(lines, guide("workrun_supercoder", "guide.md"), reply=True)
 
 
 def _copy_lines(view) -> list[str]:
@@ -1049,8 +1053,9 @@ def workrun_supercoder(prompt: str, cwd: Path,
         raise ListenerError(f"supercoder run exited {exit_code}: {output.strip()[:500]}")
     # Whether the task is done is read from `report.md`, never from this text:
     # a run that edited files for fourteen turns and then stopped without a
-    # farewell still did the work.
-    return output.strip() or NO_CLOSING_MESSAGE
+    # farewell still did the work — so silence is said as a report, marked,
+    # rather than bought a repair run.
+    return output.strip() or f"```ag-reply intent=report\n{NO_CLOSING_MESSAGE}\n```"
 
 
 # --- live progress on workrun- topics ----------------------------------------
@@ -1146,7 +1151,7 @@ class RunProgress:
             found = locate(self.client, Conversation(self.channel, self.topic, self.anchor or None)) \
                 if self.anchor else None
             live = found.topic if found is not None else live_topic_name(self.client, self.channel, self.topic)
-            topic_write(live, body, channel=self.channel, client=self.client)
+            topic_write(live, compose(body, PostMeta(intent=PROGRESS)), channel=self.channel, client=self.client)
         except Exception as error:  # noqa: BLE001 - progress never kills a run
             log(
                 f"could not post progress to {self.channel!r}/{self.topic!r}, "
@@ -1444,6 +1449,17 @@ def _owed_close_out(changes) -> object | None:
 
 
 def serve_run(context) -> TopicResult:
+    """`_serve_run`, with the task run's own words as the reply: they are
+    model output under the reply contract, and every exit after the run
+    carries them — the listener's deterministic lines follow as sections."""
+    said: dict = {}
+    result = _serve_run(context, said)
+    if "output" in said and result.output is None:
+        result.output, result.repair = said["output"], said["repair"]
+    return result
+
+
+def _serve_run(context, said: dict) -> TopicResult:
     """One serving of a `workrun-` topic: gate, agent in the mission's own
     copy, and — only if the run wrote a report and the requester agreed —
     the close-out: bind, integrate, record.
@@ -1456,13 +1472,13 @@ def serve_run(context) -> TopicResult:
     context.step = "reading the binding"
     task = run_binding(context.client, context.channel, context.topic, context.self_id)
     if task is None:
-        return TopicResult([WRONG_PLACE_REPLY])
+        return TopicResult([WRONG_PLACE_REPLY], meta=PostMeta(intent=REPORT))
 
     context.step = "the previous-work gate"
     target = run_target(context.client, task, context.self_id)
     if target.blocked_by:
         # Handler-side, before any cost: no agent run happens behind a gate.
-        return TopicResult([f"{PREVIOUS_WORK_REPLY} ({target.blocked_by})"])
+        return TopicResult([f"{PREVIOUS_WORK_REPLY} ({target.blocked_by})"], meta=PostMeta(intent=REPORT))
     slug = target.mission.slug
     serial, label = target.task.serial, target.mission.label
 
@@ -1513,15 +1529,16 @@ def serve_run(context) -> TopicResult:
     # in: progress belongs where the task lives.
     progress = RunProgress(context.client, context.channel, context.topic, anchor=getattr(context, "anchor", 0))
     try:
-        sections.append(
-            workrun_supercoder(
-                supercoder_prompt(context.bot_name, workspace, task_text, threads, view=view),
-                view.path,
-                on_event=progress,
-                home=(context.channel, context.topic),
-                selection=context.selection,
-            )
+        output = workrun_supercoder(
+            supercoder_prompt(context.bot_name, workspace, task_text, threads, view=view),
+            view.path,
+            on_event=progress,
+            home=(context.channel, context.topic),
+            selection=context.selection,
         )
+        said["output"] = output
+        said["repair"] = repair_with(lambda again: workrun_supercoder(
+            again, view.path, home=(context.channel, context.topic), selection=context.selection), output)
     finally:
         # The tail of the stream — what the run was doing when it ended —
         # posts before the outcome does, whichever outcome it is.
@@ -1561,7 +1578,9 @@ def serve_run(context) -> TopicResult:
             "nobody has said in this topic that the task is done. It closes when its requester agrees here. "
             f"Its work is checkpointed on {view.branch}; nothing is integrated"
         )
-        return TopicResult(sections)
+        # Waiting for the requester's agreement is a request for their answer;
+        # the run's own reply may say so first, and what it declares wins.
+        return TopicResult(sections, meta=PostMeta(intent=RESPONSE_REQUEST, ask="confirmation"))
     evidence = int(requester.get("id") or 0)
 
     context.step = "binding the accepted change"
@@ -1712,8 +1731,9 @@ def _start(client: ZulipClient, mission: Mission, task: Task, where: str, reques
     live = where.split("/", 1)[1]
     client.send_to_channel(
         task.channel, live,
-        f"Task {task.serial} of {mission.label} starts now: {because}, and the mission is authorised to run. "
-        f"The report comes back to {name or 'the requester'}; a post here adds to this task.",
+        compose(f"Task {task.serial} of {mission.label} starts now: {because}, and the mission is authorised to run. "
+                f"The report comes back to {name or 'the requester'}; a post here adds to this task.",
+                PostMeta(intent=PROGRESS)),
     )
     client.send_to_channel(task.channel, live, start_note(int(requester.get("id") or 0), int(requester["sender_id"]), name))
     return f"task {task.serial} of {mission.label} starts now in {where}"
@@ -1806,7 +1826,7 @@ def serve_bmining(context) -> TopicResult:
 
     direction_dir = direction_directory(project)
     if not (direction_dir / ".git").exists():
-        return TopicResult([NO_DIRECTION_REPLY])
+        return TopicResult([NO_DIRECTION_REPLY], meta=PostMeta(intent=REPORT))
     work_dir = bmining_work_directory(project)
     try:
         context.step = "chatlog placement"

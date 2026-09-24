@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from agag.reply import REPLY_GUIDE
 from agag import topics
 from agag.topics import GuideError
 
@@ -1213,7 +1214,8 @@ def wire_run(monkeypatch, tmp_path, calls, *, target=TARGET, binding=TASK, repor
         workspace = Path(re.search(r'is placed in "([^"]+)"', prompt).group(1))
         if report is not None:
             (workspace / "report.md").write_text(report)
-        return output
+        # The run's words under the reply contract (clearer_chat_ui step 4).
+        return output if "ag-reply" in output else f"```ag-reply\n{output}\n```"
 
     monkeypatch.setattr(zulip_listener, "workrun_supercoder", supercoder)
     monkeypatch.setattr(
@@ -1293,7 +1295,7 @@ def test_a_run_topic_that_is_not_bound_to_a_task_is_explained(monkeypatch, tmp_p
     zulip_listener.handle_workrun(RunClient(calls, history), WORK_CHANNEL, WORKRUN_TOPIC)
 
     assert not any(call[0] in {"target", "supercoder"} for call in calls)
-    assert last_reply(calls) == HANDOFF + zulip_listener.WRONG_PLACE_REPLY
+    assert last_reply(calls) == HANDOFF + zulip_listener.WRONG_PLACE_REPLY + "\n\n`ag-post intent=report`"
 
 
 def test_the_previous_task_gate_answers_before_any_cost(monkeypatch, tmp_path):
@@ -1305,7 +1307,7 @@ def test_the_previous_task_gate_answers_before_any_cost(monkeypatch, tmp_path):
 
     assert not any(call[0] in {"init", "supercoder"} for call in calls)
     assert last_reply(calls) == HANDOFF + (
-        f"{zulip_listener.PREVIOUS_WORK_REPLY} (task 1 of {MISSION.label})"
+        f"{zulip_listener.PREVIOUS_WORK_REPLY} (task 1 of {MISSION.label})\n\n`ag-post intent=report`"
     )
 
 
@@ -1335,7 +1337,7 @@ def test_a_serving_runs_the_supercoder_in_the_mission_s_own_copy(monkeypatch, tm
     assert f"this mission's own copy of the project ({cwd})" in prompt
     assert "holds only integrated work; read it, never write it" in prompt
     assert str(workspace) in prompt
-    assert prompt.endswith("RUN GUIDE")
+    assert "RUN GUIDE" in prompt and prompt.endswith(REPLY_GUIDE), "the task run speaks under the reply contract"
     # The task travels in the prompt as its own topic holds it — the
     # task[N].md the superdirector wrote lives in another generation.
     assert "# Add the README\n\nWrite it." in prompt
@@ -1997,7 +1999,7 @@ def test_run_progress_throttles_then_posts(monkeypatch):
     progress.last_post -= 2000
     progress({"type": "assistant", "message": {"role": "assistant", "content": [
         {"type": "text", "text": "done reading"}]}})
-    assert posts == [("workrun-1", "🔧 Read: a.py\n💬 done reading")]
+    assert posts == [("workrun-1", "🔧 Read: a.py\n💬 done reading\n\n`ag-post intent=progress`")]
 
     progress({"type": "user", "message": {"content": []}})  # not an assistant event
     progress.flush()
@@ -2012,14 +2014,14 @@ def test_a_serving_posts_the_progress_tail_before_the_outcome(monkeypatch, tmp_p
         on_event({"type": "assistant", "message": {"role": "assistant", "content": [
             {"type": "tool_use", "id": "t1", "name": "Bash",
              "input": {"command": "uv run pytest"}}]}})
-        return "work done"
+        return "```ag-reply intent=report\nwork done\n```"
 
     monkeypatch.setattr(zulip_listener, "workrun_supercoder", streaming_run)
     zulip_listener.handle_workrun(RunClient(calls), WORK_CHANNEL, WORKRUN_TOPIC)
 
     writes = calls_of(calls, "write")
     assert writes[0][2] == zulip_listener.ACK_TEXT
-    assert writes[1][2] == "🔧 Bash: uv run pytest"  # the flushed tail
+    assert writes[1][2] == "🔧 Bash: uv run pytest\n\n`ag-post intent=progress`"  # the flushed tail
     assert "work done" in writes[2][2]  # then the outcome
 
 
@@ -2038,7 +2040,8 @@ def test_run_wrappers_report_a_missing_closing_message(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(zulip_listener, "bmining_prompt", lambda bot_name: "PROMPT")
 
-    assert zulip_listener.workrun_supercoder("p", tmp_path) == zulip_listener.NO_CLOSING_MESSAGE
+    assert zulip_listener.workrun_supercoder("p", tmp_path) == (
+        f"```ag-reply intent=report\n{zulip_listener.NO_CLOSING_MESSAGE}\n```")
     assert zulip_listener.run_superdirector("p", tmp_path) == zulip_listener.NO_CLOSING_MESSAGE
     assert zulip_listener.run_director("p", tmp_path) == zulip_listener.NO_CLOSING_MESSAGE
 
