@@ -844,6 +844,25 @@ def handle_superdirector_response(
             log(f"could not start the first task of {mission.label}: {error!r}")
             sections.append(f"its first task was not started ({error}); a post in its topic starts it")
 
+    accept_flag = workspace / "accept.flag"
+    if accept_flag.is_file():
+        # The requester said, here, that the whole mission is accepted
+        # (robust_workflow p3 step 3). The same record `agentchat accept`
+        # writes — whose words, on which post, then `done` — with the post
+        # this serving answers as the evidence; refused, and said so, while a
+        # task is still open. The topic is resolved after the reply, like a
+        # cancellation.
+        from agag.acceptance import AcceptanceRefused, accept_mission
+
+        mission = _mission_or_error(client, channel, plan_topic, self_id, mission)
+        evidence = int((requester or {}).get("id") or 0) or None
+        try:
+            done = accept_mission(client, mission.mission_id, evidence=evidence, resolve=False, log=log)
+            sections.append(done.summary())
+            resolve_after = True
+        except AcceptanceRefused as refused:
+            sections.append(f"{mission.label} is not recorded as accepted: {refused}")
+
     cancel_flag = workspace / "cancel.flag"
     if cancel_flag.is_file():
         # The only remaining cancel-everything path: the mission is over, so
@@ -1336,9 +1355,13 @@ def start_next_task(
         if serial > target.task.serial and not task.finished
     ]
     if not remaining:
+        # The mission's own decision is the requester's, and so is its record
+        # (robust_workflow p3 step 3): `agentchat accept` writes it without a
+        # post, so nobody's planning run is spent relaying it.
         return (
-            f"every task of {mission.label} is finished; the mission waits for your acceptance in "
-            f"{mission.channel}/{mission.topic}"
+            f"every task of {mission.label} is finished; the mission is done once you accept it: "
+            f"`agentchat accept {mission.mission_id} --evidence <the post where it was accepted>` records that, "
+            f"or say it in {mission.channel}/{mission.topic}"
         )
     following = remaining[0]
     where = f"{following.channel}/{live_topic_name(client, following.channel, following.topic)}"

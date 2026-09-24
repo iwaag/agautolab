@@ -99,9 +99,16 @@ class Realm:
     def whoami(self, refresh: bool = False) -> dict:
         return {"user_id": BOT_ID, "full_name": "autolab-agstudio1"}
 
-    def message(self, message_id: int) -> dict | None:
+    def message(self, message_id: int, *, strict: bool = False) -> dict | None:
         self.calls += 1
         return self.messages.get(int(message_id))
+
+    def public_notes(self, tag: str, num_before: int = 1000) -> list[dict]:
+        """Every `[selfnote][<tag>]` in the realm, oldest first (the trace's
+        realm-wide note search)."""
+        self.calls += 1
+        rows = [m for i in self.order if (m := self.messages.get(i)) and f"[selfnote][{tag}]" in m["content"]]
+        return rows[-num_before:]
 
     def send_to_channel(self, channel: str, topic: str, content: str) -> int:
         self.calls += 1

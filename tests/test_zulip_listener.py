@@ -753,6 +753,56 @@ def test_start_flag_moves_the_mission_to_started(monkeypatch, tmp_path):
     assert resolve_after is False
 
 
+def test_accept_flag_records_the_requester_s_acceptance_through_the_one_operation(monkeypatch, tmp_path):
+    """robust_workflow p3 step 3: a requester who says in the plan's
+    conversation that the whole mission is accepted gets the same record
+    `agentchat accept` writes, with the post this serving answers as the
+    evidence — and the topic is resolved after the reply."""
+    import agag.acceptance as acceptance
+
+    calls = []
+    wire_response(monkeypatch, tmp_path, calls)
+    workspace = superdirector_dir(tmp_path)
+    workspace.mkdir(parents=True)
+    (workspace / "accept.flag").touch()
+    requester = {"id": 71, "sender_id": 8, "sender_full_name": "Developer"}
+    seen = {}
+
+    def accept(client, mission_id, *, evidence=None, resolve=True, log=None):
+        seen.update(mission=mission_id, evidence=evidence, resolve=resolve)
+        return acceptance.Acceptance(mission_id, CHANNEL, TOPIC, evidence, 8, "Developer", tasks=["1", "2"],
+                                     written=["done"])
+
+    monkeypatch.setattr(acceptance, "accept_mission", accept)
+    sections, resolve_after = zulip_listener.handle_superdirector_response(
+        Client(calls), CHANNEL, TOPIC, PROJECT, workspace, BOT_ID, requester=requester
+    )
+    assert seen == {"mission": MISSION.mission_id, "evidence": 71, "resolve": False}
+    assert sections == [f"{MISSION.label} is done: accepted by Developer (#71); task(s) 1, 2 recorded accepted"]
+    assert resolve_after is True
+
+
+def test_accept_flag_while_a_task_is_open_says_so_and_changes_nothing(monkeypatch, tmp_path):
+    import agag.acceptance as acceptance
+
+    calls = []
+    wire_response(monkeypatch, tmp_path, calls)
+    workspace = superdirector_dir(tmp_path)
+    workspace.mkdir(parents=True)
+    (workspace / "accept.flag").touch()
+
+    def refuse(client, mission_id, **kwargs):
+        raise acceptance.AcceptanceRefused("task 2 is not finished")
+
+    monkeypatch.setattr(acceptance, "accept_mission", refuse)
+    sections, resolve_after = zulip_listener.handle_superdirector_response(
+        Client(calls), CHANNEL, TOPIC, PROJECT, workspace, BOT_ID,
+        requester={"id": 71, "sender_id": 8, "sender_full_name": "Developer"},
+    )
+    assert sections == [f"{MISSION.label} is not recorded as accepted: task 2 is not finished"]
+    assert resolve_after is False
+
+
 def test_a_flag_for_a_mission_nobody_planned_is_refused(monkeypatch, tmp_path):
     """A `start.flag` about a mission that does not exist is a question
     answered "there is nothing to start", not an empty mission to invent."""

@@ -62,6 +62,22 @@ to a step is not that — "yes, commit it" answers the question I asked. If
 the next task should wait (you want to look at something first), say so in
 the same message: I mark it `held`, and a post in its topic starts it.
 
+## Closing the mission
+
+Accepting a task accepts that task. When the last one is closed, the
+mission itself is done only once **you** accept it, and that decision is
+yours to record: `agentchat accept <mission id> --evidence <the id of the
+post where it was accepted>` — the number in `m<id>` names the mission, and
+the evidence is the accepting words themselves (the developer's post, when
+you are relaying their decision). It writes the acceptance and marks the
+mission done without posting anything, so nobody is served to acknowledge
+it; it refuses while a task is still open. Do not post the acceptance in
+the `workplan-…` topic for me to note: a post there asks me to plan. A
+person without that tool can say it there, and I record it the same way.
+When the words that accept the last task also accept the mission ("that
+completes the mission"), record it once that task's closing report has
+arrived.
+
 ## In an argue
 
 Name me in an argue (`#argue`, the conversations Front facilitates) and I

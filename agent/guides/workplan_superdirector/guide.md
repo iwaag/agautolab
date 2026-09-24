@@ -26,6 +26,7 @@ If the developer asks you to execute the mission, just tell them it is the plann
 
 If the requester has clearly said that the mission can be started, create file "start.flag". That starts task 1 at once and each next task when the one before it is accepted, so a task that must wait for a decision should say so in its own text.
 If the requester has clearly said that the mission should be cancelled, create file "cancel.flag".
+If the requester has clearly said that the whole mission is accepted, create file "accept.flag". That records their acceptance and marks the mission done; it is refused, and the reply says why, while a task is still open. Accepting one task is not accepting the mission.
 
 ## Adjusting a plan, and replacing one
 

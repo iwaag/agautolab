@@ -17,6 +17,14 @@ credential at all.
     python -m agautolab.mission_done m5512        # one mission, by label or id
     python -m agautolab.mission_done --dry-run    # say what would move
 
+Since `robust_workflow` p3 step 3 it writes through the one acceptance
+operation (`agag.acceptance.accept_mission`), so a mission closed here carries
+the same record as one the requester accepts with `agentchat accept`: whose
+decision, on which post, then `done`. The post is `--evidence`, or by default
+the one the serving running this command answers (`AGENTCHAT_HOME_ANCHOR` —
+the request in autolab's own channel to close out finished work); without
+either, nothing is moved.
+
 One line per mission, whether it moved or not, so the caller can report what
 happened without asking again. Exit 1 when a mission named explicitly cannot
 be closed — that is a question answered "no", and it should not read as
@@ -27,10 +35,12 @@ resolved topic, it is reported and exits 0.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 from dataclasses import dataclass
 
+from agag.acceptance import AcceptanceRefused, accept_mission
 from agag.zulip import ZulipClient, ZulipError, log
 
 from .instance import PROJECT_CHANNEL_PREFIX, SPEC, WORKPLAN_TOPIC_PREFIX
@@ -44,7 +54,6 @@ from .worklog import (
     mission_at,
     mission_tasks,
     read_mission,
-    set_mission_state,
 )
 
 #: A mission that is already done, said the way a caller can recognise.
@@ -173,6 +182,10 @@ def main(argv: list[str] | None = None, out=None, err=None, client=None) -> int:
         "--dry-run", action="store_true",
         help="say what would move, and move nothing",
     )
+    parser.add_argument(
+        "--evidence", type=int, default=None,
+        help="the post where the requester asked for the close (default: the post this run answers)",
+    )
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
 
     try:
@@ -180,6 +193,7 @@ def main(argv: list[str] | None = None, out=None, err=None, client=None) -> int:
         self_id = int(client.whoami()["user_id"])
         closable: list[Candidate] = []
         refused: list[tuple[Candidate, str]] = []
+        refused_now: list[str] = []
         if args.mission is None:
             closable = finished_missions(client, self_id)
         else:
@@ -192,21 +206,32 @@ def main(argv: list[str] | None = None, out=None, err=None, client=None) -> int:
 
         for candidate, reason in refused:
             print(f"{candidate.label} not moved: {reason}", file=out)
+        evidence = args.evidence or int(os.environ.get("AGENTCHAT_HOME_ANCHOR", "0") or 0) or None
+        moved = 0
         for candidate in closable:
             title = candidate.mission.title
             count = len(candidate.tasks)
             if args.dry_run:
                 print(f'{candidate.label} would be done "{title}" ({count} tasks)', file=out)
                 continue
-            set_mission_state(client, candidate.mission, MISSION_DONE)
-            print(f'{candidate.label} done "{title}" ({count} tasks)', file=out)
+            try:
+                done = accept_mission(client, candidate.mission.mission_id, evidence=evidence, resolve=False,
+                                      log=log)
+            except AcceptanceRefused as why:
+                print(f"{candidate.label} not moved: {why}", file=out)
+                refused_now.append(str(why))
+                continue
+            moved += 1
+            whose = done.by_name or done.by_id
+            print(f'{candidate.label} done "{title}" ({count} tasks); accepted by {whose}'
+                  + (f" (#{done.evidence})" if done.evidence else ""), file=out)
         if args.mission is not None and not closable and not refused:
             print(f"agautolab.mission_done: no mission named {args.mission}", file=err)
             return 1
         if not closable and not refused:
             print("no mission is ready to be done", file=out)
-        blocking = [reason for _, reason in refused if reason != ALREADY_DONE]
-        return 1 if blocking and not closable else 0
+        blocking = [reason for _, reason in refused if reason != ALREADY_DONE] + refused_now
+        return 1 if blocking and not moved else 0
     except (WorklogError, ZulipError) as error:
         print(f"agautolab.mission_done: {error}", file=err)
         return 1

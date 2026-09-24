@@ -13,6 +13,8 @@ import io
 
 import pytest
 
+from agag.selfnote import Conversation, rootchat_note
+
 from agautolab import mission_done, worklog
 
 from realm import BOT_ID, HUMAN_ID, Realm
@@ -38,8 +40,11 @@ def mission_with(realm, *states, topic=TOPIC):
     realm.add_channel(mission.work_channel)
     for serial, state in enumerate(states, start=1):
         run_topic = worklog.run_topic_name(mission.mission_id, serial)
+        # With the root note naming the plan, as `anchor_run_topic` writes it:
+        # that note is how every reader of the mission finds its tasks.
         task = worklog.anchor_task(
-            realm, mission.work_channel, run_topic, mission.mission_id, serial, BOT_ID
+            realm, mission.work_channel, run_topic, mission.mission_id, serial, BOT_ID,
+            extra_notes=[rootchat_note(Conversation(CHANNEL, topic, int(mission.mission_id)))],
         )
         worklog.post_document(
             realm, mission.work_channel, run_topic, f"# task {serial}\n\nwork\n"
@@ -49,7 +54,12 @@ def mission_with(realm, *states, topic=TOPIC):
     return mission
 
 
-def run(realm, argv, expect=0):
+def run(realm, argv, expect=0, evidence=True):
+    """Run the command as the entrance does: answering the human's request
+    to close out finished work, which is the evidence it records."""
+    if evidence and "--dry-run" not in argv:
+        said = realm.post(CHANNEL, "close-out", "Please close out the finished missions.", sender_id=HUMAN_ID)
+        argv = [*argv, "--evidence", str(said)]
     out, err = io.StringIO(), io.StringIO()
     code = mission_done.main(argv, out=out, err=err, client=realm)
     assert code == expect, (code, out.getvalue(), err.getvalue())
@@ -107,7 +117,7 @@ def test_a_mission_already_done_is_not_moved_again(realm):
     mission = mission_with(realm, worklog.TASK_COMPLETED)
     run(realm, [])
     before = len(realm.order)
-    run(realm, [])
+    run(realm, [], evidence=False)
     assert len(realm.order) == before
 
 
@@ -165,4 +175,27 @@ def test_dry_run_says_what_would_move_and_moves_nothing(realm):
     mission = mission_with(realm, worklog.TASK_COMPLETED)
     out, _ = run(realm, ["--dry-run"])
     assert f'{mission.label} would be done "A mission" (1 tasks)' in out
+    assert state_of(realm, mission) == worklog.MISSION_PLANNED
+
+
+# --- the record (robust_workflow p3 step 3) ----------------------------------
+
+
+def test_the_close_is_the_shared_acceptance_record_with_its_evidence(realm):
+    from agag.acceptance import parse_acceptance
+
+    mission = mission_with(realm, worklog.TASK_COMPLETED)
+    out, _ = run(realm, [mission.label])
+    said = max(i for i, m in realm.messages.items() if m["subject"] == "close-out")
+    assert f"accepted by Developer (#{said})" in out
+    notes = [parse_acceptance(m["content"]) for m in realm.messages.values()
+             if m["content"].startswith("[selfnote][acceptance]")]
+    assert notes == [(said, HUMAN_ID, "Developer")]
+
+
+def test_without_a_post_to_rest_on_nothing_is_moved(realm, monkeypatch):
+    monkeypatch.delenv("AGENTCHAT_HOME_ANCHOR", raising=False)
+    mission = mission_with(realm, worklog.TASK_COMPLETED)
+    out, _ = run(realm, [mission.label], expect=1, evidence=False)
+    assert "not moved" in out and "--evidence" in out
     assert state_of(realm, mission) == worklog.MISSION_PLANNED
