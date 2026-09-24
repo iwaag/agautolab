@@ -1267,6 +1267,20 @@ def serve_run(context) -> TopicResult:
         # stays open and the next human post serves it again.
         return TopicResult(sections)
 
+    # The agreement is the requester's, and it has to be in what this
+    # serving read (robust_workflow p3 step 5, trial G): a run that the
+    # task's own start note began — nobody else has spoken in the topic —
+    # wrote `report.md` in its first serving, and the close-out then said
+    # "task 1 was accepted (#<the start note>)" and started task 2. A start
+    # note is why the task runs, never that anybody agreed it is done.
+    requester = requester_of(context.history, context.self_id, context.processed_up_to)
+    if requester is None or "because" in requester or requester.get("sender_id") == context.self_id:
+        sections.append(
+            f"task {target.task.serial} of {target.mission.label} is not closed: its run wrote a report, but "
+            "nobody has said in this topic that the task is done. It closes when its requester agrees here"
+        )
+        return TopicResult(sections)
+
     context.step = "closing the task"
     report = report_path.read_text(encoding="utf-8")
     record_result(context.client, target.task, report)
@@ -1284,7 +1298,6 @@ def serve_run(context) -> TopicResult:
     context.step = "the next task"
     hold_path = workspace / HOLD_FILE
     hold = hold_path.read_text(encoding="utf-8").strip() or "no reason given" if hold_path.is_file() else None
-    requester = requester_of(context.history, context.self_id, context.processed_up_to)
     try:
         sections.append(start_next_task(context.client, target, context.self_id, requester, hold=hold))
     except Exception as error:  # noqa: BLE001 - the task is closed; say what did not follow

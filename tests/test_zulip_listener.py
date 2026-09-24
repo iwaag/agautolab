@@ -1368,6 +1368,27 @@ def test_title_slug_stays_one_readable_path_component(title, stem):
     assert zulip_listener.title_slug(title) == stem
 
 
+def test_a_report_nobody_agreed_to_closes_nothing_and_starts_nothing(monkeypatch, tmp_path):
+    """robust_workflow p3 step 5, trial G: a task autolab started itself —
+    only its own notes, the start line and the start note in the topic —
+    whose run wrote `report.md` in its first serving. That is not the
+    requester agreeing: the task stays open, nothing is recorded, pushed or
+    started, and the reply says why."""
+    calls = []
+    wire_run(monkeypatch, tmp_path, calls, report="all good\n")
+    history = [
+        history_message(sender_id=BOT_ID, name="Autolab", content=ROOT_NOTE, id=11),
+        history_message(sender_id=BOT_ID, name="Autolab", content=TASK_NOTE, id=12),
+        history_message(sender_id=BOT_ID, name="Autolab", content="# Add the README", id=13),
+        history_message(sender_id=BOT_ID, name="Autolab", content="Task 2 starts now.", id=14),
+        history_message(sender_id=BOT_ID, name="Autolab", content="[selfnote][start] #9 for 15 Front", id=15),
+    ]
+    zulip_listener.handle_workrun(RunClient(calls, history=history), WORK_CHANNEL, WORKRUN_TOPIC)
+
+    assert calls_of(calls, "report") == [] and calls_of(calls, "push-main") == []
+    assert "is not closed" in last_reply(calls) and "nobody has said in this topic" in last_reply(calls)
+
+
 def test_a_run_that_said_nothing_still_closes_on_its_report(monkeypatch, tmp_path):
     """The harness stopped failing a run that wrote files and no farewell;
     `report.md`, not the answer text, is what says the task is done."""
