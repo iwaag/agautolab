@@ -1358,10 +1358,16 @@ def start_next_task(
         # The mission's own decision is the requester's, and so is its record
         # (robust_workflow p3 step 3): `agentchat accept` writes it without a
         # post, so nobody's planning run is spent relaying it.
+        # Addressed to the requester, whose step it is. Worded as "the mission
+        # is done once you accept it" the requester passed the command on to
+        # the human even when the human's acceptance had already said "that
+        # completes this mission" (p3 step 5, trials B and D).
         return (
-            f"every task of {mission.label} is finished; the mission is done once you accept it: "
-            f"`agentchat accept {mission.mission_id} --evidence <the post where it was accepted>` records that, "
-            f"or say it in {mission.channel}/{mission.topic}"
+            f"every task of {mission.label} is finished. The mission is done when you, its requester, record "
+            f"its acceptance: if the words that accepted this task also accepted the mission (\"that completes "
+            f"the mission\"), record them now with `agentchat accept {mission.mission_id} --evidence <that post>`; "
+            f"otherwise ask for the mission's acceptance and record it once it is given. A person without that "
+            f"tool can say it in {mission.channel}/{mission.topic}"
         )
     following = remaining[0]
     where = f"{following.channel}/{live_topic_name(client, following.channel, following.topic)}"
