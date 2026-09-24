@@ -1578,9 +1578,14 @@ def _serve_run(context, said: dict) -> TopicResult:
             "nobody has said in this topic that the task is done. It closes when its requester agrees here. "
             f"Its work is checkpointed on {view.branch}; nothing is integrated"
         )
-        # Waiting for the requester's agreement is a request for their answer;
-        # the run's own reply may say so first, and what it declares wins.
-        return TopicResult(sections, meta=PostMeta(intent=RESPONSE_REQUEST, ask="confirmation"))
+        # Waiting for the requester's agreement is a request for their answer,
+        # and it is required: whatever the run's reply declared (a `report`
+        # of its work, most often), the post asks the requester to confirm
+        # (`agag.post.combine`). Nobody to ask is no request.
+        asked = (requester or {}).get("sender_id")
+        if asked is None or int(asked) == int(context.self_id):
+            return TopicResult(sections)
+        return TopicResult(sections, meta=PostMeta(intent=RESPONSE_REQUEST, to=int(asked), ask="confirmation"))
     evidence = int(requester.get("id") or 0)
 
     context.step = "binding the accepted change"

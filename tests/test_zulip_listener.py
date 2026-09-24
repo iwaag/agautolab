@@ -6,6 +6,8 @@ import pytest
 from agag.reply import REPLY_GUIDE
 from agag import topics
 from agag.topics import GuideError
+from agag.outstanding import PENDING, read_requests
+from agag.post import RESPONSE_REQUEST, PostMeta, parse_post
 
 from agautolab import project_init, zulip_listener
 
@@ -1636,6 +1638,37 @@ def test_a_report_nobody_agreed_to_closes_nothing_and_starts_nothing(monkeypatch
 
     assert calls_of(calls, "report") == [] and calls_of(calls, "integrate") == []
     assert "is not closed" in last_reply(calls) and "nobody has said in this topic" in last_reply(calls)
+
+
+@pytest.mark.parametrize("fence", ["intent=report", "intent=progress", "intent=response_request ask=question",
+                                   "intent=response_request to=77 ask=question", ""])
+def test_a_report_nobody_agreed_to_asks_its_requester_whatever_the_run_declared(monkeypatch, tmp_path, fence):
+    """clearer_chat_ui ex1 step 1: the run's reply said `intent=report` and
+    the report won over the listener's "it closes when its requester agrees"
+    — the words asked for agreement, the wait list showed nothing. The
+    confirmation is the handler's requirement: it goes to the task's
+    requester (the start note names Front, 15), keeps the processed input
+    boundary, is listed as pending — and accepts and integrates nothing."""
+    calls = []
+    wire_run(monkeypatch, tmp_path, calls, report="all good\n",
+             output=f"```ag-reply {fence}\nAll tests pass.\n```")
+    history = [
+        history_message(sender_id=BOT_ID, name="Autolab", content=ROOT_NOTE, id=11),
+        history_message(sender_id=BOT_ID, name="Autolab", content=TASK_NOTE, id=12),
+        history_message(sender_id=BOT_ID, name="Autolab", content="# Add the README", id=13),
+        history_message(sender_id=BOT_ID, name="Autolab", content="Task 2 starts now.", id=14),
+        history_message(sender_id=BOT_ID, name="Autolab", content="[selfnote][start] #9 for 15 Front", id=15),
+    ]
+    zulip_listener.handle_workrun(RunClient(calls, history=history), WORK_CHANNEL, WORKRUN_TOPIC)
+
+    reply = last_reply(calls)
+    parsed = parse_post(reply)
+    assert "All tests pass." in parsed.text and "closes when its requester agrees" in parsed.text
+    assert parsed.meta == PostMeta(intent=RESPONSE_REQUEST, to=15, ask="confirmation", seen=parsed.meta.seen)
+    assert parsed.meta.seen and parsed.meta.seen >= 15
+    posted = [*history, history_message(sender_id=BOT_ID, name="Autolab", content=reply, id=900)]
+    assert [(r.id, r.state, r.to) for r in read_requests(posted).requests] == [(900, PENDING, 15)]
+    assert calls_of(calls, "report") == [] and calls_of(calls, "integrate") == []
 
 
 def test_a_run_that_said_nothing_still_closes_on_its_report(monkeypatch, tmp_path):
