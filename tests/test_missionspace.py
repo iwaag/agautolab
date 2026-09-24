@@ -369,3 +369,58 @@ def test_set_aside_moves_unattributed_changes_onto_a_branch(project):
     assert git(main, "show", "autolab/set-aside-test:untracked.txt") == "x"
     assert git(main, "rev-parse", "autolab/set-aside-test") == commit_id
     assert ms.set_aside(main, "autolab/set-aside-test", "again") is None
+
+
+# --- the listener's close-out on real git ------------------------------------
+
+
+def test_a_close_out_cut_after_the_push_finishes_once_on_retry(project, monkeypatch, tmp_path):
+    """The listener's own close-out, crashing between the push and the task's
+    record: the retry recognises the integration, merges nothing again and
+    records the task once."""
+    from types import SimpleNamespace
+
+    from agautolab import zulip_listener as zl
+    from agautolab.anchor import change_note, parse_change
+
+    sent, recorded = [], []
+    client = SimpleNamespace(send_to_channel=lambda channel, topic, content: sent.append(content) or 1)
+    monkeypatch.setattr(zl, "live_topic_name", lambda client, channel, topic: topic)
+    monkeypatch.setattr(zl, "git_environment", lambda config=None: None)
+    monkeypatch.setattr(ms, "PROJECTS_ROOT", project.projects)
+    monkeypatch.setattr(ms, "MISSIONS_ROOT", project.missions)
+    monkeypatch.setattr(zl, "TOPICS_ROOT", tmp_path / "topics")
+    monkeypatch.setattr(zl, "mission_tasks", lambda client, mission, self_id: {})
+    monkeypatch.setattr(zl, "start_next_task", lambda *args, **kwargs: "nothing left")
+    monkeypatch.setattr(zl, "record_task_in_devlog", lambda target, workspace, report: "recorded")
+    crash = [True]
+
+    def record_result(client, task, report):
+        if crash.pop() if crash else False:
+            raise RuntimeError("listener killed")
+        recorded.append(report)
+        return task
+
+    monkeypatch.setattr(zl, "record_result", record_result)
+    mission = zl.Mission(7, "demo", "pj-demo", "workplan-x")
+    task = zl.Task(8, 7, 1, "work-m7", "workrun-task1-m7")
+    target = zl.RunTarget(task, mission)
+    view = project.view(7)
+    edit(view.worktrees["main"], "# accepted work")
+    accepted = parse_change(change_note("accepted", {"main": commit(view.worktrees["main"], "work")},
+                                        evidence=40, gen=1))
+    context = SimpleNamespace(client=client, channel="work-m7", topic="workrun-task1-m7", self_id=11,
+                              history=[], step="")
+
+    with pytest.raises(RuntimeError):
+        zl.close_out(context, target, view, accepted, [])
+    after_crash = project.remote_log()
+    assert after_crash == ["work", "base"] and recorded == []
+
+    result = zl.close_out(context, target, project.view(7), accepted, [])
+
+    assert project.remote_log() == after_crash
+    assert len(recorded) == 1
+    assert any("(already there) and published" in line for line in result.sections)
+    assert [n.split()[1] for n in sent] == ["integrated", "integrated"]
+    assert result.resolve_after is True
