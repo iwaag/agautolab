@@ -25,7 +25,7 @@ import sys
 import urllib.parse
 from pathlib import Path
 
-from . import project_init
+from . import missionspace, project_init
 from .instance import AGAUTOLAB_ROOT
 from .project_init import GiteaConfig, ProjectInitError
 from .project_settings import project_name_from_workspace
@@ -109,7 +109,8 @@ def resolve_project(folder_argument: str | None, cwd: Path) -> str:
     """The project this run is working on: the argument, else the workspace in cwd."""
     if folder_argument:
         return folder_argument
-    project = project_name_from_workspace(cwd, project_init.PROJECTS_ROOT)
+    project = project_name_from_workspace(cwd, project_init.PROJECTS_ROOT) or \
+        missionspace.project_name_from_view(cwd)
     if project is None:
         raise CliError(
             "cannot tell which project this is: run inside a project workspace, "
@@ -151,7 +152,21 @@ def init_repo(folder: str, *, project: str | None = None, cwd: Path | None = Non
 
     project_init.ensure_gitea_repo(config, repo)
     project_init.ensure_clone(config, repo, destination)
+    attach_to_mission_copy(slug, cwd)
     return destination, wanted
+
+
+def attach_to_mission_copy(slug: str, cwd: Path) -> Path | None:
+    """Typed inside a mission's own copy, a new repository joins that copy
+    too (robust_workflow p3 ex1): the clone lands in the project folder,
+    where every repository lives, and the mission works on it in its copy."""
+    if missionspace.project_name_from_view(cwd) != slug:
+        return None
+    relative = cwd.resolve().relative_to(missionspace.MISSIONS_ROOT.resolve())
+    if len(relative.parts) < 2 or not re.fullmatch(r"m\d+", relative.parts[1]):
+        return None
+    view = missionspace.ensure_view(slug, int(relative.parts[1][1:]))
+    return view.path
 
 
 def _localtest_files(paper_id: str) -> dict[str, str]:

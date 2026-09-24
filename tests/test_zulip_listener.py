@@ -852,6 +852,65 @@ def test_cancel_flag_cancels_everything_and_archives_the_work_channel(monkeypatc
     assert resolve_after is True
 
 
+def test_cancel_flag_releases_the_mission_s_copy_and_integrates_nothing(monkeypatch, tmp_path):
+    """robust_workflow p3 ex1, p3's F: the cancelled mission's work is kept on
+    its branch and never reaches the project folder or another mission."""
+    calls = []
+    client = Client(calls)
+    client.channels_list = [{"name": CHANNEL, "stream_id": 7, "folder_id": None}]
+    wire_response(monkeypatch, tmp_path, calls, cancelled=1)
+    monkeypatch.setattr(zulip_listener, "existing_view",
+                        lambda slug, mission_id: calls.append(("existing-view", slug, mission_id)) or "the copy")
+    monkeypatch.setattr(zulip_listener, "release_view",
+                        lambda view, reason: calls.append(("release", view, reason)) or "released, branch kept")
+    workspace = superdirector_dir(tmp_path)
+    workspace.mkdir(parents=True)
+    (workspace / "cancel.flag").touch()
+
+    sections, _ = zulip_listener.handle_superdirector_response(client, CHANNEL, TOPIC, PROJECT, workspace, BOT_ID)
+
+    assert ("release", "the copy", "cancelled") in calls
+    assert sections[-1] == "released, branch kept"
+    assert not any(call[0] == "integrate" for call in calls)
+
+
+def test_what_a_planning_run_writes_in_the_project_folder_is_committed_as_its_notes(monkeypatch, tmp_path):
+    """The project folder holds integrated work only, and planning works
+    there: its own notes are committed right after it, and changes that were
+    there before it are left alone and said."""
+    import subprocess
+
+    def git(cwd, *arguments):
+        return subprocess.run(["git", *arguments], cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+
+    root = tmp_path / "projects" / PROJECT
+    for name in ("direction", "gentest-x"):
+        bare = tmp_path / f"{name}.git"
+        git(tmp_path, "init", "-q", "--bare", "-b", "main", str(bare))
+        git(tmp_path, "clone", "-q", str(bare), str(root / name))
+        (root / name / "a.md").write_text("a\n")
+        git(root / name, "add", "-A")
+        git(root / name, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "base")
+        git(root / name, "push", "-q", "origin", "HEAD:main")
+    monkeypatch.setattr(zulip_listener, "PROJECTS_ROOT", tmp_path / "projects")
+    monkeypatch.setattr(zulip_listener, "git_environment", lambda config=None: None)
+    from agautolab import missionspace
+    monkeypatch.setattr(missionspace, "MISSIONS_ROOT", tmp_path / "missions")
+    (root / "gentest-x" / "a.md").write_text("somebody's\n")
+    before = zulip_listener.dirty_repositories(root)
+    (root / "direction" / "REFERENCES.md").write_text("adopted\n")
+
+    lines = zulip_listener.commit_planning_notes(PROJECT, before, "workplan-x")
+
+    assert lines == [
+        "the planning notes written in direction/ are committed and pushed",
+        "gentest-x in the project folder has uncommitted changes that predate this plan; left as they are",
+    ]
+    assert git(tmp_path / "direction.git", "log", "--format=%s", "main").splitlines()[0] == \
+        "[AUTO] planning notes (workplan-x)"
+    assert git(root / "gentest-x", "status", "--porcelain") == "M a.md"
+
+
 def test_cancelling_a_mission_that_never_got_a_channel_is_quiet(monkeypatch, tmp_path):
     calls = []
     wire_response(monkeypatch, tmp_path, calls)
@@ -1075,8 +1134,36 @@ def last_reply(calls):
 HANDOFF = "@**Developer**\n\n"
 
 
+class FakeOutcome:
+    def __init__(self, repo, commit, status="fast-forward", published="pushed", files=(), detail=""):
+        self.repo, self.commit, self.status, self.published = repo, commit, status, published
+        self.target = "1234567890abcdef" if status != "conflict" else ""
+        self.files, self.detail = list(files), detail
+
+    @property
+    def refused(self):
+        return self.status in ("conflict", "overlap", "blocked")
+
+
+class FakeIntegration:
+    def __init__(self, outcomes):
+        self.outcomes = outcomes
+
+    @property
+    def refused(self):
+        return [o for o in self.outcomes if o.refused]
+
+    @property
+    def ok(self):
+        return not self.refused
+
+
 def wire_run(monkeypatch, tmp_path, calls, *, target=TARGET, binding=TASK, report=None,
-             output="work done", pushed=True, main_carried=2):
+             output="work done", pushed=True, accepted=None, outcome=None, held=None):
+    """`accepted`: what the mission's copy holds that its shared branch
+    lacks (default: one commit in `main`). `outcome`: how integration
+    answers (default: every repository fast-forwarded and published)."""
+    accepted = {"main": "c0ffee"} if accepted is None else accepted
     monkeypatch.setattr(zulip_listener, "PROJECTS_ROOT", tmp_path / "projects")
     monkeypatch.setattr(zulip_listener, "TOPICS_ROOT", tmp_path / "topics")
     monkeypatch.setattr(zulip_listener, "RECORDS_ROOT", tmp_path / "records")
@@ -1137,18 +1224,38 @@ def wire_run(monkeypatch, tmp_path, calls, *, target=TARGET, binding=TASK, repor
         ),
     )
     monkeypatch.setattr(zulip_listener, "load_gitea_config", lambda: "gitea-config")
-    monkeypatch.setattr(
-        zulip_listener,
-        "push_main_repository",
-        lambda config, workspace: (
-            calls.append(("push-main", workspace)) or main_carried
-        ),
+    monkeypatch.setattr(zulip_listener, "git_environment", lambda config=None: {})
+    # The mission's own copy (`missionspace`, tested on real git in
+    # test_missionspace.py); here only what the listener asks of it.
+    view = SimpleNamespace(
+        path=tmp_path / "missions" / "demo-project" / f"m{target.mission.mission_id}",
+        branch=f"autolab/m{target.mission.mission_id}",
+        project_root=root, worktrees={"main": root / "main"}, actions=[],
     )
+    monkeypatch.setattr(zulip_listener, "ensure_view",
+                        lambda slug, mission_id: calls.append(("view", slug, mission_id)) or view)
+    monkeypatch.setattr(zulip_listener, "snapshot", lambda v: dict(held or {}))
+    monkeypatch.setattr(zulip_listener, "commit_pending",
+                        lambda v, message: calls.append(("commit-pending", message)) or {})
+    monkeypatch.setattr(zulip_listener, "pending_changes", lambda v: dict(accepted))
+    monkeypatch.setattr(zulip_listener, "tree_of", lambda worktree, commit: f"tree-of-{commit}")
+    monkeypatch.setattr(zulip_listener, "files_between", lambda worktree, old, new: ["README.md"])
+    monkeypatch.setattr(zulip_listener, "refresh_view", lambda v: [])
+    monkeypatch.setattr(zulip_listener, "release_view",
+                        lambda v, reason: calls.append(("release", reason)) or f"released ({reason})")
+
+    def integrate(slug, mission_id, entries, *, publish=(), label="", env=None):
+        calls.append(("integrate", dict(entries), list(publish)))
+        if outcome is not None:
+            return outcome
+        return FakeIntegration([FakeOutcome(name, commit) for name, commit in sorted(entries.items())])
+
+    monkeypatch.setattr(zulip_listener, "integrate", integrate)
     monkeypatch.setattr(
         zulip_listener,
-        "commit_all_and_push",
-        lambda config, workspace, message: (
-            calls.append(("push", workspace, message)) or pushed
+        "commit_paths",
+        lambda repo, paths, message, **kwargs: (
+            calls.append(("push", repo, message)) or ("pushed" if pushed else "nothing")
         ),
     )
     guides = tmp_path / "guides"
@@ -1202,15 +1309,17 @@ def test_the_previous_task_gate_answers_before_any_cost(monkeypatch, tmp_path):
     )
 
 
-def test_a_serving_runs_the_supercoder_in_the_project_with_its_workspace(monkeypatch, tmp_path):
+def test_a_serving_runs_the_supercoder_in_the_mission_s_own_copy(monkeypatch, tmp_path):
     calls = []
     wire_run(monkeypatch, tmp_path, calls)
 
     zulip_listener.handle_workrun(RunClient(calls), WORK_CHANNEL, WORKRUN_TOPIC)
 
     assert [call[0] for call in calls if call[0] not in {"whoami", "history", "channels"}] == [
-        "write", "binding", "target", "init", "supercoder", "write",
+        "write", "binding", "target", "init", "view", "supercoder", "write",
     ]
+    # The copy is the mission's, found by its id (robust_workflow p3 ex1).
+    assert calls_of(calls, "view")[0][1:] == ("demo-project", MISSION.mission_id)
     # The task comes from the topic's own notes, and the project from the
     # mission the task names. Neither the topic's name nor the channel's
     # description is read.
@@ -1222,7 +1331,9 @@ def test_a_serving_runs_the_supercoder_in_the_project_with_its_workspace(monkeyp
     # against this topic, so the answer brings the task back.
     assert home == (WORK_CHANNEL, WORKRUN_TOPIC)
     workspace = supercoder_dir(tmp_path)
-    assert cwd == tmp_path / "projects" / "demo-project"
+    assert cwd == tmp_path / "missions" / "demo-project" / f"m{MISSION.mission_id}"
+    assert f"this mission's own copy of the project ({cwd})" in prompt
+    assert "holds only integrated work; read it, never write it" in prompt
     assert str(workspace) in prompt
     assert prompt.endswith("RUN GUIDE")
     # The task travels in the prompt as its own topic holds it — the
@@ -1234,7 +1345,7 @@ def test_a_serving_runs_the_supercoder_in_the_project_with_its_workspace(monkeyp
         "[Autolab (you)] # Add the README\n[Developer] Build it\n"
     )
     # No report: the conversation is simply not finished. Nothing closes.
-    assert not any(call[0] in {"report", "push"} for call in calls)
+    assert not any(call[0] in {"report", "push", "integrate", "commit-pending"} for call in calls)
     assert last_reply(calls) == HANDOFF + "work done"
 
 
@@ -1272,51 +1383,187 @@ def test_a_report_completes_the_task_records_it_and_resolves_the_topic(monkeypat
     assert any(call[0] == "resolve" for call in calls)
 
 
-def test_the_close_out_publishes_main(monkeypatch, tmp_path):
-    """`scheduled_routine` p2's open finding: the supercoder committed `main`
-    and nothing ever pushed it. The close-out does, beside the devlog record."""
+def test_the_close_out_binds_the_accepted_change_before_integrating_it(monkeypatch, tmp_path):
+    """robust_workflow p3 ex1: the requester's post is bound to exact commits,
+    written before anything shared moves, and only those are integrated."""
+    calls = []
+    wire_run(monkeypatch, tmp_path, calls, report="all good\n", accepted={"main": "c0ffee", "direction": "d1rec"})
+
+    zulip_listener.handle_workrun(RunClient(calls), WORK_CHANNEL, WORKRUN_TOPIC)
+
+    kinds = [call[0] for call in calls if call[0] in {"commit-pending", "send", "integrate", "report", "push"}]
+    notes = [call[3] for call in calls_of(calls, "send") if "[selfnote][change]" in call[3]]
+    assert notes[0] == "[selfnote][change] accepted direction=d1rec main=c0ffee #1 +gen=1"
+    assert notes[1].startswith("[selfnote][change] integrated direction=1234567890abcdef/fast-forward/pushed")
+    # commit what was reviewed, bind it, integrate it, then record the task.
+    assert kinds.index("commit-pending") < kinds.index("send") < kinds.index("integrate") < kinds.index("report")
+    assert calls_of(calls, "integrate")[0][1:] == ({"main": "c0ffee", "direction": "d1rec"}, [])
+    outcome = last_reply(calls)
+    assert "integrated into the project: direction 1234567890 (fast-forward) and published; " \
+           "main 1234567890 (fast-forward) and published" in outcome
+
+
+def test_a_repository_the_worker_names_is_published_too(monkeypatch, tmp_path):
+    calls = []
+    wire_run(monkeypatch, tmp_path, calls, report="all good\n", accepted={"gentest-x": "abc"})
+    monkeypatch.setattr(zulip_listener, "ensure_view", lambda slug, mission_id: SimpleNamespace(
+        path=tmp_path / "m", branch="autolab/m1", project_root=tmp_path, actions=[],
+        worktrees={"main": tmp_path / "main", "gentest-x": tmp_path / "gentest-x"}))
+    original = zulip_listener.workrun_supercoder
+
+    def supercoder(prompt, cwd, **kwargs):
+        workspace = Path(re.search(r'is placed in "([^"]+)"', prompt).group(1))
+        (workspace / "publish.flag").write_text("gentest-x\nnot-a-repository\n")
+        return original(prompt, cwd, **kwargs)
+
+    monkeypatch.setattr(zulip_listener, "workrun_supercoder", supercoder)
+    zulip_listener.handle_workrun(RunClient(calls), WORK_CHANNEL, WORKRUN_TOPIC)
+
+    assert calls_of(calls, "integrate")[0][2] == ["gentest-x"]
+
+
+def test_a_change_that_cannot_be_integrated_returns_and_the_task_stays_open(monkeypatch, tmp_path):
+    """The shared branch moved under the same file: nothing is integrated,
+    nothing is recorded, and the reply says how the combined result is made."""
+    calls = []
+    refused = FakeIntegration([FakeOutcome("main", "c0ffee", "overlap", "", ["wordcount.py"],
+                                           "main moved since this mission began and changed the same files")])
+    wire_run(monkeypatch, tmp_path, calls, report="all good\n", outcome=refused)
+
+    zulip_listener.handle_workrun(RunClient(calls), WORK_CHANNEL, WORKRUN_TOPIC)
+
+    notes = [call[3] for call in calls_of(calls, "send") if "[selfnote][change]" in call[3]]
+    assert notes[-1] == "[selfnote][change] returned main=overlap #1 +files=wordcount.py"
+    assert calls_of(calls, "report") == [] and calls_of(calls, "push") == []
+    assert not any(call[0] == "resolve" for call in calls)
+    outcome = last_reply(calls)
+    assert "is not closed: its accepted change cannot be integrated as it is" in outcome
+    assert "changed the same files (wordcount.py)" in outcome and "git merge <branch>" in outcome
+
+
+def test_an_interrupted_close_out_is_finished_from_its_note_without_a_run(monkeypatch, tmp_path):
+    """A crash after the push and before the record: the next serving finds
+    the `accepted` note, integrates (recognised as already there) and records
+    — no supercoder run, no second acceptance."""
+    calls = []
+    wire_run(monkeypatch, tmp_path, calls)
+    report_dir = supercoder_dir(tmp_path, 1)
+    report_dir.mkdir(parents=True)
+    (report_dir / "report.md").write_text("done before the crash\n")
+    history = anchored(history_message(id=40, content="Accepted, thanks"),
+                       history_message(sender_id=BOT_ID, name="Autolab", id=41,
+                                       content="[selfnote][change] accepted main=c0ffee #40 +gen=1"))
+    zulip_listener.handle_workrun(RunClient(calls, history=history), WORK_CHANNEL, WORKRUN_TOPIC)
+
+    assert calls_of(calls, "supercoder") == []
+    assert calls_of(calls, "integrate")[0][1] == {"main": "c0ffee"}
+    assert calls_of(calls, "report")[0][1:] == (2, "done before the crash\n")
+    assert not any("accepted" in call[3] for call in calls_of(calls, "send") if "[selfnote][change]" in call[3])
+
+
+def test_a_returned_change_is_not_resumed_as_an_interrupted_close_out(monkeypatch, tmp_path):
+    calls = []
+    wire_run(monkeypatch, tmp_path, calls)
+    history = anchored(
+        history_message(sender_id=BOT_ID, name="Autolab", id=41, content="[selfnote][change] accepted main=c0ffee #40 +gen=1"),
+        history_message(sender_id=BOT_ID, name="Autolab", id=42, content="[selfnote][change] returned main=overlap #40"),
+        history_message(id=43, content="Please merge main and show me"),
+    )
+    zulip_listener.handle_workrun(RunClient(calls, history=history), WORK_CHANNEL, WORKRUN_TOPIC)
+
+    assert len(calls_of(calls, "supercoder")) == 1
+    assert calls_of(calls, "integrate") == []
+
+
+def test_a_completed_task_is_not_closed_or_integrated_again(monkeypatch, tmp_path):
+    """A repeated acceptance in a finished task's topic buys a run, but no
+    second result, integration or next start."""
+    from dataclasses import replace as _replace
+
+    calls = []
+    done = zulip_listener.RunTarget(_replace(TASK, state="completed"), MISSION)
+    wire_run(monkeypatch, tmp_path, calls, report="all good again\n", target=done)
+
+    zulip_listener.handle_workrun(RunClient(calls), WORK_CHANNEL, WORKRUN_TOPIC)
+
+    assert calls_of(calls, "integrate") == [] and calls_of(calls, "report") == []
+    outcome = last_reply(calls)
+    assert "is already completed, so nothing is closed or integrated again" in outcome
+    assert "stays on autolab/m5512" in outcome
+
+
+def test_a_checkpoint_is_noted_when_the_copy_changed_and_only_then(monkeypatch, tmp_path):
+    calls = []
+    wire_run(monkeypatch, tmp_path, calls, held={"main": ("h1", "t1")})
+    zulip_listener.handle_workrun(RunClient(calls), WORK_CHANNEL, WORKRUN_TOPIC)
+    notes = [call[3] for call in calls_of(calls, "send") if "[selfnote][change]" in call[3]]
+    assert notes == ["[selfnote][change] checkpoint main=h1:t1"]
+
+    calls.clear()
+    history = anchored(history_message(sender_id=BOT_ID, name="Autolab", id=50, content=notes[0]))
+    zulip_listener.handle_workrun(RunClient(calls, history=history), WORK_CHANNEL, WORKRUN_TOPIC)
+    assert not [call for call in calls_of(calls, "send") if "[selfnote][change]" in call[3]]
+
+
+def test_the_close_out_says_whether_the_accepted_change_is_what_was_seen(monkeypatch, tmp_path):
+    calls = []
+    wire_run(monkeypatch, tmp_path, calls, report="all good\n")
+    history = anchored(
+        history_message(sender_id=BOT_ID, name="Autolab", id=30, content="[selfnote][change] checkpoint main=h:tree-of-c0ffee"),
+        history_message(id=31, content="Looks right, accepted"),
+    )
+    zulip_listener.handle_workrun(RunClient(calls, history=history), WORK_CHANNEL, WORKRUN_TOPIC)
+    assert "the accepted change is the state the requester saw (checkpoint #30)" in last_reply(calls)
+
+    calls.clear()
+    history[-2] = history_message(sender_id=BOT_ID, name="Autolab", id=30, content="[selfnote][change] checkpoint main=h:older")
+    zulip_listener.handle_workrun(RunClient(calls, history=history), WORK_CHANNEL, WORKRUN_TOPIC)
+    assert "changed after the state the requester saw (checkpoint #30): main: README.md" in last_reply(calls)
+
+
+def test_the_last_task_closing_releases_the_mission_s_copy(monkeypatch, tmp_path):
+    calls = []
+    wire_run(monkeypatch, tmp_path, calls, report="all good\n")
+    monkeypatch.setattr(zulip_listener, "mission_tasks", lambda client, mission, self_id: {
+        2: zulip_listener.Task(5602, MISSION.mission_id, 2, WORK_CHANNEL, WORKRUN_TOPIC, "", state="completed")})
+    zulip_listener.handle_workrun(RunClient(calls), WORK_CHANNEL, WORKRUN_TOPIC)
+    assert calls_of(calls, "release")[0][1] == "every task is closed"
+
+
+def test_a_main_only_project_integrates_main_too(monkeypatch, tmp_path):
+    """The devlog is local in this layout, so `main` is the whole visible
+    record — the routine's value is exactly that Gitea history."""
+    (tmp_path / "projects" / "demo-project" / "devlog").mkdir(parents=True)
     calls = []
     wire_run(monkeypatch, tmp_path, calls, report="all good\n")
 
     zulip_listener.handle_workrun(RunClient(calls), WORK_CHANNEL, WORKRUN_TOPIC)
 
-    main = tmp_path / "projects" / "demo-project" / "main"
-    assert calls_of(calls, "push-main")[0][1:] == (main,)
-    assert "pushed main to Gitea (2 commits)" in last_reply(calls)
-
-
-def test_a_main_only_project_publishes_main_too(monkeypatch, tmp_path):
-    """The devlog is local in this layout, so `main` is the whole visible
-    record — the routine's value is exactly that Gitea history."""
-    (tmp_path / "projects" / "demo-project" / "devlog").mkdir(parents=True)
-    calls = []
-    wire_run(monkeypatch, tmp_path, calls, report="all good\n", main_carried=1)
-
-    zulip_listener.handle_workrun(RunClient(calls), WORK_CHANNEL, WORKRUN_TOPIC)
-
     outcome = last_reply(calls)
-    assert "pushed main to Gitea (1 commit)" in outcome
+    assert "main 1234567890 (fast-forward) and published" in outcome
     assert f"recorded {MISSION_DIR}/task-2 in devlog locally (not a repository)" in outcome
 
 
-def test_a_run_that_committed_nothing_pushes_nothing(monkeypatch, tmp_path):
+def test_a_run_that_changed_nothing_integrates_nothing(monkeypatch, tmp_path):
     calls = []
-    wire_run(monkeypatch, tmp_path, calls, report="all good\n", main_carried=0)
+    wire_run(monkeypatch, tmp_path, calls, report="all good\n", accepted={})
 
     zulip_listener.handle_workrun(RunClient(calls), WORK_CHANNEL, WORKRUN_TOPIC)
 
-    assert "main was already level with Gitea" in last_reply(calls)
+    assert calls_of(calls, "integrate") == []
+    assert "the task changed no repository, so there was nothing to integrate" in last_reply(calls)
+    assert calls_of(calls, "report")
 
 
 def test_an_unfinished_run_publishes_nothing(monkeypatch, tmp_path):
     """No report means the conversation is not over; nothing closes, so
-    nothing is published either."""
+    nothing is integrated or published either."""
     calls = []
     wire_run(monkeypatch, tmp_path, calls)
 
     zulip_listener.handle_workrun(RunClient(calls), WORK_CHANNEL, WORKRUN_TOPIC)
 
-    assert not calls_of(calls, "push-main")
+    assert not calls_of(calls, "integrate") and not calls_of(calls, "commit-pending")
 
 
 def test_a_local_only_devlog_is_written_and_never_pushed(monkeypatch, tmp_path):
@@ -1385,7 +1632,7 @@ def test_a_report_nobody_agreed_to_closes_nothing_and_starts_nothing(monkeypatch
     ]
     zulip_listener.handle_workrun(RunClient(calls, history=history), WORK_CHANNEL, WORKRUN_TOPIC)
 
-    assert calls_of(calls, "report") == [] and calls_of(calls, "push-main") == []
+    assert calls_of(calls, "report") == [] and calls_of(calls, "integrate") == []
     assert "is not closed" in last_reply(calls) and "nobody has said in this topic" in last_reply(calls)
 
 

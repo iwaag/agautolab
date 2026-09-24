@@ -1,6 +1,7 @@
 """The `autolab` command as a serving reaches it."""
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -204,3 +205,27 @@ def test_the_gitea_token_never_reaches_the_output(monkeypatch, tmp_path, capsys)
     outputs += [captured.out, captured.err]
     assert all(TOKEN not in text for text in outputs)
     assert any(text for text in outputs)
+
+
+def test_init_repo_inside_a_mission_copy_clones_into_the_project_and_joins_the_copy(monkeypatch, tmp_path, capsys):
+    """robust_workflow p3 ex1: a run works in its mission's own copy. The
+    repository still lives in the project folder, and the copy gets its
+    worktree of it."""
+    from agautolab import missionspace
+
+    workspace = _fixture_workspace(monkeypatch, tmp_path)
+    copy = tmp_path / "missions" / "studyarxiv" / "m7"
+    copy.mkdir(parents=True)
+    monkeypatch.setattr(missionspace, "MISSIONS_ROOT", tmp_path / "missions")
+    monkeypatch.chdir(copy)
+    calls = []
+    monkeypatch.setattr(project_init, "ensure_gitea_repo", lambda config, name: calls.append(("repo", name)))
+    monkeypatch.setattr(project_init, "ensure_clone",
+                        lambda config, repo, destination: calls.append(("clone", destination)))
+    monkeypatch.setattr(missionspace, "ensure_view",
+                        lambda slug, mission_id: calls.append(("view", slug, mission_id)) or SimpleNamespace(path=copy))
+
+    code, _, _ = _run(capsys, "project", "init-repo", "publish")
+
+    assert code == 0
+    assert calls == [("repo", "studyarxiv-publish"), ("clone", workspace / "publish"), ("view", "studyarxiv", 7)]

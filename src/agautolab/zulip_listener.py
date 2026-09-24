@@ -108,11 +108,20 @@ from agag.zulip import (
     topic_write,
 )
 
-from .anchor import Conversation, own_rootchat, replaces_note, rootchat_note
+from .anchor import (
+    Conversation,
+    change_note,
+    own_changes,
+    own_rootchat,
+    parse_change,
+    replaces_note,
+    rootchat_note,
+)
 
 from .worklog import (
     MISSION_CANCELLED,
     MISSION_STARTED,
+    TASK_CANCELLED,
     TASK_HELD,
     Mission,
     RunTarget,
@@ -144,9 +153,24 @@ from .project_init import (
     PROJECT_NAME,
     PROJECTS_ROOT,
     commit_all_and_push,
+    git_environment,
     init_project,
     load_gitea_config,
-    push_main_repository,
+)
+from .missionspace import (
+    STANDARD_REPOSITORIES,
+    commit_paths,
+    commit_pending,
+    dirty_repositories,
+    ensure_view,
+    existing_view,
+    files_between,
+    integrate,
+    pending_changes,
+    refresh_view,
+    release_view,
+    snapshot,
+    tree_of,
 )
 from .instance import (
     AGAUTOLAB_ROOT,
@@ -341,8 +365,12 @@ def serve(context) -> TopicResult:
     context.step = "superdirector"
     prompt = superdirector_prompt(context.bot_name, workspace, current_files)
     conversation = (context.channel, context.topic)
+    dirty_before = dirty_repositories(project_directory(project))
     output = run_superdirector(prompt, project_directory(project), conversation=conversation,
                                selection=context.selection)
+
+    context.step = "planning notes"
+    notes = commit_planning_notes(project, dirty_before, context.topic)
 
     context.step = "response handling"
     response_sections, resolve_after = handle_superdirector_response(
@@ -361,10 +389,40 @@ def serve(context) -> TopicResult:
     # director for the reply alone — the plan and flags it wrote are already
     # handled above and are not re-read.
     return TopicResult(
-        response_sections, resolve_after=resolve_after, output=output,
+        [*notes, *response_sections], resolve_after=resolve_after, output=output,
         repair=repair_with(lambda again: run_superdirector(again, project_directory(project), conversation=conversation,
                                                            selection=context.selection), output),
     )
+
+
+def commit_planning_notes(project: str, dirty_before: dict[str, set[str]], topic: str) -> list[str]:
+    """Commit what a planning run wrote into the project folder, and publish it.
+
+    Planning works in the project folder, because a plan is about the shared
+    result — and the folder has to stay clean for integration
+    (robust_workflow p3 ex1). What the run wrote there (a decision in
+    `direction/`, a new README_PROJECT.md entry) is the plan's own record, so
+    it is committed as that, beside the plan posted in the conversation. A
+    repository that was already dirty before the run is left alone and said:
+    those changes are nobody's the run could vouch for.
+    """
+    root = project_directory(project)
+    lines = []
+    for name, paths in sorted(dirty_repositories(root).items()):
+        if name in dirty_before:
+            lines.append(f"{name} in the project folder has uncommitted changes that predate this plan; left as they are")
+            continue
+        done = commit_paths(root / name, sorted(paths), f"{AUTO_MARKER} planning notes ({topic})",
+                            publish=name in STANDARD_REPOSITORIES, env=git_environment(), slug=project)
+        if done != "nothing":
+            lines.append(f"the planning notes written in {name}/ are committed" + (" and pushed" if done == "pushed" else ""))
+    return lines
+
+
+def release_mission_copy(mission: Mission, reason: str) -> str | None:
+    """Release a mission's working copy when the mission ends early. None when it has none."""
+    view = existing_view(mission.slug, mission.mission_id)
+    return release_view(view, reason) if view is not None else None
 
 
 def requester_mention(history: list[dict], self_id: int) -> str:
@@ -807,6 +865,8 @@ def handle_superdirector_response(
             )
             mission = replacement.mission
             plan_topic = replacement.mission.topic
+            if released := release_mission_copy(retired, "replaced"):
+                sections.append(released)
             sections.append(
                 f"mission {retired.label} is retired at "
                 f"{retired.channel}/{replacement.retired_topic} and its work "
@@ -873,6 +933,10 @@ def handle_superdirector_response(
         suffix = f" along with {cancelled} task(s)" if cancelled else ""
         sections.append(f"mission {mission.label} is cancelled{suffix}; resolving this topic")
         sections.append(archive_work_channel(client, mission))
+        # Nothing of a cancelled mission is integrated: its tasks refuse to
+        # run, and its copy is released with its work kept on its branch.
+        if released := release_mission_copy(mission, "cancelled"):
+            sections.append(released)
         resolve_after = True
 
     return sections, resolve_after
@@ -899,7 +963,7 @@ def _change_lines(changes: list[TaskChange]) -> list[str]:
     return [f'{change.action} task {change.serial} "{change.title}"' for change in changes]
 
 
-def supercoder_prompt(bot_name: str, workspace: Path, task: str, threads=()) -> str:
+def supercoder_prompt(bot_name: str, workspace: Path, task: str, threads=(), view=None) -> str:
     """The placement lines, the task, then the guide — `superdirector_prompt`'s
     shape: read from and write to the workspace by absolute path, work in the
     project itself.
@@ -922,13 +986,22 @@ def supercoder_prompt(bot_name: str, workspace: Path, task: str, threads=()) -> 
         f'"{agents_file_path(workspace)}".',
         f'Write "{REPORT_FILE}" — and any other file this guide asks for — '
         f'into "{workspace}".',
-        "Your working directory is the project itself.",
+        *(_copy_lines(view) if view is not None else ["Your working directory is the project itself."]),
         "",
         "The task this topic is for:",
         "",
         task.strip(),
     ]
     return prompt_with_guide(lines, guide("workrun_supercoder", "guide.md"))
+
+
+def _copy_lines(view) -> list[str]:
+    """Where the run works, and what is shared (robust_workflow p3 ex1)."""
+    return [
+        f"Your working directory is this mission's own copy of the project ({view.path}): each repository "
+        f"folder in it is a worktree on the branch {view.branch}, which only this mission uses.",
+        f"The project folder itself ({view.project_root}) holds only integrated work; read it, never write it.",
+    ]
 
 
 def workrun_supercoder(prompt: str, cwd: Path,
@@ -1141,7 +1214,7 @@ def mission_directory(devlog: Path, label: str, title: str) -> Path:
 
 
 def record_task_in_devlog(target: RunTarget, workspace: Path, report: str) -> str:
-    """File the task and its report in the devlog clone, and push. One line.
+    """File the task and its report in the project's devlog, and publish it. One line.
 
     Deterministic handler code, the `serve_bmining` pattern: the agent is
     never asked to run git, and what it wrote travels by copy rather than by
@@ -1150,6 +1223,10 @@ def record_task_in_devlog(target: RunTarget, workspace: Path, report: str) -> st
     Git is where a durable record belongs, and this is that record: the
     conversation carries the work while it happens, the devlog carries it
     afterwards. Nothing here reads back out of Zulip.
+
+    The commit takes exactly this task's folder (robust_workflow p3 ex1).
+    It used to `git add -A` the shared devlog, and so took whatever else was
+    lying there into another task's record.
     """
     mission = target.mission
     devlog = devlog_directory(mission.slug)
@@ -1163,39 +1240,198 @@ def record_task_in_devlog(target: RunTarget, workspace: Path, report: str) -> st
         # A main-only project (`init_project --main-only`): the record is a
         # plain local folder, read by the next plan and pushed nowhere.
         return f"recorded {relative} in devlog locally (not a repository)"
-    pushed = commit_all_and_push(
-        load_gitea_config(),
-        devlog,
+    done = commit_paths(
+        devlog, [str(relative)],
         f"{AUTO_MARKER} task {target.task.serial} report for {mission.label}",
+        publish=True, env=git_environment(), slug=mission.slug,
+    )
+    return {
+        "pushed": f"recorded {relative} in devlog and pushed",
+        "committed": f"recorded {relative} in devlog (it has no remote to push to)",
+        "nothing": f"recorded {relative} in devlog (nothing to commit)",
+    }[done]
+
+
+# --- a task's change: checkpointed, accepted, integrated ---------------------
+#
+# robust_workflow p3 ex1. A task runs in its mission's own copy of the project
+# (`agautolab.missionspace`), so nothing another mission left behind is in
+# its tree, and nothing it does reaches the project folder until the
+# requester's agreement closes it. What happened to the change is written in
+# the task's own topic (`anchor.change_note`):
+#
+# - after every serving that left the copy different, a **checkpoint** — the
+#   exact content, so an agreement can later be compared with what was seen;
+# - at the close-out, **accepted**: the requester's post bound to exact
+#   commits, written *before* anything shared moves;
+# - then **integrated** (and published), or **returned** when the shared
+#   branch moved under the same files, which leaves the task open.
+#
+# A task is `completed` only after its change is integrated, so a mission
+# whose last task closed holds no outstanding integration when its
+# acceptance is recorded.
+
+#: Repositories beyond `main`, `direction` and `devlog` the worker asks to
+#: publish, one per line — a pattern project's README says which it pushes.
+PUBLISH_FILE = "publish.flag"
+
+
+def _send_note(client: ZulipClient, task: Task, content: str) -> None:
+    client.send_to_channel(task.channel, live_topic_name(client, task.channel, task.topic), content)
+
+
+def note_checkpoint(client: ZulipClient, task: Task, view, changes) -> None:
+    """Write what the copy holds after a serving, when it changed since the
+    last checkpoint. A checkpoint says nothing about agreement."""
+    held = {name: f"{head}:{tree}" for name, (head, tree) in snapshot(view).items()}
+    previous = next((change.entries for _, change in reversed(changes) if change.kind == "checkpoint"), {})
+    if held != previous:
+        _send_note(client, task, change_note("checkpoint", held))
+
+
+def _reviewed_line(view, accepted: dict[str, str], changes, evidence: int) -> str:
+    """Whether the accepted content is what the requester had seen: the
+    last checkpoint written before their post. Said, never a gate — the
+    worker, not the handler, judges what their words agreed to."""
+    reviewed = next(
+        ((note_id, change) for note_id, change in reversed(changes)
+         if change.kind == "checkpoint" and note_id < evidence),
+        None,
+    )
+    if reviewed is None:
+        return f"no checkpoint was recorded before #{evidence}, so the accepted change is not compared with one"
+    note_id, checkpoint = reviewed
+    seen = {name: value.rsplit(":", 1)[-1] for name, value in checkpoint.entries.items()}
+    later = []
+    for name in sorted(set(seen) | set(accepted)):
+        worktree = view.worktrees.get(name)
+        now = tree_of(worktree, accepted[name]) if name in accepted and worktree else ""
+        if now == seen.get(name, ""):
+            continue
+        files = files_between(worktree, seen.get(name), now) if worktree else []
+        later.append(f"{name}: {', '.join(files) or 'changed'}")
+    if not later:
+        return f"the accepted change is the state the requester saw (checkpoint #{note_id})"
+    return f"changed after the state the requester saw (checkpoint #{note_id}): {'; '.join(later)}"
+
+
+def _integration_line(result) -> str:
+    parts = []
+    for outcome in result.outcomes:
+        how = {"already": "already there", "fast-forward": "fast-forward", "merged": "merged beside newer work"}[outcome.status]
+        where = {"pushed": "and published", "level": "and published",
+                 "local": "(kept local: autolab does not publish it)"}.get(outcome.published, "")
+        parts.append(f"{outcome.repo} {outcome.target[:10]} ({how}) {where}".rstrip())
+    return "integrated into the project: " + "; ".join(parts)
+
+
+def _returned_line(target: RunTarget, result) -> str:
+    reasons = [f"{o.repo}: {o.detail} ({', '.join(o.files)})" if o.files else f"{o.repo}: {o.detail}"
+               for o in result.refused]
+    moved = [o for o in result.refused if o.status in ("conflict", "overlap")]
+    how = (
+        " Bring the shared branch into this mission's copy (`git merge <branch>` in that repository's "
+        "folder of the copy), check the combined result, and show it; the requester's agreement then "
+        "covers the combined change." if moved else ""
     )
     return (
-        f"recorded {relative} in devlog and pushed" if pushed
-        else f"recorded {relative} in devlog (nothing to commit)"
+        f"task {target.task.serial} of {target.mission.label} is not closed: its accepted change cannot be "
+        f"integrated as it is — {'; '.join(reasons)}. Nothing was integrated or published.{how}"
     )
 
 
-def push_main(slug: str) -> str:
-    """Publish what the run committed in `main`. One line.
+def close_out(context, target: RunTarget, view, accepted, sections: list[str],
+              requester: dict | None = None) -> TopicResult:
+    """Integrate an accepted change, record the task and start the next one.
 
-    `scheduled_routine` p2 left this open: the supercoder commits `main` —
-    approving the task is what authorises that — and nothing ever pushed, so
-    the Gitea repository aged while the local clone grew. The close-out
-    publishes it, for the same reason `record_task_in_devlog` publishes the
-    devlog: deterministic handler code, so the agent is never asked to run git,
-    and a repository the requester can read is what the work was for.
+    Every step is safe to repeat, which is what makes an interrupted
+    close-out recoverable from its `accepted` note alone: integration is
+    recognised by ancestry, the devlog record commits only if something
+    changed, and the next task is never started twice.
     """
-    main = project_directory(slug) / "main"
-    if not (main / ".git").exists():
-        return "main is not a repository; nothing pushed"
-    carried = push_main_repository(load_gitea_config(), main)
-    if not carried:
-        return "main was already level with Gitea"
-    return f"pushed main to Gitea ({carried} commit{'' if carried == 1 else 's'})"
+    task, mission = target.task, target.mission
+    serial, label = task.serial, mission.label
+    context.step = "integration"
+    if accepted.entries:
+        result = integrate(
+            mission.slug, mission.mission_id, accepted.entries,
+            publish=accepted.listed("publish"), label=f" task {serial}", env=git_environment(),
+        )
+        if not result.ok:
+            _send_note(context.client, task, change_note(
+                "returned", {o.repo: o.status for o in result.refused},
+                evidence=accepted.evidence, files=",".join(sorted({f for o in result.refused for f in o.files})),
+            ))
+            sections.append(_returned_line(target, result))
+            return TopicResult(sections)
+        _send_note(context.client, task, change_note(
+            "integrated", {o.repo: f"{o.target}/{o.status}/{o.published}" for o in result.outcomes},
+            evidence=accepted.evidence,
+        ))
+        integrated = _integration_line(result)
+    else:
+        integrated = "the task changed no repository, so there was nothing to integrate"
+
+    context.step = "closing the task"
+    workspace = generation_dir(TOPICS_ROOT, context.channel, context.topic, accepted.generation or 0, "supercoder")
+    report_path = workspace / REPORT_FILE
+    report = report_path.read_text(encoding="utf-8") if report_path.is_file() else (
+        f"(the report of serving {accepted.generation} could not be read; the change is integrated as accepted in "
+        f"#{accepted.evidence})"
+    )
+    record_result(context.client, task, report)
+    sections.append(f"task {serial} of {label} is completed and its result is posted above; resolving this topic")
+    sections.append(integrated)
+
+    context.step = "devlog record"
+    sections.append(record_task_in_devlog(target, workspace, report))
+
+    context.step = "the mission's working copy"
+    refresh_view(view)
+
+    context.step = "the next task"
+    hold_path = workspace / HOLD_FILE
+    hold = hold_path.read_text(encoding="utf-8").strip() or "no reason given" if hold_path.is_file() else None
+    if requester is None:
+        # Recovering from the note alone: the post it names is the requester's.
+        requester = {"id": accepted.evidence, **(_speaker(context.history, accepted.evidence) or {})}
+    try:
+        sections.append(start_next_task(context.client, target, context.self_id, requester, hold=hold))
+    except Exception as error:  # noqa: BLE001 - the task is closed; say what did not follow
+        log(f"could not start the task after {serial} of {label}: {error!r}")
+        sections.append(f"the next task of {label} was not started ({error}); a post in its topic starts it")
+
+    open_tasks = [t for t in mission_tasks(context.client, mission, context.self_id).values()
+                  if not t.finished and t.state != TASK_CANCELLED]
+    if not open_tasks:
+        sections.append(release_view(view, "every task is closed"))
+    return TopicResult(sections, resolve_after=True)
+
+
+def _speaker(history: list[dict], message_id: int | None) -> dict | None:
+    """`sender_id`/`sender_full_name` of one post this serving read."""
+    for message in history:
+        if int(message.get("id") or 0) == int(message_id or 0):
+            return {"sender_id": message.get("sender_id"), "sender_full_name": message.get("sender_full_name")}
+    return None
+
+
+def _owed_close_out(changes) -> object | None:
+    """The `accepted` note of a close-out that was interrupted: the newest
+    change note is `accepted` or `integrated` and the task is not closed. A
+    `returned` or a later checkpoint means the next agreement decides."""
+    if not changes:
+        return None
+    newest = changes[-1][1]
+    if newest.kind not in ("accepted", "integrated"):
+        return None
+    return next((change for _, change in reversed(changes) if change.kind == "accepted"), None)
 
 
 def serve_run(context) -> TopicResult:
-    """One serving of a `workrun-` topic: gate, agent, and — only if the run
-    wrote a report — the close-out.
+    """One serving of a `workrun-` topic: gate, agent in the mission's own
+    copy, and — only if the run wrote a report and the requester agreed —
+    the close-out: bind, integrate, record.
 
     The report file is the agreement signal the guide asks for ("if the
     developer agreed that the task was done, create report.md"), and the
@@ -1213,11 +1449,26 @@ def serve_run(context) -> TopicResult:
         # Handler-side, before any cost: no agent run happens behind a gate.
         return TopicResult([f"{PREVIOUS_WORK_REPLY} ({target.blocked_by})"])
     slug = target.mission.slug
+    serial, label = target.task.serial, target.mission.label
 
     sections: list[str] = []
 
     context.step = "project setup"
     init_project(slug)
+
+    context.step = "the mission's working copy"
+    view = ensure_view(slug, target.mission.mission_id)
+    for action in view.actions:
+        log(f"{label}: {action}")
+    changes = own_changes(context.history, context.self_id)
+
+    owed = None if target.task.finished else _owed_close_out(changes)
+    if owed is not None:
+        # A close-out that was cut short (a crash after the push, before the
+        # record): finish it from its own note. No agent runs, and nothing
+        # already integrated is integrated again.
+        log(f"{label} task {serial}: finishing the close-out accepted in #{owed.evidence}")
+        return close_out(context, target, view, owed, sections)
 
     number = next_generation(topic_workspace(TOPICS_ROOT, context.channel, context.topic))
     workspace = generation_dir(TOPICS_ROOT, context.channel, context.topic, number, "supercoder")
@@ -1249,8 +1500,8 @@ def serve_run(context) -> TopicResult:
     try:
         sections.append(
             workrun_supercoder(
-                supercoder_prompt(context.bot_name, workspace, task_text, threads),
-                project_directory(slug),
+                supercoder_prompt(context.bot_name, workspace, task_text, threads, view=view),
+                view.path,
                 on_event=progress,
                 home=(context.channel, context.topic),
                 selection=context.selection,
@@ -1261,10 +1512,25 @@ def serve_run(context) -> TopicResult:
         # posts before the outcome does, whichever outcome it is.
         progress.flush()
 
+    context.step = "checkpoint"
+    note_checkpoint(context.client, target.task, view, changes)
+
     report_path = workspace / REPORT_FILE
     if not report_path.is_file():
         # Not a failure: the conversation simply is not finished. The topic
         # stays open and the next human post serves it again.
+        return TopicResult(sections)
+
+    if target.task.finished:
+        # A closed task is not closed again: its change is integrated, and a
+        # second close-out would post a second result and mean nothing.
+        pending = pending_changes(view)
+        after = (
+            f"; what changed in the copy since ({', '.join(pending)}) stays on {view.branch} until a "
+            "re-plan gives the mission a task for it" if pending else ""
+        )
+        sections.append(f"task {serial} of {label} is already completed, so nothing is closed or integrated "
+                        f"again{after}")
         return TopicResult(sections)
 
     # The agreement is the requester's, and it has to be in what this
@@ -1276,36 +1542,28 @@ def serve_run(context) -> TopicResult:
     requester = requester_of(context.history, context.self_id, context.processed_up_to)
     if requester is None or "because" in requester or requester.get("sender_id") == context.self_id:
         sections.append(
-            f"task {target.task.serial} of {target.mission.label} is not closed: its run wrote a report, but "
-            "nobody has said in this topic that the task is done. It closes when its requester agrees here"
+            f"task {serial} of {label} is not closed: its run wrote a report, but "
+            "nobody has said in this topic that the task is done. It closes when its requester agrees here. "
+            f"Its work is checkpointed on {view.branch}; nothing is integrated"
         )
         return TopicResult(sections)
+    evidence = int(requester.get("id") or 0)
 
-    context.step = "closing the task"
-    report = report_path.read_text(encoding="utf-8")
-    record_result(context.client, target.task, report)
-    sections.append(
-        f"task {target.task.serial} of {target.mission.label} is completed and "
-        "its result is posted above; resolving this topic"
-    )
-
-    context.step = "publishing main"
-    sections.append(push_main(slug))
-
-    context.step = "devlog record"
-    sections.append(record_task_in_devlog(target, workspace, report))
-
-    context.step = "the next task"
-    hold_path = workspace / HOLD_FILE
-    hold = hold_path.read_text(encoding="utf-8").strip() or "no reason given" if hold_path.is_file() else None
-    try:
-        sections.append(start_next_task(context.client, target, context.self_id, requester, hold=hold))
-    except Exception as error:  # noqa: BLE001 - the task is closed; say what did not follow
-        log(f"could not start the task after {target.task.serial} of {target.mission.label}: {error!r}")
-        sections.append(
-            f"the next task of {target.mission.label} was not started ({error}); a post in its topic starts it"
-        )
-    return TopicResult(sections, resolve_after=True)
+    context.step = "binding the accepted change"
+    # The requester agreed to the copy as it stood, committed or not, so all
+    # of it is what is accepted — bound to exact commits before anything
+    # shared moves.
+    commit_pending(view, f"{AUTO_MARKER} {label} task {serial}: the state accepted in #{evidence}")
+    accepted = pending_changes(view)
+    publish_path = workspace / PUBLISH_FILE
+    publish = sorted({
+        name.strip() for name in re.split(r"[\s,]+", publish_path.read_text(encoding="utf-8"))
+        if name.strip() in view.worktrees
+    }) if publish_path.is_file() else []
+    note = change_note("accepted", accepted, evidence=evidence, gen=number, publish=",".join(publish))
+    _send_note(context.client, target.task, note)
+    sections.append(_reviewed_line(view, accepted, changes, evidence))
+    return close_out(context, target, view, parse_change(note), sections, requester=requester)
 
 
 HOLD_FILE = "hold.flag"

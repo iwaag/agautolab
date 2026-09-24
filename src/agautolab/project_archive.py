@@ -183,6 +183,23 @@ def archive_zulip_folder(client: ZulipClient, project: str) -> str:
     return ARCHIVED
 
 
+def release_mission_copies(project: str, projects_root: Path) -> list[str]:
+    """Release every mission copy of the project before its folder moves: a
+    worktree points into its repository by path, and the move would strand
+    it. Uncommitted work is kept on each mission's branch, which moves with
+    the repository."""
+    from . import missionspace
+
+    lines = []
+    folder = missionspace.MISSIONS_ROOT / project
+    for path in sorted(folder.glob("m*")) if folder.is_dir() else []:
+        if path.is_dir() and path.name[1:].isdigit():
+            view = missionspace.existing_view(project, int(path.name[1:]), projects_root=projects_root)
+            if view is not None:
+                lines.append(missionspace.release_view(view, "project archived"))
+    return lines
+
+
 def archive_workspace(project: str, *, root: Path | None = None, archive: Path | None = None) -> str:
     """Move the local clone set aside, keeping it on disk.
 
@@ -198,6 +215,7 @@ def archive_workspace(project: str, *, root: Path | None = None, archive: Path |
         raise ProjectArchiveError(
             f"both {source} and {destination} exist; resolve by hand before archiving"
         )
+    release_mission_copies(project, source.parent)
     destination.parent.mkdir(parents=True, exist_ok=True)
     source.rename(destination)
     return ARCHIVED

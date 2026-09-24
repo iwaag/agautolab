@@ -52,6 +52,8 @@ from __future__ import annotations
 
 import re
 
+from dataclasses import dataclass, field
+
 from agag.selfnote import (
     REPLACES_TAG,
     Conversation,
@@ -74,10 +76,16 @@ STATE_TAG = "state"
 #: cannot live in one consumer. Re-exported under the name this module's
 #: callers already use.
 
+#: What a task's change has come to (robust_workflow p3 ex1): checkpointed,
+#: accepted, integrated, or returned for a decision.
+CHANGE_TAG = "change"
+
 #: `<mission id>#<serial>` — what a task note carries.
 TASK_VALUE = re.compile(r"^(?P<mission>\d+)\s*#\s*(?P<serial>\d+)$")
 
 __all__ = [
+    "CHANGE_TAG",
+    "Change",
     "DOC_TAG",
     "EXTERNAL_STATES",
     "MISSION_TAG",
@@ -87,12 +95,15 @@ __all__ = [
     "Conversation",
     "doc_note",
     "mission_note",
+    "change_note",
+    "own_changes",
     "own_doc",
     "own_mission",
     "own_replaces",
     "own_rootchat",
     "own_state",
     "own_task",
+    "parse_change",
     "parse_doc",
     "parse_mission",
     "parse_replaces",
@@ -266,3 +277,72 @@ def own_state(messages, self_id: int) -> str | None:
         if message.get("sender_id") == self_id or state in EXTERNAL_STATES:
             return state
     return None
+
+
+# --- what a task's change has come to --------------------------------------
+#
+# A task's work lives on its mission's branch (`agautolab.missionspace`), and
+# what happened to it is written where the task is, one note per outcome:
+#
+#     [selfnote][change] checkpoint main=<head>:<tree> …      the copy after a serving
+#     [selfnote][change] accepted main=<commit> … #<post> +gen=<N> [+publish=a,b]
+#     [selfnote][change] integrated main=<commit>/<how>/<published> …
+#     [selfnote][change] returned main=<why> +files=a,b
+#
+# `accepted` binds the requester's agreement (the post) to exact commits;
+# nothing is integrated that is not named there. Repository names are keys,
+# so the note's own fields start with `+`.
+
+
+@dataclass
+class Change:
+    kind: str
+    entries: dict[str, str] = field(default_factory=dict)
+    evidence: int | None = None
+    fields: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def generation(self) -> int | None:
+        value = self.fields.get("gen", "")
+        return int(value) if value.isdigit() else None
+
+    def listed(self, key: str) -> list[str]:
+        return [item for item in self.fields.get(key, "").split(",") if item]
+
+
+def change_note(kind: str, entries: dict[str, str], *, evidence: int | None = None, **fields) -> str:
+    parts = [kind, *(f"{name}={value}" for name, value in sorted(entries.items()))]
+    if evidence:
+        parts.append(f"#{int(evidence)}")
+    parts += [f"+{key}={value}" for key, value in fields.items() if value not in (None, "", [])]
+    return note(CHANGE_TAG, " ".join(parts))
+
+
+def parse_change(content) -> Change | None:
+    value = parse_note(content, CHANGE_TAG)
+    if not value or not value.split():
+        return None
+    kind, *tokens = value.split()
+    change = Change(kind)
+    for token in tokens:
+        if token.startswith("#") and token[1:].isdigit():
+            change.evidence = int(token[1:])
+        elif token.startswith("+") and "=" in token:
+            key, _, val = token[1:].partition("=")
+            change.fields[key] = val
+        elif "=" in token:
+            name, _, val = token.partition("=")
+            change.entries[name] = val
+    return change
+
+
+def own_changes(messages, self_id: int) -> list[tuple[int, Change]]:
+    """This bot's change notes in a conversation, oldest first, with their ids."""
+    found = []
+    for message in messages:
+        if message.get("sender_id") != self_id:
+            continue
+        change = parse_change(message.get("content"))
+        if change is not None:
+            found.append((int(message.get("id") or 0), change))
+    return found

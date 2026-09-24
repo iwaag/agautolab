@@ -144,6 +144,11 @@ def _git_environment(config: GiteaConfig) -> dict[str, str]:
     }
 
 
+def git_environment(config: GiteaConfig | None = None) -> dict[str, str]:
+    """The environment a git command needs to reach Gitea as autolab."""
+    return _git_environment(config or load_gitea_config())
+
+
 def _git(config: GiteaConfig, *arguments: str, cwd: Path | None = None) -> str:
     try:
         completed = subprocess.run(
