@@ -2696,3 +2696,22 @@ def test_a_hold_flag_is_passed_on_with_its_reason(monkeypatch, tmp_path):
     monkeypatch.setattr(zulip_listener, "workrun_supercoder", with_hold)
     zulip_listener.handle_workrun(RunClient(calls), WORK_CHANNEL, WORKRUN_TOPIC)
     assert seen == ["wait for the art review"]
+
+
+def test_the_exit_after_integration_fault_ends_the_process_once(monkeypatch, tmp_path):
+    """Trial hook (robust_workflow p3 ex1): a crash between the push and the
+    task's record, made by a person, spent by the first close-out."""
+    calls = []
+    wire_run(monkeypatch, tmp_path, calls, report="all good\n")
+    fault = tmp_path / "faults" / "exit-after-integration"
+    fault.parent.mkdir()
+    fault.touch()
+    monkeypatch.setattr(zulip_listener, "EXIT_AFTER_INTEGRATION_FAULT", fault)
+    monkeypatch.setattr(zulip_listener.os, "_exit", lambda code: (_ for _ in ()).throw(SystemExit(code)))
+
+    with pytest.raises(SystemExit):
+        zulip_listener.handle_workrun(RunClient(calls), WORK_CHANNEL, WORKRUN_TOPIC)
+
+    assert not fault.exists()
+    notes = [call[3].split()[1] for call in calls_of(calls, "send") if "[selfnote][change]" in call[3]]
+    assert notes == ["accepted", "integrated"] and calls_of(calls, "report") == []

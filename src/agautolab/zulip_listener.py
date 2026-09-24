@@ -78,6 +78,7 @@ close-out is finished without another run.
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import time
@@ -1381,6 +1382,8 @@ def close_out(context, target: RunTarget, view, accepted, sections: list[str],
             evidence=accepted.evidence,
         ))
         integrated = _integration_line(result)
+        if _injected(EXIT_AFTER_INTEGRATION_FAULT, "the listener exits between the push and the task's record"):
+            os._exit(70)
     else:
         integrated = "the task changed no repository, so there was nothing to integrate"
 
@@ -1585,13 +1588,24 @@ HOLD_FILE = "hold.flag"
 SKIP_START_FAULT = SPEC.local / "faults" / "skip-next-start"
 
 
-def _injected_skip() -> bool:
+#: robust_workflow p3 ex1, same rules: the next close-out ends the listener
+#: process right after its integration is recorded — a crash between the push
+#: and the task's record. launchd restarts it and the journal requeues the
+#: serving, which must finish from the `accepted` note.
+EXIT_AFTER_INTEGRATION_FAULT = SPEC.local / "faults" / "exit-after-integration"
+
+
+def _injected(fault: Path, what: str) -> bool:
     try:
-        SKIP_START_FAULT.unlink()
+        fault.unlink()
     except FileNotFoundError:
         return False
-    log("fault injected: the next automatic start is skipped (skip-next-start)")
+    log(f"fault injected: {what} ({fault.name})")
     return True
+
+
+def _injected_skip() -> bool:
+    return _injected(SKIP_START_FAULT, "the next automatic start is skipped")
 
 
 def _started(history: list[dict], self_id: int) -> bool:
