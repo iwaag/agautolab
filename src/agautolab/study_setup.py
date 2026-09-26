@@ -205,9 +205,13 @@ def established_answer(project: str, topic: str, history: list[dict], self_id: i
     established the study crashed before answering."""
     if not topic.removeprefix("✔ ").startswith(SETUP_TOPIC_PREFIX):
         return None
-    if done is not None:
-        return done.line()
     projects_root = project_init.PROJECTS_ROOT if projects_root is None else projects_root
+    if done is not None:
+        # The commit at answer time: the planner may have refined the layout
+        # (and `commit_planning_notes` pushed it) since it was established.
+        head = subprocess.run(["git", "-C", str(projects_root / project / "main"), "rev-parse", "--short=12", "HEAD"],
+                              capture_output=True, text=True, check=False).stdout.strip()
+        return Established(done.repository, head or done.revision, done.created).line()
     if _block_in(history, project) is None or (_block_in(history, project)[0].get("pattern") != STUDY):
         return None
     if any(m.get("sender_id") == self_id and ESTABLISHED_RE.search(str(m.get("content") or "")) for m in history):
