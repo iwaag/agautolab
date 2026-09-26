@@ -1538,7 +1538,7 @@ def _serve_run(context, said: dict) -> TopicResult:
     progress = RunProgress(context.client, context.channel, context.topic, anchor=getattr(context, "anchor", 0))
     try:
         output = workrun_supercoder(
-            supercoder_prompt(context.bot_name, workspace, task_text, threads, view=view),
+            supercoder_prompt(context.bot_name, workspace, task_text, threads, view=view) + _stop_mid_task(),
             view.path,
             on_event=progress,
             home=(context.channel, context.topic),
@@ -1625,6 +1625,34 @@ SKIP_START_FAULT = SPEC.local / "faults" / "skip-next-start"
 #: and the task's record. launchd restarts it and the journal requeues the
 #: serving, which must finish from the `accepted` note.
 EXIT_AFTER_INTEGRATION_FAULT = SPEC.local / "faults" / "exit-after-integration"
+
+
+#: failsafe p1: the next task serving stops after its first real step and
+#: ends saying the rest is still running — the shape m11741 left (its cause
+#: there was the harness; here it is this instruction, and recovery must not
+#: depend on which). `…-unmarked` also leaves the reply without an intent, so
+#: it reads as an answer: the misclassification trial. One-shot, created only
+#: by a person.
+STOP_MID_TASK_FAULT = SPEC.local / "faults" / "stop-mid-task"
+STOP_MID_TASK_UNMARKED_FAULT = SPEC.local / "faults" / "stop-mid-task-unmarked"
+STOP_MID_TASK_INSTRUCTION = (
+    "\n\n# Trial fault injected by the developer (failsafe p1)\n\n"
+    "This serving is part of a failure trial. Do the first real step of the task only (for example, create "
+    "the first file or run the first command), then stop working without finishing it: do not write "
+    "report.md. Your reply must say that the remaining work is still running and that you will report when "
+    "it finishes, although nothing will be running. {mark}"
+)
+STOP_MARKED = "Mark the reply as progress: open it with ```ag-reply intent=progress."
+STOP_UNMARKED = "Open the reply with a plain ```ag-reply fence and no intent attribute at all."
+
+
+def _stop_mid_task() -> str:
+    """The trial instruction to add to the next task prompt, or ""."""
+    if _injected(STOP_MID_TASK_UNMARKED_FAULT, "the next task serving stops mid-work, its reply unmarked"):
+        return STOP_MID_TASK_INSTRUCTION.format(mark=STOP_UNMARKED)
+    if _injected(STOP_MID_TASK_FAULT, "the next task serving stops mid-work saying the rest still runs"):
+        return STOP_MID_TASK_INSTRUCTION.format(mark=STOP_MARKED)
+    return ""
 
 
 def _injected(fault: Path, what: str) -> bool:

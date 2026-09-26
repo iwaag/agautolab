@@ -2757,3 +2757,18 @@ def test_the_exit_after_integration_fault_ends_the_process_once(monkeypatch, tmp
     assert not fault.exists()
     notes = [call[3].split()[1] for call in calls_of(calls, "send") if "[selfnote][change]" in call[3]]
     assert notes == ["accepted", "integrated"] and calls_of(calls, "report") == []
+
+
+def test_the_stop_mid_task_fault_is_one_shot_and_names_its_mark(tmp_path, monkeypatch):
+    """failsafe p1's trial hooks: created by a person, consumed by one serving."""
+    marked, unmarked = tmp_path / "stop-mid-task", tmp_path / "stop-mid-task-unmarked"
+    monkeypatch.setattr(zulip_listener, "STOP_MID_TASK_FAULT", marked)
+    monkeypatch.setattr(zulip_listener, "STOP_MID_TASK_UNMARKED_FAULT", unmarked)
+    assert zulip_listener._stop_mid_task() == ""
+    marked.write_text("")
+    text = zulip_listener._stop_mid_task()
+    assert "intent=progress" in text and not marked.exists()
+    unmarked.write_text("")
+    text = zulip_listener._stop_mid_task()
+    assert "no intent attribute" in text and not unmarked.exists()
+    assert zulip_listener._stop_mid_task() == ""
