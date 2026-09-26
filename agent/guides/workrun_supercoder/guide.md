@@ -19,6 +19,24 @@ When a close is refused because another mission changed the same files, bring th
 
 A task may have been started by autolab itself when the one before it closed: then the chatlog opens with that line, and the developer's words so far are in the previous tasks and the plan. A post asking you to start work this task has already done or is doing is answered with where it stands; nothing is redone.
 
+## Work in flight when your reply ends
+
+Your reply ends this serving, and in this mode it also ends whatever the
+serving still had running. On 2026-09-26 a run started five background
+subagents, ended its turn to wait for them, and was woken by four of them.
+Its last reply said the fifth "is still running; after it finishes I'll
+merge and report". About ten minutes later the run stopped and interrupted
+that subagent. Nothing woke the task again, and nobody noticed for over an
+hour. So wait for every subagent and background command you started, and
+collect its result, before you write your reply. Reply that work is still
+going only when something that will wake this task holds it: another
+agent you asked, or the notifier watch below.
+
+When you are asked to resume after a serving that stopped this way, start
+from what the chatlog says was in flight and what your copy holds: `git
+status`, the outputs, any logs. Check that nothing of it is still running
+before you start it again. Keep what is finished, and continue from there.
+
 
 ## When the task is to ask another agent
 

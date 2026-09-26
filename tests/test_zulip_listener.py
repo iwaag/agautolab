@@ -10,6 +10,7 @@ from agag.outstanding import PENDING, read_requests
 from agag.post import RESPONSE_REQUEST, PostMeta, parse_post
 
 from agautolab import project_init, zulip_listener
+from endmark import plain
 
 
 BOT_ID = 11
@@ -312,8 +313,8 @@ def test_handle_topic_acks_then_runs_the_steps_in_order(monkeypatch, tmp_path):
     assert str(workspace) in next(call for call in calls if call[0] == "superdirector")[1]
     assert "currently registered mission" not in next(
         call for call in calls if call[0] == "superdirector")[1]
-    assert [call for call in calls if call[0] == "write"][-1][1:3] == (
-        TOPIC, HANDOFF + "planner says hi")
+    last = [call for call in calls if call[0] == "write"][-1]
+    assert (last[1], plain(last[2])) == (TOPIC, HANDOFF + "planner says hi")
 
 
 def test_serving_files_the_project_channel_in_its_own_folder(monkeypatch, tmp_path):
@@ -459,7 +460,7 @@ def test_an_empty_topic_costs_no_agent_run(monkeypatch, tmp_path):
     wire(monkeypatch, tmp_path, calls)
     zulip_listener.handle_topic(Client(calls, history=[]), CHANNEL, TOPIC)
     assert not any(call[0] == "superdirector" for call in calls)
-    assert calls[-1][2] == zulip_listener.EMPTY_REPLY
+    assert plain(calls[-1][2]) == zulip_listener.EMPTY_REPLY
 
 
 def sends(calls):
@@ -1134,7 +1135,7 @@ def calls_of(calls, kind):
 def last_reply(calls):
     """The final reply — after it, serve_topic re-checks history, so the last
     call is a read, not a write."""
-    return calls_of(calls, "write")[-1][2]
+    return plain(calls_of(calls, "write")[-1][2])  # without the serving-end mark (`endmark`)
 
 
 #: What `serve_topic` prefixes every reply with: the last other speaker, so
@@ -1669,7 +1670,7 @@ def test_a_report_nobody_agreed_to_asks_its_requester_whatever_the_run_declared(
     reply = last_reply(calls)
     parsed = parse_post(reply)
     assert "All tests pass." in parsed.text and "closes when its requester agrees" in parsed.text
-    assert parsed.meta == PostMeta(intent=RESPONSE_REQUEST, to=15, ask="confirmation", seen=parsed.meta.seen)
+    assert plain(parsed.meta) == PostMeta(intent=RESPONSE_REQUEST, to=15, ask="confirmation", seen=parsed.meta.seen)
     assert parsed.meta.seen and parsed.meta.seen >= 15
     posted = [*history, history_message(sender_id=BOT_ID, name="Autolab", content=reply, id=900)]
     assert [(r.id, r.state, r.to) for r in read_requests(posted).requests] == [(900, PENDING, 15)]
@@ -2319,7 +2320,7 @@ def test_a_marked_workspace_is_served_without_being_touched(monkeypatch, tmp_pat
         "write", "history",
     ]
     assert next(call[2] for call in calls if call[0] == "superdirector") == workspace
-    assert calls[6][2] == HANDOFF + "made it"
+    assert plain(calls[6][2]) == HANDOFF + "made it"
     # Nothing was scaffolded into the workspace.
     assert sorted(p.name for p in workspace.iterdir()) == [project_init.PATTERN_MARKER]
 
