@@ -42,8 +42,9 @@ fence.
 
 `agrefs` reads what the developer has published for a project to be built
 from — stories, images, templates, runnable examples — by name at a pinned
-revision: `<source>@<revision>[:<path>]`. `agrefs list` shows the sources on
-this host; `agrefs sync <source>` fetches the newest published revision and
+revision: `<source>@<revision>[:<path>]`. `agrefs list` shows
+every source the developer has published for agents, with what each is for;
+`agrefs sync <source>` fetches the newest published revision and
 prints the commit it is; `agrefs show <source>@<rev>[:<path>]` prints a text
 file, lists a directory, or says what a binary is; `agrefs path …` is the
 file itself, which your own image reader can open (`agrefs --help` has the
