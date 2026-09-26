@@ -169,6 +169,7 @@ from .project_init import (
     init_project,
     load_gitea_config,
 )
+from .study_setup import established_answer, prepare_pattern
 from .missionspace import (
     STANDARD_REPOSITORIES,
     commit_paths,
@@ -359,6 +360,12 @@ def serve(context) -> TopicResult:
     context.step = "harvest"
     write_agents_md(context.client, workspace)
 
+    # A study's setup request says its pattern in an `ag-setup` block; the
+    # layout is made from it before `init_project` could scaffold an
+    # ordinary project into the empty workspace (sage p2 step 2).
+    context.step = "study layout"
+    established = prepare_pattern(context.client, project, context.history)
+
     context.step = "project setup"
     init_project(project)
 
@@ -400,8 +407,9 @@ def serve(context) -> TopicResult:
     # response lines follow as literal sections. A repair reruns the
     # director for the reply alone — the plan and flags it wrote are already
     # handled above and are not re-read.
+    answer = established_answer(project, context.topic, context.history, context.self_id, done=established)
     return TopicResult(
-        [*notes, *response_sections], resolve_after=resolve_after, output=output,
+        [*notes, *response_sections, *([answer] if answer else [])], resolve_after=resolve_after, output=output,
         repair=repair_with(lambda again: run_superdirector(again, project_directory(project), conversation=conversation,
                                                            selection=context.selection), output),
     )

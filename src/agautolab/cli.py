@@ -291,6 +291,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     localtest.add_argument("paper_id", nargs="?", help="arXiv ID, for example 2401.12345")
     localtest.add_argument("--project", help="project slug; defaults to the current workspace")
+    establish = project_commands.add_parser(
+        "establish",
+        help="lay out (or rebuild the marker of) a study from its setup request",
+        description=(
+            "Read the ag-setup block in #pj-<slug> > workplan-setup-<slug> and lay the study out: "
+            "main/ on the standard route with RESEARCHPLAN.md, README.md, methods/ and reports/INDEX.md, "
+            "then README_PROJECT.md. Nothing that exists is overwritten, except the marker with "
+            "--rewrite-marker. The listener does this by itself when it serves the setup request; this is "
+            "the way to rebuild a lost README_PROJECT.md."
+        ),
+    )
+    establish.add_argument("slug")
+    establish.add_argument("--rewrite-marker", action="store_true",
+                           help="regenerate README_PROJECT.md from the block even if it exists")
     return parser
 
 
@@ -311,6 +325,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "project":
             if args.project_command is None:
                 parser.parse_args(["project", "--help"])
+                return 0
+            if args.project_command == "establish":
+                from .study_setup import restore
+
+                print(restore(args.slug, rewrite_marker=args.rewrite_marker).line())
                 return 0
             if args.project_command == "init-localtest":
                 if not args.paper_id:

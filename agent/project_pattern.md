@@ -168,6 +168,15 @@ again.
   such things out). Never push `publish/`; the developer reviews and
   pushes it by hand.
 
+A study opened with `agproject` is laid out by autolab from the setup
+request's `ag-setup` block before anyone plans: `README_PROJECT.md`, and
+`main/` holding `README.md`, the research plan as `RESEARCHPLAN.md`,
+`methods/` and `reports/INDEX.md` (one row per investigation). No `publish/`
+until the developer supplies a public repository; until then the study's
+knowledge — what its sage reads — is `main/` itself, so keep `main/` current
+and its index complete. `autolab project establish <slug>` rebuilds a lost
+`README_PROJECT.md` from that block.
+
 ## "game" pattern
 
 - `main/` ... current source code of the project.

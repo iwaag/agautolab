@@ -287,10 +287,13 @@ def test_handle_topic_acks_then_runs_the_steps_in_order(monkeypatch, tmp_path):
     # the ack — a configuration-only post must buy neither an ack nor a run —
     # and that same read is the serving's chatlog, so obeying the contract
     # costs no extra Zulip call. The trailing history read is the post-run
-    # re-check for human messages that arrived during the run.
+    # re-check for human messages that arrived during the run. The read
+    # before `init` looks for the study pattern in the setup topic: the
+    # workspace does not exist yet, so a study's layout must come first
+    # (sage p2 step 2).
     assert [call[0] for call in calls] == [
         "whoami", "whoami", "history", "write",
-        "init", "readback", "superdirector",
+        "history", "init", "readback", "superdirector",
         # the reply (the requester is read from the processed input, not
         # looked up at send time), then the post-run re-check
         "write", "history",
@@ -1033,6 +1036,8 @@ def test_handle_topic_reprocesses_when_a_human_posted_during_the_run(monkeypatch
 
         def topic_history(self, channel, topic, num_before):
             calls.append(("history", channel, topic, num_before))
+            if topic.removeprefix("\u2714 ").startswith("workplan-setup-"):
+                return []  # the study-pattern lookup of a fresh workspace
             return self.scripts.pop(0)
 
     zulip_listener.handle_topic(ScriptedClient(), CHANNEL, TOPIC)
