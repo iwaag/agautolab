@@ -1444,6 +1444,27 @@ def _speaker(history: list[dict], message_id: int | None) -> dict | None:
     return None
 
 
+def result_shown_before(history: list[dict], self_id: int, requester: dict) -> bool:
+    """Whether this task showed a result for review before the requester's
+    post `requester`: a post of ours declared a `report`, or a request for
+    confirmation. Acks, progress, the task's own description and a question
+    show no result, so a post after only those — "continue", "build it", a
+    resume after a stop — asks for work and cannot agree to any."""
+    from agag.post import QUESTION, parse_post
+
+    target = int(requester.get("id") or 0)
+    shown = False
+    for message in history:
+        if message is requester or int(message.get("id") or 0) == target and message.get("sender_id") != self_id:
+            return shown
+        if message.get("sender_id") != self_id or not is_speech(message):
+            continue
+        meta = parse_post(message.get("content")).meta
+        if meta is not None and (meta.intent == REPORT or (meta.intent == RESPONSE_REQUEST and meta.ask != QUESTION)):
+            shown = True
+    return shown
+
+
 def _owed_close_out(changes) -> object | None:
     """The `accepted` note of a close-out that was interrupted: the newest
     change note is `accepted` or `integrated` and the task is not closed. A
@@ -1595,6 +1616,20 @@ def _serve_run(context, said: dict) -> TopicResult:
             return TopicResult(sections)
         return TopicResult(sections, meta=PostMeta(intent=RESPONSE_REQUEST, to=int(asked), ask="confirmation"))
     evidence = int(requester.get("id") or 0)
+    if not result_shown_before(context.history, context.self_id, requester):
+        # Resumption is not acceptance (failsafe p2 step 1). In p1's T1 the
+        # requester's only post was "continue and report" after a stop; the
+        # resumed run inferred agreement from it and closed the task in the
+        # same serving. Agreement is about a result, so it has to come after
+        # one was shown: this serving's reply is that result.
+        sections.append(
+            f"task {serial} of {label} is not closed: its run wrote a report, but #{evidence} came before any "
+            "result of this task was shown here, so it asked for the work, not agreed to its result. It closes "
+            f"when its requester agrees here to what this reply shows. Its work is checkpointed on {view.branch}; "
+            "nothing is integrated"
+        )
+        return TopicResult(sections, meta=PostMeta(intent=RESPONSE_REQUEST, to=int(requester["sender_id"]),
+                                                   ask="confirmation"))
 
     context.step = "binding the accepted change"
     # The requester agreed to the copy as it stood, committed or not, so all

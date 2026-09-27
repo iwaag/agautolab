@@ -1104,12 +1104,18 @@ TARGET = zulip_listener.RunTarget(TASK, MISSION)
 MISSION_DIR = f"{MISSION.label}-the-plan"
 
 
+SHOWN_RESULT = "The README is drafted.\n\n`ag-post intent=report`"
+
+
 def anchored(*extra):
     """A `workrun-` topic as planning leaves it: the notes, then the task."""
     return [
         history_message(sender_id=BOT_ID, name="Autolab", content=ROOT_NOTE),
         history_message(sender_id=BOT_ID, name="Autolab", content=TASK_NOTE),
         history_message(sender_id=BOT_ID, name="Autolab", content="# Add the README"),
+        # A result shown for review: agreement is only ever to a result
+        # (failsafe p2 step 1).
+        history_message(sender_id=BOT_ID, name="Autolab", content=SHOWN_RESULT),
         history_message(),
         *extra,
     ]
@@ -1352,7 +1358,7 @@ def test_a_serving_runs_the_supercoder_in_the_mission_s_own_copy(monkeypatch, tm
     # The anchoring notes are machine-to-machine and never reach the run; the
     # task description autolab posted, and the developer's word, do.
     assert (workspace / "chatlog.md").read_text() == (
-        "[Autolab (you)] # Add the README\n[Developer] Build it\n"
+        "[Autolab (you)] # Add the README\n[Autolab (you)] (report) The README is drafted.\n[Developer] Build it\n"
     )
     # No report: the conversation is simply not finished. Nothing closes.
     assert not any(call[0] in {"report", "push", "integrate", "commit-pending"} for call in calls)
@@ -2232,7 +2238,7 @@ def test_a_mention_serves_the_task_the_request_was_made_for(monkeypatch, tmp_pat
     # The anchoring notes are machine-to-machine and never reach the run; the
     # task description autolab posted, and the developer's word, do.
     assert (workspace / "chatlog.md").read_text() == (
-        "[Autolab (you)] # Add the README\n[Developer] Build it\n"
+        "[Autolab (you)] # Add the README\n[Autolab (you)] (report) The README is drafted.\n[Developer] Build it\n"
     )
     # forge's conversation is a file beside it, and the prompt says where.
     thread = workspace / "threads" / FORGE_CHANNEL / f"{FORGE_TOPIC}.md"
@@ -2772,3 +2778,75 @@ def test_the_stop_mid_task_fault_is_one_shot_and_names_its_mark(tmp_path, monkey
     text = zulip_listener._stop_mid_task()
     assert "no intent attribute" in text and not unmarked.exists()
     assert zulip_listener._stop_mid_task() == ""
+
+
+def _t1_history(*extra):
+    """failsafe p1 T1 as it stood: autolab started the task itself, its
+    serving ended on progress ("the rest is still running"), and Front then
+    asked it to continue — the only post anybody else made."""
+    return [
+        history_message(sender_id=BOT_ID, name="Autolab", content=ROOT_NOTE, id=11),
+        history_message(sender_id=BOT_ID, name="Autolab", content=TASK_NOTE, id=12),
+        history_message(sender_id=BOT_ID, name="Autolab", content="# Add the README", id=13),
+        history_message(sender_id=BOT_ID, name="Autolab",
+                        content="Task 2 starts now.\n\n`ag-post intent=progress`", id=14),
+        history_message(sender_id=BOT_ID, name="Autolab", content="[selfnote][start] #9 for 15 Front", id=15),
+        history_message(sender_id=BOT_ID, name="Autolab", content="Message received. Please wait for the reply.", id=16),
+        history_message(sender_id=BOT_ID, name="Autolab",
+                        content="@**Front**\n\nThe rest is still running.\n\n`ag-post intent=progress end=16`", id=17),
+        history_message(sender_id=15, name="Front",
+                        content="@**autolab-agstudio1** Observer reports this task stopped. Continue from what the "
+                                "copy holds and report task 2 done.", id=18),
+        history_message(sender_id=BOT_ID, name="Autolab", content="Message received. Please wait for the reply.", id=19),
+        *extra,
+    ]
+
+
+def test_a_resume_request_resumes_the_work_and_leaves_the_task_open(monkeypatch, tmp_path):
+    """failsafe p2 step 1: a recovery request authorises resumption. The
+    resumed run writing `report.md` does not make the request an agreement —
+    no result had been shown when it was posted — so nothing is accepted,
+    integrated or started, and the reply asks the requester to confirm."""
+    calls = []
+    wire_run(monkeypatch, tmp_path, calls, report="all good\n", output="```ag-reply intent=report\nDone.\n```")
+    zulip_listener.handle_workrun(RunClient(calls, history=_t1_history()), WORK_CHANNEL, WORKRUN_TOPIC)
+
+    assert calls_of(calls, "report") == [] and calls_of(calls, "integrate") == []
+    assert not any("[selfnote][change] accepted" in call[3] for call in calls_of(calls, "send"))
+    assert not any(call[0] == "resolve" for call in calls)
+    parsed = parse_post(last_reply(calls))
+    assert "#18 came before any result of this task was shown here" in parsed.text
+    assert plain(parsed.meta) == PostMeta(intent=RESPONSE_REQUEST, to=15, ask="confirmation", seen=parsed.meta.seen)
+
+
+def test_an_acceptance_after_the_resumed_result_closes_the_task(monkeypatch, tmp_path):
+    """…and the requester's agreement to what the resumed serving showed is
+    the evidence that closes it."""
+    calls = []
+    wire_run(monkeypatch, tmp_path, calls, report="all good\n")
+    shown = history_message(sender_id=BOT_ID, name="Autolab", id=20, content=(
+        "@**Front**\n\nDone. task 2 is not closed: … It closes when its requester agrees here.\n\n"
+        "`ag-post intent=response_request to=15 ask=confirmation end=19`"))
+    accepted = history_message(sender_id=15, name="Front", content="Accepted.", id=21)
+    zulip_listener.handle_workrun(RunClient(calls, history=_t1_history(shown, accepted)), WORK_CHANNEL,
+                                  WORKRUN_TOPIC)
+
+    notes = [call[3] for call in calls_of(calls, "send") if "[selfnote][change]" in call[3]]
+    assert notes[0].startswith("[selfnote][change] accepted main=c0ffee #21")
+    assert calls_of(calls, "report")[0][1:] == (2, "all good\n")
+    assert any(call[0] == "resolve" for call in calls)
+
+
+def test_a_question_answered_is_not_a_result_agreed_to(monkeypatch, tmp_path):
+    """A question the run asked (which option?) and its answer show no result."""
+    calls = []
+    wire_run(monkeypatch, tmp_path, calls, report="all good\n")
+    asked = history_message(sender_id=BOT_ID, name="Autolab", id=20, content=(
+        "@**Front**\n\nShould the flag be --hyphenated or --hyphens?\n\n"
+        "`ag-post intent=response_request to=15 ask=question`"))
+    answer = history_message(sender_id=15, name="Front", content="--hyphenated.", id=21)
+    zulip_listener.handle_workrun(RunClient(calls, history=_t1_history(asked, answer)), WORK_CHANNEL,
+                                  WORKRUN_TOPIC)
+
+    assert calls_of(calls, "report") == [] and calls_of(calls, "integrate") == []
+    assert "#21 came before any result of this task was shown here" in last_reply(calls)

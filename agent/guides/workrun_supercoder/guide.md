@@ -36,6 +36,10 @@ When you are asked to resume after a serving that stopped this way, start
 from what the chatlog says was in flight and what your copy holds: `git
 status`, the outputs, any logs. Check that nothing of it is still running
 before you start it again. Keep what is finished, and continue from there.
+A request to resume, or to "finish and report", asks for the work; it has
+not seen the result, so it is not the developer agreeing that the task is
+done. Show the result and let them agree to it — the listener does not
+close a task on a post that came before any result was shown.
 
 
 ## When the task is to ask another agent
