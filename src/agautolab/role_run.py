@@ -182,6 +182,10 @@ def run_role(role: str, prompt: str, *, cwd: Path, timeout: float,
 #: them through `python -m agag.health --dir <this> --queue <listener.sqlite>`.
 EXECUTIONS_DIR = SPEC.local / "executions"
 KEEP_EXECUTIONS = 200
+#: Beside a run's live record, the trial fault a person injected into that
+#: run (`agag.health` reports it as `run.injected`, failsafe p3): a review
+#: must not read a trial as an operational recurrence.
+INJECTED_SUFFIX = ".injected"
 
 
 def live_path(role: str) -> Path | None:
@@ -204,3 +208,8 @@ def prune_executions(keep: int = KEEP_EXECUTIONS) -> None:
         return
     for path in paths[:-keep] if len(paths) > keep else []:
         path.unlink(missing_ok=True)
+        path.with_suffix(INJECTED_SUFFIX).unlink(missing_ok=True)
+    # A marker whose record is gone marks nothing (failsafe p3).
+    for marker in EXECUTIONS_DIR.glob(f"*{INJECTED_SUFFIX}"):
+        if not marker.with_suffix(".json").exists():
+            marker.unlink(missing_ok=True)

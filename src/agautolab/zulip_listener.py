@@ -78,6 +78,7 @@ close-out is finished without another run.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -1819,13 +1820,19 @@ class KillAtFirstTool:
         from agag.execution import records
         from agag.serving import current
 
-        from .role_run import EXECUTIONS_DIR
+        from .role_run import EXECUTIONS_DIR, INJECTED_SUFFIX
 
         journal = current()
         serving = journal.serving() if journal is not None else None
         prefix = f"s{serving.id}-" if serving is not None else ""
         for path, doc in records(EXECUTIONS_DIR):
             if path.name.startswith(prefix) and doc.get("pid") and not doc.get("ended_at"):
+                fault = "freeze-after-tool" if self.freeze else "silent-exit"
+                try:
+                    path.with_suffix(INJECTED_SUFFIX).write_text(
+                        json.dumps({"fault": fault, "at": time.time(), "pid": doc["pid"]}), encoding="utf-8")
+                except OSError as error:
+                    log(f"could not mark the run as injected: {error!r}")
                 if self.freeze:
                     log(f"fault injected: freezing the harness (pid {doc['pid']}) after its first tool result; "
                         f"`kill -CONT {doc['pid']}` resumes it")
