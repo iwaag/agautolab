@@ -2030,12 +2030,17 @@ def start_next_task(
         # is done once you accept it" the requester passed the command on to
         # the human even when the human's acceptance had already said "that
         # completes this mission" (p3 step 5, trials B and D).
+        # failsafe p5: the acceptance is whoever holds the decision — the
+        # requester, when the work was entrusted to it, or the person it asked
+        # for — and any of them may record it; the requester's own agreement
+        # is evidence like anybody's. Recording it needs no post here.
         return (
-            f"every task of {mission.label} is finished. The mission is done when you, its requester, record "
-            f"its acceptance: if the words that accepted this task also accepted the mission (\"that completes "
-            f"the mission\"), record them now with `agentchat accept {mission.mission_id} --evidence <that post>`; "
-            f"otherwise ask for the mission's acceptance and record it once it is given. A person without that "
-            f"tool can say it in {mission.channel}/{mission.topic}"
+            f"every task of {mission.label} is finished. The mission is done once its acceptance is recorded: "
+            f"if you were entrusted with accepting it and the words that agreed to this task also accept the "
+            f"mission (\"that completes the mission\"), record them now — "
+            f"`agentchat accept {mission.mission_id} --evidence <that post>`, your own post included. If the "
+            f"person you asked for keeps the approval, ask them and record their words once given. A person "
+            f"without that tool can say it in {mission.channel}/{mission.topic}"
         )
     following = remaining[0]
     where = f"{following.channel}/{live_topic_name(client, following.channel, following.topic)}"

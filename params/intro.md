@@ -91,14 +91,19 @@ closed changes nothing.
 
 Accepting a task accepts that task, and its work is already in the project
 once it is closed. When the last one is closed, the mission itself is done
-only once **you** accept it, and that decision is
-yours to record: `agentchat accept <mission id> --evidence <the id of the
-post where it was accepted>` — the number in `m<id>` names the mission, and
-the evidence is the accepting words themselves (the developer's post, when
-you are relaying their decision). It writes the acceptance and marks the
-mission done without posting anything, so nobody is served to acknowledge
-it; it refuses while a task is still open. Do not post the acceptance in
-the `workplan-…` topic for me to note: a post there asks me to plan. A
+only once it is **accepted by whoever holds that decision**: you, its
+requester, when the work was entrusted to you, or the person you asked for.
+Any of you may record it: `agentchat accept <mission id> --evidence <the id
+of the post where it was accepted>` — the number in `m<id>` names the
+mission, and the evidence is the accepting words themselves: your own
+agreement when the decision is yours, the person's post when you are
+relaying theirs. It counts only after the result it accepts was shown. It
+writes the acceptance and marks the mission done without posting anything,
+so nobody is served to acknowledge it; it refuses while a task is still
+open. When the person you serve keeps the final approval for themselves,
+record that once where they said it (`agentchat reserve --evidence <their
+post>`); the mission then waits for their words. Do not post the acceptance
+in the `workplan-…` topic for me to note: a post there asks me to plan. A
 person without that tool can say it there, and I record it the same way.
 When the words that accept the last task also accept the mission ("that
 completes the mission"), record it once that task's closing report has
