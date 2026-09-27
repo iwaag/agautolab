@@ -87,6 +87,7 @@ __all__ = [
     "commit_paths",
     "commit_pending",
     "dirty_repositories",
+    "changed_since",
     "ensure_view",
     "existing_view",
     "integrate",
@@ -98,6 +99,7 @@ __all__ = [
     "repositories",
     "set_aside",
     "snapshot",
+    "stray_paths",
     "tree_of",
     "files_between",
     "view_path",
@@ -360,6 +362,51 @@ def snapshot(view: MissionView) -> dict[str, tuple[str, str]]:
     return held
 
 
+def changed_since(view: MissionView, seen: dict[str, str]) -> dict[str, list[str]]:
+    """`repository → files` that differ from `seen` (repository → working
+    tree id, as a checkpoint wrote it; a repository absent there held
+    nothing then). Empty when the copy is exactly what was seen — the test
+    an agreement to a shown result is held to (failsafe p4)."""
+    now = snapshot(view)
+    changed: dict[str, list[str]] = {}
+    for name in sorted(set(seen) | set(now)):
+        worktree = view.worktrees.get(name)
+        if worktree is None:
+            continue
+        before, after = seen.get(name), now[name][1] if name in now else None
+        if before == after:
+            continue
+        if before is None or after is None:
+            shared = _rev(view.project_root / name, _shared_branch(view.project_root / name))
+            base = tree_of(worktree, shared) if shared else None
+            before, after = before or base, after or base
+            if before == after:
+                continue
+        changed[name] = files_between(worktree, before, after) or ["(content)"]
+    return changed
+
+
+#: What may sit in a copy beside its worktrees and the links `ensure_view`
+#: makes: its own record, and the desktop's litter.
+_COPY_OWN = {VIEW_FILE, ".DS_Store"}
+
+
+def stray_paths(view: MissionView, limit: int = 20) -> list[str]:
+    """Files in the copy outside every repository. Nothing integrates them and
+    a release does not keep them, so a result written there is a result
+    nobody receives (failsafe p3 trial C wrote `docs/soak-p3-c.txt` there
+    and the task closed as "changed no repository")."""
+    if not view.path.is_dir():
+        return []
+    found: list[str] = []
+    for entry in sorted(view.path.iterdir()):
+        if entry.name in view.worktrees or entry.name in _COPY_OWN or entry.is_symlink():
+            continue
+        paths = sorted(p for p in entry.rglob("*") if p.is_file()) if entry.is_dir() else [entry]
+        found += [str(p.relative_to(view.path)) for p in paths if p.name not in _COPY_OWN]
+    return found[:limit] + ([f"… {len(found) - limit} more"] if len(found) > limit else [])
+
+
 def commit_pending(view: MissionView, message: str) -> dict[str, str]:
     """Commit whatever is uncommitted in each worktree of the copy, onto the
     mission's branch. Returns the repositories committed and their commits."""
@@ -393,6 +440,7 @@ def release_view(view: MissionView, reason: str) -> str:
     if not view.path.exists():
         return f"{view.path.name}: nothing to release"
     kept = []
+    stray = stray_paths(view)
     with project_lock(view.slug, view.path.parent.parent):
         for name, worktree in sorted(view.worktrees.items()):
             if not (worktree / ".git").exists():
@@ -405,14 +453,18 @@ def release_view(view: MissionView, reason: str) -> str:
                 kept.append(name)
             _git(view.project_root / name, "worktree", "remove", "--force", str(worktree))
         for entry in view.path.iterdir():
-            if entry.is_symlink() or entry.is_file():
+            # Only what the copy itself made: a file outside every
+            # repository is somebody's output and is left where it is, said.
+            if entry.is_symlink() or entry.name in _COPY_OWN:
                 entry.unlink()
         try:
             view.path.rmdir()
         except OSError:
             pass
     held = f"; uncommitted work in {', '.join(kept)} was committed to it" if kept else ""
-    return f"m{view.mission_id}'s working copy is released ({reason}); its branch {view.branch} is kept{held}"
+    left = (f"; files outside every repository were not integrated and are left in {view.path}: "
+            f"{', '.join(stray)}") if stray else ""
+    return f"m{view.mission_id}'s working copy is released ({reason}); its branch {view.branch} is kept{held}{left}"
 
 
 # --- integration -------------------------------------------------------------

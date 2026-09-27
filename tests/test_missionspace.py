@@ -424,3 +424,34 @@ def test_a_close_out_cut_after_the_push_finishes_once_on_retry(project, monkeypa
     assert any("(already there) and published" in line for line in result.sections)
     assert [n.split()[1] for n in sent] == ["integrated", "integrated"]
     assert result.resolve_after is True
+
+
+# --- what an agreement covers (failsafe p4) -------------------------------------
+
+
+def test_changed_since_is_empty_for_the_reviewed_state_and_names_what_moved(project):
+    view = project.view(21)
+    edit(view.worktrees["main"], "# shown")
+    seen = {name: tree for name, (_, tree) in ms.snapshot(view).items()}
+    assert ms.changed_since(view, seen) == {}
+    # Committing what was shown changes nothing an agreement covers.
+    commit(view.worktrees["main"], "checkpoint")
+    assert ms.changed_since(view, seen) == {}
+    # A file moved out of the repository after the review (p4 step 1, R2).
+    (view.worktrees["main"] / "wordcount.py").rename(view.path / "wordcount.py")
+    assert ms.changed_since(view, seen) == {"main": ["wordcount.py"]}
+    # A repository that held nothing when reviewed and holds something now.
+    edit(view.worktrees["direction"], "# later")
+    assert ms.changed_since(view, seen)["direction"] == ["wordcount.py"]
+
+
+def test_files_outside_every_repository_are_named_and_kept_at_release(project):
+    view = project.view(22)
+    assert ms.stray_paths(view) == []
+    (view.path / "docs").mkdir()
+    (view.path / "docs" / "result.txt").write_text("waited\n")
+    assert ms.stray_paths(view) == ["docs/result.txt"]
+    line = ms.release_view(view, "every task is closed")
+    assert "files outside every repository were not integrated" in line and "docs/result.txt" in line
+    assert (view.path / "docs" / "result.txt").read_text() == "waited\n"
+    assert not (view.path / "main").exists()

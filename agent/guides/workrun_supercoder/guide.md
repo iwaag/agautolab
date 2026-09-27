@@ -10,11 +10,11 @@ To create an agag agent, `agag init <name> --yes --provision --like <sibling-roo
 
 Your working directory is this mission's own copy of the project: another mission's work is not in it, and yours is not in theirs. Commit there whenever it helps you — a commit is a checkpoint on this mission's branch, not acceptance, and it publishes nothing. You cannot push from the copy and never need to.
 
-If the developer agreed that the task was done, create "report.md" in the workspace directory this prompt names above. Closing the task takes what the developer agreed to — everything in your copy, committed or not — into the project and publishes it, then starts the mission's next task at once; if the developer asked for the next task to wait, also create "hold.flag" there with their words. So leave in the copy only what the task delivers: scratch files go in your workspace directory or in ignored paths, and check each repository's ".gitignore" before generating files. If you change anything after the developer agreed, beyond what their agreement asked for, do not write "report.md" yet: show them first. An agreement closes what you showed; it never asks for the work again. Do not repeat a command, a wait or a generation your shown result already reports; if something it reported turns out to be wrong or missing (a file in the wrong place), fix only that and show it before closing. Integration, pushing and the devlog record are done after your reply, by the listener, and its own lines under your reply say what happened — so do not say in yours whether anything was pushed.
+Show your result when the work is done: your reply is what the developer reviews, so say what you did and where it is, and mark it `intent=report` (or ask them to confirm). Put everything the task delivers inside a repository of your copy: a file in the copy's own folder, outside `main/`, `direction/` and `devlog/`, is never integrated, and the listener says so under your reply. Scratch files go in your workspace directory or in ignored paths; check each repository's ".gitignore" before generating files. Integration, pushing and the devlog record are done by the listener after the developer agrees, and its own lines under your reply say what happened — so do not say in yours whether anything was pushed or closed.
 
-"README_PROJECT.md" says which folders are repositories and which of them are pushed. `main/`, `direction/` and `devlog/` are published when the task closes; to publish another repository you changed, name its folder in "publish.flag" (one per line) beside "report.md".
+"README_PROJECT.md" says which folders are repositories and which of them are pushed. `main/`, `direction/` and `devlog/` are published when the task closes; to publish another repository you changed, name its folder in "publish.flag" (one per line) in your workspace directory.
 
-When a close is refused because another mission changed the same files, bring that work into your copy with `git merge <branch>` (the branch the refusal names, usually `main`) in that repository's folder, resolve and test the combined result, and show it to the developer: their agreement then covers the combined change.
+When a close is refused because another mission changed the same files, bring that work into your copy with `git merge <branch>` (the branch the refusal names, usually `main`) in that repository's folder, resolve and test the combined result, and show it to the developer: their agreement then covers the combined change, never the earlier one.
 
 
 A task may have been started by autolab itself when the one before it closed: then the chatlog opens with that line, and the developer's words so far are in the previous tasks and the plan. A post asking you to start work this task has already done or is doing is answered with where it stands; nothing is redone.
@@ -38,8 +38,7 @@ status`, the outputs, any logs. Check that nothing of it is still running
 before you start it again. Keep what is finished, and continue from there.
 A request to resume, or to "finish and report", asks for the work; it has
 not seen the result, so it is not the developer agreeing that the task is
-done. Show the result and let them agree to it — the listener does not
-close a task on a post that came before any result was shown.
+done. Show the result and let them agree to it.
 
 
 ## When the task is to ask another agent

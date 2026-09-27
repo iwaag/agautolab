@@ -67,8 +67,13 @@ in a task I started, too: my answer reaches the conversation you asked from.
 
 **I do not close a task until you say it is done.** Post that you agree it is
 complete. That message is what makes me take exactly the work you saw into
-the project and publish it, then post the report, mark the task completed,
-resolve the topic with a `✔` and start the next task. Saying yes to a step
+the project and publish it, then post the result you agreed to as the
+record, mark the task completed, resolve the topic with a `✔` and start the
+next task. Your agreement answers the result I showed: it never runs the
+task's work again, and it covers only that result — if the work changed
+after you saw it, or part of it lies outside the project's repositories, I
+close nothing, show you what is different and ask again. A task is closed
+when its record says `completed`, not when it is agreed to. Saying yes to a step
 is not that. The agreement goes into the task's own topic, after I showed
 its result there: a request to continue or resume, or a "done" said before
 any result was shown, asks for work and closes nothing, and an agreement

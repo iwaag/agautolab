@@ -1105,6 +1105,9 @@ MISSION_DIR = f"{MISSION.label}-the-plan"
 
 
 SHOWN_RESULT = "The README is drafted.\n\n`ag-post intent=report`"
+SHOWN_ID = 2
+#: What the record of a closed task says: the shown post, word for word.
+RECORDED = "The README is drafted.\n\n*Agreed to in #3, as shown in #2.*"
 
 
 def anchored(*extra):
@@ -1115,8 +1118,8 @@ def anchored(*extra):
         history_message(sender_id=BOT_ID, name="Autolab", content="# Add the README"),
         # A result shown for review: agreement is only ever to a result
         # (failsafe p2 step 1).
-        history_message(sender_id=BOT_ID, name="Autolab", content=SHOWN_RESULT),
-        history_message(),
+        history_message(sender_id=BOT_ID, name="Autolab", content=SHOWN_RESULT, id=SHOWN_ID),
+        history_message(id=3),
         *extra,
     ]
 
@@ -1174,7 +1177,8 @@ class FakeIntegration:
 
 
 def wire_run(monkeypatch, tmp_path, calls, *, target=TARGET, binding=TASK, report=None,
-             output="work done", pushed=True, accepted=None, outcome=None, held=None):
+             output="work done", pushed=True, accepted=None, outcome=None, held=None,
+             changed=None, stray=None):
     """`accepted`: what the mission's copy holds that its shared branch
     lacks (default: one commit in `main`). `outcome`: how integration
     answers (default: every repository fast-forwarded and published)."""
@@ -1227,7 +1231,9 @@ def wire_run(monkeypatch, tmp_path, calls, *, target=TARGET, binding=TASK, repor
         calls.append(("supercoder", prompt, cwd, home))
         workspace = Path(re.search(r'is placed in "([^"]+)"', prompt).group(1))
         if report is not None:
-            (workspace / "report.md").write_text(report)
+            # The run's agreement signal (failsafe p4: `close.flag`; what it
+            # says is not the result — the shown post is).
+            (workspace / "close.flag").write_text(report)
         # The run's words under the reply contract (clearer_chat_ui step 4).
         return output if "ag-reply" in output else f"<ag-reply>\n{output}\n</ag-reply>"
 
@@ -1254,8 +1260,8 @@ def wire_run(monkeypatch, tmp_path, calls, *, target=TARGET, binding=TASK, repor
     monkeypatch.setattr(zulip_listener, "commit_pending",
                         lambda v, message: calls.append(("commit-pending", message)) or {})
     monkeypatch.setattr(zulip_listener, "pending_changes", lambda v: dict(accepted))
-    monkeypatch.setattr(zulip_listener, "tree_of", lambda worktree, commit: f"tree-of-{commit}")
-    monkeypatch.setattr(zulip_listener, "files_between", lambda worktree, old, new: ["README.md"])
+    monkeypatch.setattr(zulip_listener, "changed_since", lambda v, seen: dict(changed or {}))
+    monkeypatch.setattr(zulip_listener, "stray_paths", lambda v: list(stray or []))
     monkeypatch.setattr(zulip_listener, "refresh_view", lambda v: [])
     monkeypatch.setattr(zulip_listener, "release_view",
                         lambda v, reason: calls.append(("release", reason)) or f"released ({reason})")
@@ -1277,6 +1283,7 @@ def wire_run(monkeypatch, tmp_path, calls, *, target=TARGET, binding=TASK, repor
     guides = tmp_path / "guides"
     (guides / "workrun_supercoder").mkdir(parents=True)
     (guides / "workrun_supercoder" / "guide.md").write_text("RUN GUIDE")
+    (guides / "workrun_supercoder" / "review.md").write_text("REVIEW GUIDE")
     monkeypatch.setattr(zulip_listener, "GUIDES", guides)
 
 
@@ -1381,12 +1388,14 @@ def test_a_report_completes_the_task_records_it_and_resolves_the_topic(monkeypat
 
     zulip_listener.handle_workrun(RunClient(calls), WORK_CHANNEL, WORKRUN_TOPIC)
 
-    assert calls_of(calls, "report")[0][1:] == (2, "all good\n")
+    # The record is the result the requester agreed to, as it was shown —
+    # not what the closing run wrote (failsafe p4).
+    assert calls_of(calls, "report")[0][1:] == (2, RECORDED)
     # The devlog record is deterministic handler code, never the agent's git.
     devlog = tmp_path / "projects" / "demo-project" / "devlog"
     task_dir = devlog / MISSION_DIR / "task-2"
     assert (task_dir / "work.md").read_text() == "# Add the README\n\nWrite it.\n"
-    assert (task_dir / "report.md").read_text() == "all good\n"
+    assert (task_dir / "report.md").read_text() == RECORDED
     assert calls_of(calls, "push")[0][1:] == (
         devlog, f"[AUTO] task 2 report for {MISSION.label}"
     )
@@ -1409,7 +1418,7 @@ def test_the_close_out_binds_the_accepted_change_before_integrating_it(monkeypat
 
     kinds = [call[0] for call in calls if call[0] in {"commit-pending", "send", "integrate", "report", "push"}]
     notes = [call[3] for call in calls_of(calls, "send") if "[selfnote][change]" in call[3]]
-    assert notes[0] == "[selfnote][change] accepted direction=d1rec main=c0ffee #1 +gen=1"
+    assert notes[0] == "[selfnote][change] accepted direction=d1rec main=c0ffee #3 +gen=1 +shown=2"
     assert notes[1].startswith("[selfnote][change] integrated direction=1234567890abcdef/fast-forward/pushed")
     # commit what was reviewed, bind it, integrate it, then record the task.
     assert kinds.index("commit-pending") < kinds.index("send") < kinds.index("integrate") < kinds.index("report")
@@ -1449,7 +1458,7 @@ def test_a_change_that_cannot_be_integrated_returns_and_the_task_stays_open(monk
     zulip_listener.handle_workrun(RunClient(calls), WORK_CHANNEL, WORKRUN_TOPIC)
 
     notes = [call[3] for call in calls_of(calls, "send") if "[selfnote][change]" in call[3]]
-    assert notes[-1] == "[selfnote][change] returned main=overlap #1 +files=wordcount.py"
+    assert notes[-1] == "[selfnote][change] returned main=overlap #3 +files=wordcount.py"
     assert calls_of(calls, "report") == [] and calls_of(calls, "push") == []
     assert not any(call[0] == "resolve" for call in calls)
     outcome = last_reply(calls)
@@ -1463,17 +1472,14 @@ def test_an_interrupted_close_out_is_finished_from_its_note_without_a_run(monkey
     — no supercoder run, no second acceptance."""
     calls = []
     wire_run(monkeypatch, tmp_path, calls)
-    report_dir = supercoder_dir(tmp_path, 1)
-    report_dir.mkdir(parents=True)
-    (report_dir / "report.md").write_text("done before the crash\n")
     history = anchored(history_message(id=40, content="Accepted, thanks"),
                        history_message(sender_id=BOT_ID, name="Autolab", id=41,
-                                       content="[selfnote][change] accepted main=c0ffee #40 +gen=1"))
+                                       content="[selfnote][change] accepted main=c0ffee #40 +gen=1 +shown=2"))
     zulip_listener.handle_workrun(RunClient(calls, history=history), WORK_CHANNEL, WORKRUN_TOPIC)
 
     assert calls_of(calls, "supercoder") == []
     assert calls_of(calls, "integrate")[0][1] == {"main": "c0ffee"}
-    assert calls_of(calls, "report")[0][1:] == (2, "done before the crash\n")
+    assert calls_of(calls, "report")[0][1:] == (2, "The README is drafted.\n\n*Agreed to in #40, as shown in #2.*")
     assert not any("accepted" in call[3] for call in calls_of(calls, "send") if "[selfnote][change]" in call[3])
 
 
@@ -1521,20 +1527,85 @@ def test_a_checkpoint_is_noted_when_the_copy_changed_and_only_then(monkeypatch, 
     assert not [call for call in calls_of(calls, "send") if "[selfnote][change]" in call[3]]
 
 
-def test_the_close_out_says_whether_the_accepted_change_is_what_was_seen(monkeypatch, tmp_path):
+def test_an_agreement_closes_only_the_state_the_requester_reviewed(monkeypatch, tmp_path):
+    """failsafe p4: the agreement covers the result as shown — the checkpoint
+    written with it. Unchanged, the task closes and says so."""
     calls = []
-    wire_run(monkeypatch, tmp_path, calls, report="all good\n")
+    wire_run(monkeypatch, tmp_path, calls, report="agreed")
     history = anchored(
-        history_message(sender_id=BOT_ID, name="Autolab", id=30, content="[selfnote][change] checkpoint main=h:tree-of-c0ffee"),
-        history_message(id=31, content="Looks right, accepted"),
+        history_message(sender_id=BOT_ID, name="Autolab", id=1, content="[selfnote][change] checkpoint main=h:t1"),
+        history_message(id=131, content="Looks right, accepted"),
     )
     zulip_listener.handle_workrun(RunClient(calls, history=history), WORK_CHANNEL, WORKRUN_TOPIC)
-    assert "the accepted change is the state the requester saw (checkpoint #30)" in last_reply(calls)
+    assert "the accepted change is the result shown in #2 (checkpoint #1), unchanged since" in last_reply(calls)
+    prompt = calls_of(calls, "supercoder")[0][1]
+    assert "REVIEW GUIDE" in prompt and "not to be done again" in prompt and "What the requester reviewed: checkpoint #1" in prompt
+
+
+def test_a_result_changed_after_review_needs_the_agreement_again(monkeypatch, tmp_path):
+    """…changed since (a repair, a moved file, more work), nothing closes or
+    moves, and the requester is asked to agree to what this reply shows."""
+    calls = []
+    wire_run(monkeypatch, tmp_path, calls, report="agreed", changed={"main": ["docs/p4-r2.txt"]})
+    zulip_listener.handle_workrun(RunClient(calls), WORK_CHANNEL, WORKRUN_TOPIC)
+    reply = last_reply(calls)
+    assert "is not closed: the copy is not what the requester reviewed with #2 (main: docs/p4-r2.txt)" in reply
+    assert "needs the requester's agreement again" in reply
+    assert not any(call[0] in {"integrate", "report", "commit-pending"} for call in calls)
+    assert not [call for call in calls_of(calls, "send") if "accepted" in call[3]]
+    assert calls_of(calls, "write")[-1][2].endswith("`ag-post intent=response_request to=8 ask=confirmation seen=0 end=900`") \
+        or "ask=confirmation" in calls_of(calls, "write")[-1][2]
+
+
+def test_a_result_outside_every_repository_is_never_closed_as_delivered(monkeypatch, tmp_path):
+    """p3 trial C: the result was written into the copy's own folder, outside
+    every repository, and the task closed as "changed no repository". It is
+    said under every reply, and blocks the close."""
+    calls = []
+    wire_run(monkeypatch, tmp_path, calls, report="agreed", stray=["docs/soak.txt"])
+    zulip_listener.handle_workrun(RunClient(calls), WORK_CHANNEL, WORKRUN_TOPIC)
+    reply = last_reply(calls)
+    assert "outside every repository are not part of the task's result and are never integrated: docs/soak.txt" in reply
+    assert "is not closed" in reply
+    assert not any(call[0] in {"integrate", "report"} for call in calls)
 
     calls.clear()
-    history[-2] = history_message(sender_id=BOT_ID, name="Autolab", id=30, content="[selfnote][change] checkpoint main=h:older")
+    wire_run(monkeypatch, tmp_path / "shown", calls, stray=["docs/soak.txt"])
+    zulip_listener.handle_workrun(RunClient(calls, history=[*anchored()[:3], history_message(id=110)]),
+                                  WORK_CHANNEL, WORKRUN_TOPIC)
+    assert "never integrated: docs/soak.txt" in last_reply(calls)
+
+
+def test_a_work_serving_is_given_the_task_and_a_review_serving_the_result(monkeypatch, tmp_path):
+    """The distinction is the listener's, from the record: a post after a
+    shown result gets the review; any other post gets the task to do."""
+    calls = []
+    wire_run(monkeypatch, tmp_path, calls)
+    zulip_listener.handle_workrun(RunClient(calls, history=[*anchored()[:3], history_message(id=110)]),
+                                  WORK_CHANNEL, WORKRUN_TOPIC)
+    prompt = calls_of(calls, "supercoder")[0][1]
+    assert "REVIEW GUIDE" not in prompt and "The task this topic is for:" in prompt
+
+    calls.clear()
+    zulip_listener.handle_workrun(RunClient(calls), WORK_CHANNEL, WORKRUN_TOPIC)
+    prompt = calls_of(calls, "supercoder")[0][1]
+    assert "REVIEW GUIDE" in prompt and "The result as shown:\n\nThe README is drafted." in prompt
+
+
+def test_a_close_out_cut_after_its_result_post_does_not_post_it_twice(monkeypatch, tmp_path):
+    calls = []
+    wire_run(monkeypatch, tmp_path, calls)
+    monkeypatch.setattr(zulip_listener, "set_task_state",
+                        lambda client, task, state: calls.append(("state", state)) or task)
+    history = anchored(history_message(id=140, content="Accepted"),
+                       history_message(sender_id=BOT_ID, name="Autolab", id=141,
+                                       content="[selfnote][change] accepted main=c0ffee #140 +gen=1 +shown=2"),
+                       history_message(sender_id=BOT_ID, name="Autolab", id=142,
+                                       content="[selfnote][change] integrated main=c0ffee/fast-forward/pushed #140"),
+                       history_message(sender_id=BOT_ID, name="Autolab", id=143, content="## Result\n\nThe README"))
     zulip_listener.handle_workrun(RunClient(calls, history=history), WORK_CHANNEL, WORKRUN_TOPIC)
-    assert "changed after the state the requester saw (checkpoint #30): main: README.md" in last_reply(calls)
+    assert calls_of(calls, "report") == [] and calls_of(calls, "state") == [("state", "completed")]
+    assert calls_of(calls, "supercoder") == []
 
 
 def test_the_last_task_closing_releases_the_mission_s_copy(monkeypatch, tmp_path):
@@ -1593,7 +1664,7 @@ def test_a_local_only_devlog_is_written_and_never_pushed(monkeypatch, tmp_path):
     zulip_listener.handle_workrun(RunClient(calls), WORK_CHANNEL, WORKRUN_TOPIC)
 
     task_dir = devlog / MISSION_DIR / "task-2"
-    assert (task_dir / "report.md").read_text() == "all good\n"
+    assert (task_dir / "report.md").read_text() == RECORDED
     assert not any(call[0] == "push" for call in calls)
     assert not (devlog / ".git").exists()
     outcome = last_reply(calls)
@@ -1683,16 +1754,16 @@ def test_a_report_nobody_agreed_to_asks_its_requester_whatever_the_run_declared(
     assert calls_of(calls, "report") == [] and calls_of(calls, "integrate") == []
 
 
-def test_a_run_that_said_nothing_still_closes_on_its_report(monkeypatch, tmp_path):
+def test_a_run_that_said_nothing_still_closes_on_its_flag(monkeypatch, tmp_path):
     """The harness stopped failing a run that wrote files and no farewell;
-    `report.md`, not the answer text, is what says the task is done."""
+    `close.flag`, not the answer text, is what says the requester agreed."""
     calls = []
     wire_run(monkeypatch, tmp_path, calls, report="all good",
              output=zulip_listener.NO_CLOSING_MESSAGE)
 
     zulip_listener.handle_workrun(RunClient(calls), WORK_CHANNEL, WORKRUN_TOPIC)
 
-    assert calls_of(calls, "report")[0][1:] == (2, "all good")
+    assert calls_of(calls, "report")[0][1:] == (2, RECORDED)
     outcome = last_reply(calls)
     assert zulip_listener.NO_CLOSING_MESSAGE in outcome
     assert "failed" not in outcome
@@ -1708,7 +1779,7 @@ def test_a_failed_supercoder_run_is_reported_into_the_topic(monkeypatch, tmp_pat
     monkeypatch.setattr(zulip_listener, "workrun_supercoder", explode)
     zulip_listener.handle_workrun(RunClient(calls), WORK_CHANNEL, WORKRUN_TOPIC)
 
-    assert "failed during supercoder: claude_code timed out" in last_reply(calls)
+    assert "failed during review of the shown result: claude_code timed out" in last_reply(calls)
     assert not any(call[0] == "resolve" for call in calls)
 
 
@@ -2833,7 +2904,8 @@ def test_an_acceptance_after_the_resumed_result_closes_the_task(monkeypatch, tmp
 
     notes = [call[3] for call in calls_of(calls, "send") if "[selfnote][change]" in call[3]]
     assert notes[0].startswith("[selfnote][change] accepted main=c0ffee #21")
-    assert calls_of(calls, "report")[0][1:] == (2, "all good\n")
+    assert calls_of(calls, "report")[0][1:] == (2, "Done. task 2 is not closed: … It closes when its requester agrees "
+                                                   "here.\n\n*Agreed to in #21, as shown in #20.*")
     assert any(call[0] == "resolve" for call in calls)
 
 

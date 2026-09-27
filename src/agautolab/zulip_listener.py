@@ -136,6 +136,7 @@ from .worklog import (
     MISSION_CANCELLED,
     MISSION_STARTED,
     TASK_CANCELLED,
+    TASK_COMPLETED,
     TASK_HELD,
     Mission,
     RunTarget,
@@ -174,18 +175,18 @@ from .project_init import (
 from .study_setup import established_answer, prepare_pattern
 from .missionspace import (
     STANDARD_REPOSITORIES,
+    changed_since,
     commit_paths,
     commit_pending,
     dirty_repositories,
     ensure_view,
     existing_view,
-    files_between,
     integrate,
     pending_changes,
     refresh_view,
     release_view,
     snapshot,
-    tree_of,
+    stray_paths,
 )
 from .instance import (
     AGAUTOLAB_ROOT,
@@ -1072,7 +1073,8 @@ def _change_lines(changes: list[TaskChange]) -> list[str]:
     return [f'{change.action} task {change.serial} "{change.title}"' for change in changes]
 
 
-def supercoder_prompt(bot_name: str, workspace: Path, task: str, threads=(), view=None) -> str:
+def supercoder_prompt(bot_name: str, workspace: Path, task: str, threads=(), view=None,
+                      review: "Review | None" = None) -> str:
     """The placement lines, the task, then the guide — `superdirector_prompt`'s
     shape: read from and write to the workspace by absolute path, work in the
     project itself.
@@ -1093,18 +1095,80 @@ def supercoder_prompt(bot_name: str, workspace: Path, task: str, threads=(), vie
     lines += [
         f'The other agents\' own introductions are placed in '
         f'"{agents_file_path(workspace)}".',
-        f'Write "{REPORT_FILE}" — and any other file this guide asks for — '
-        f'into "{workspace}".',
+        f'Write any file this guide asks for into "{workspace}".',
         *(_copy_lines(view) if view is not None else ["Your working directory is the project itself."]),
         "",
-        "The task this topic is for:",
-        "",
-        task.strip(),
     ]
+    text = guide("workrun_supercoder", "guide.md")
+    if review is None:
+        lines += ["The task this topic is for:", "", task.strip()]
+    else:
+        lines += review.lines(task)
+        text += "\n\n" + guide("workrun_supercoder", "review.md")
     # A task run speaks to the requester like every conversational role: its
     # reply is what it marks, and it says whether it asks them something
     # (`agag.reply`, `agag.post`) — clearer_chat_ui step 4.
-    return prompt_with_guide(lines, guide("workrun_supercoder", "guide.md"), reply=True)
+    return prompt_with_guide(lines, text, reply=True)
+
+
+class Review:
+    """A serving that answers a result the task showed (failsafe p4 step 2).
+
+    The requester spoke after a result was shown, so this serving is about
+    that result — agree, change, or repair — and never the task's work
+    again: in failsafe p3 trial C and p4 step 1 (R2) such a serving re-ran
+    the task (a 420 s wait, a counted command) because it was handed the
+    task as its instruction. What the requester reviewed is fixed here, from
+    the record: the post that showed it and the checkpoint written with it.
+    """
+
+    def __init__(self, shown: dict, answer: int, reviewed: tuple[int, dict[str, str]] | None,
+                 changed: dict[str, list[str]], stray: list[str]):
+        self.shown = shown
+        self.shown_id = int(shown.get("id") or 0)
+        self.answer = answer
+        self.reviewed = reviewed
+        self.changed = changed
+        self.stray = stray
+
+    @property
+    def seen(self) -> dict[str, str]:
+        """The reviewed content: repository → working tree id."""
+        return {name: value.rsplit(":", 1)[-1] for name, value in (self.reviewed[1] if self.reviewed else {}).items()}
+
+    def lines(self, task: str) -> list[str]:
+        where = (f"checkpoint #{self.reviewed[0]}" if self.reviewed
+                 else "no checkpoint: the copy held no change of its own when it was shown")
+        copy = ("exactly what was reviewed" if not self.changed else
+                "changed since it was reviewed — " + "; ".join(f"{name}: {', '.join(files)}"
+                                                             for name, files in self.changed.items()))
+        return [
+            f"This serving answers the result this task showed in #{self.shown_id}: the requester's post "
+            f"#{self.answer} came after it. The task's work is done and was shown; the task text is below "
+            "for reference only — it is not to be done again.",
+            "",
+            "The result as shown:",
+            "",
+            _post_text(self.shown),
+            "",
+            f"What the requester reviewed: {where}. Your copy now: {copy}.",
+            ("Files in your copy outside every repository (no close integrates them; a release leaves them "
+             "behind): " + ", ".join(self.stray)) if self.stray else
+            "Nothing lies in your copy outside its repositories.",
+            "",
+            "The task, for reference:",
+            "",
+            task.strip(),
+        ]
+
+
+def _post_text(message: dict) -> str:
+    """A post as its reader sees it: without its handoff mention and its
+    machine line."""
+    from agag.post import strip
+
+    text = strip(str(message.get("content") or ""))
+    return re.sub(r"^\s*@\*\*[^*\n]+\*\*\s*\n+", "", text).strip()
 
 
 def _copy_lines(view) -> list[str]:
@@ -1148,10 +1212,10 @@ def workrun_supercoder(prompt: str, cwd: Path,
     )
     if exit_code != 0:
         raise ListenerError(f"supercoder run exited {exit_code}: {output.strip()[:500]}")
-    # Whether the task is done is read from `report.md`, never from this text:
-    # a run that edited files for fourteen turns and then stopped without a
-    # farewell still did the work — so silence is said as a report, marked,
-    # rather than bought a repair run.
+    # Whether the requester agreed is read from `close.flag`, never from this
+    # text: a run that edited files for fourteen turns and then stopped
+    # without a farewell still did the work — so silence is said as a
+    # report, marked, rather than bought a repair run.
     return output.strip() or f"<ag-reply intent=report>\n{NO_CLOSING_MESSAGE}\n</ag-reply>"
 
 
@@ -1273,6 +1337,9 @@ def remove_work_directory(work_dir: Path) -> None:
 # supercoder agree on rather than something one agent run decides alone.
 
 REPORT_FILE = "report.md"
+#: What a review serving writes when the requester agreed to the result as
+#: shown (failsafe p4): the only thing that closes a task.
+CLOSE_FILE = "close.flag"
 WRONG_PLACE_REPLY = (
     "This `workrun-` topic is not bound to any task. A workrun topic is "
     "opened by planning a mission, and says which task it runs; a topic made "
@@ -1404,32 +1471,6 @@ def note_checkpoint(client: ZulipClient, task: Task, view, changes) -> None:
         _send_note(client, task, change_note("checkpoint", held))
 
 
-def _reviewed_line(view, accepted: dict[str, str], changes, evidence: int) -> str:
-    """Whether the accepted content is what the requester had seen: the
-    last checkpoint written before their post. Said, never a gate — the
-    worker, not the handler, judges what their words agreed to."""
-    reviewed = next(
-        ((note_id, change) for note_id, change in reversed(changes)
-         if change.kind == "checkpoint" and note_id < evidence),
-        None,
-    )
-    if reviewed is None:
-        return f"no checkpoint was recorded before #{evidence}, so the accepted change is not compared with one"
-    note_id, checkpoint = reviewed
-    seen = {name: value.rsplit(":", 1)[-1] for name, value in checkpoint.entries.items()}
-    later = []
-    for name in sorted(set(seen) | set(accepted)):
-        worktree = view.worktrees.get(name)
-        now = tree_of(worktree, accepted[name]) if name in accepted and worktree else ""
-        if now == seen.get(name, ""):
-            continue
-        files = files_between(worktree, seen.get(name), now) if worktree else []
-        later.append(f"{name}: {', '.join(files) or 'changed'}")
-    if not later:
-        return f"the accepted change is the state the requester saw (checkpoint #{note_id})"
-    return f"changed after the state the requester saw (checkpoint #{note_id}): {'; '.join(later)}"
-
-
 def _integration_line(result) -> str:
     parts = []
     for outcome in result.outcomes:
@@ -1456,7 +1497,7 @@ def _returned_line(target: RunTarget, result) -> str:
 
 
 def close_out(context, target: RunTarget, view, accepted, sections: list[str],
-              requester: dict | None = None) -> TopicResult:
+              requester: dict | None = None, note_id: int | None = None) -> TopicResult:
     """Integrate an accepted change, record the task and start the next one.
 
     Every step is safe to repeat, which is what makes an interrupted
@@ -1491,12 +1532,13 @@ def close_out(context, target: RunTarget, view, accepted, sections: list[str],
 
     context.step = "closing the task"
     workspace = generation_dir(TOPICS_ROOT, context.channel, context.topic, accepted.generation or 0, "supercoder")
-    report_path = workspace / REPORT_FILE
-    report = report_path.read_text(encoding="utf-8") if report_path.is_file() else (
-        f"(the report of serving {accepted.generation} could not be read; the change is integrated as accepted in "
-        f"#{accepted.evidence})"
-    )
-    record_result(context.client, task, report)
+    report = _accepted_result(context.history, accepted)
+    if note_id is not None and _result_posted(context.history, context.self_id, note_id):
+        # Cut short between the result's post and its state note: the
+        # result is not posted twice.
+        set_task_state(context.client, task, TASK_COMPLETED)
+    else:
+        record_result(context.client, task, report)
     sections.append(f"task {serial} of {label} is completed and its result is posted above; resolving this topic")
     sections.append(integrated)
 
@@ -1533,16 +1575,17 @@ def _speaker(history: list[dict], message_id: int | None) -> dict | None:
     return None
 
 
-def result_shown_before(history: list[dict], self_id: int, requester: dict) -> bool:
-    """Whether this task showed a result for review before the requester's
-    post `requester`: a post of ours declared a `report`, or a request for
-    confirmation. Acks, progress, the task's own description and a question
-    show no result, so a post after only those — "continue", "build it", a
-    resume after a stop — asks for work and cannot agree to any."""
+def shown_before(history: list[dict], self_id: int, requester: dict) -> dict | None:
+    """The newest result this task showed for review before the requester's
+    post `requester`: a post of ours that declared a `report`, or a request
+    for confirmation. None when there is none — acks, progress, the task's
+    own description and a question show no result, so a post after only
+    those ("continue", "build it", a resume after a stop) asks for work and
+    cannot agree to any."""
     from agag.post import QUESTION, parse_post
 
     target = int(requester.get("id") or 0)
-    shown = False
+    shown = None
     for message in history:
         if message is requester or int(message.get("id") or 0) == target and message.get("sender_id") != self_id:
             return shown
@@ -1550,20 +1593,54 @@ def result_shown_before(history: list[dict], self_id: int, requester: dict) -> b
             continue
         meta = parse_post(message.get("content")).meta
         if meta is not None and (meta.intent == REPORT or (meta.intent == RESPONSE_REQUEST and meta.ask != QUESTION)):
-            shown = True
+            shown = message
     return shown
 
 
-def _owed_close_out(changes) -> object | None:
-    """The `accepted` note of a close-out that was interrupted: the newest
-    change note is `accepted` or `integrated` and the task is not closed. A
-    `returned` or a later checkpoint means the next agreement decides."""
+def result_shown_before(history: list[dict], self_id: int, requester: dict) -> bool:
+    return shown_before(history, self_id, requester) is not None
+
+
+def _reviewed_checkpoint(changes, shown_id: int) -> tuple[int, dict[str, str]] | None:
+    """The checkpoint the requester reviewed: the newest one written before
+    the post that showed the result (a serving writes it right before its
+    reply). None when the copy held nothing of its own then."""
+    return next(((note_id, change.entries) for note_id, change in reversed(changes)
+                 if change.kind == "checkpoint" and note_id < shown_id), None)
+
+
+def _owed_close_out(changes) -> tuple[int, object] | None:
+    """`(note id, accepted note)` of a close-out that was interrupted: the
+    newest change note is `accepted` or `integrated` and the task is not
+    closed. A `returned` or a later checkpoint means the next agreement
+    decides."""
     if not changes:
         return None
     newest = changes[-1][1]
     if newest.kind not in ("accepted", "integrated"):
         return None
-    return next((change for _, change in reversed(changes) if change.kind == "accepted"), None)
+    return next(((note_id, change) for note_id, change in reversed(changes) if change.kind == "accepted"), None)
+
+
+def _accepted_result(history: list[dict], accepted) -> str:
+    """The task's result as its record: the post the requester agreed to,
+    word for word, and where they agreed (failsafe p4). Never a text the
+    closing serving wrote — in p4 step 1 (R2) that text said "ran once" of a
+    command that had run twice."""
+    shown_id = int(accepted.fields.get("shown") or 0)
+    shown = next((m for m in history if int(m.get("id") or 0) == shown_id), None) if shown_id else None
+    agreed = f"Agreed to in #{accepted.evidence}" if accepted.evidence else "Agreed to"
+    if shown is None:
+        return (f"(the result shown in #{shown_id} could not be read here; the change is integrated as accepted "
+                f"in #{accepted.evidence})")
+    return f"{_post_text(shown)}\n\n*{agreed}, as shown in #{shown_id}.*"
+
+
+def _result_posted(history: list[dict], self_id: int, after: int) -> bool:
+    """Whether this close-out's result post is already there (after its
+    `accepted` note)."""
+    return any(m.get("sender_id") == self_id and int(m.get("id") or 0) > after
+               and str(m.get("content") or "").startswith("## Result") for m in history)
 
 
 def serve_run(context) -> TopicResult:
@@ -1579,13 +1656,14 @@ def serve_run(context) -> TopicResult:
 
 def _serve_run(context, said: dict) -> TopicResult:
     """One serving of a `workrun-` topic: gate, agent in the mission's own
-    copy, and — only if the run wrote a report and the requester agreed —
-    the close-out: bind, integrate, record.
+    copy, and — only when the requester answered a shown result, the run
+    judged it an agreement (`close.flag`) and the copy is still what they
+    reviewed — the close-out: bind, integrate, record.
 
-    The report file is the agreement signal the guide asks for ("if the
-    developer agreed that the task was done, create report.md"), and the
-    serving's own generation directory is what stops one report from being
-    acted on twice.
+    Which run this serving is, is decided here from the record (failsafe
+    p4): a post after a shown result is answered by a review of that
+    result, any other post by the task's work. The serving's own generation
+    directory is what stops one flag from being acted on twice.
     """
     context.step = "reading the binding"
     task = run_binding(context.client, context.channel, context.topic, context.self_id)
@@ -1616,8 +1694,25 @@ def _serve_run(context, said: dict) -> TopicResult:
         # A close-out that was cut short (a crash after the push, before the
         # record): finish it from its own note. No agent runs, and nothing
         # already integrated is integrated again.
+        note_id, owed = owed
         log(f"{label} task {serial}: finishing the close-out accepted in #{owed.evidence}")
-        return close_out(context, target, view, owed, sections)
+        return close_out(context, target, view, owed, sections, note_id=note_id)
+
+    # Whether this serving answers a result the task showed (failsafe p4):
+    # then it is a review of that result — agree, change, repair — never the
+    # task's work again, and what the requester reviewed is fixed now, from
+    # the record, before the run can change the copy.
+    requester = requester_of(context.history, context.self_id, context.processed_up_to)
+    answering = requester is not None and "because" not in requester \
+        and requester.get("sender_id") != context.self_id
+    shown = shown_before(context.history, context.self_id, requester) \
+        if answering and not target.task.finished else None
+    review = None
+    if shown is not None:
+        reviewed = _reviewed_checkpoint(changes, int(shown.get("id") or 0))
+        review = Review(shown, int(requester.get("id") or 0), reviewed, {}, [])
+        review.changed = changed_since(view, review.seen)
+        review.stray = stray_paths(view)
 
     number = next_generation(topic_workspace(TOPICS_ROOT, context.channel, context.topic))
     workspace = generation_dir(TOPICS_ROOT, context.channel, context.topic, number, "supercoder")
@@ -1641,7 +1736,7 @@ def _serve_run(context, said: dict) -> TopicResult:
     context.step = "harvest"
     write_agents_md(context.client, workspace)
 
-    context.step = "supercoder"
+    context.step = "supercoder" if review is None else "review of the shown result"
     task_text = target.task.document
     # Into the task's own topic, whichever conversation this serving answers
     # in: progress belongs where the task lives.
@@ -1652,7 +1747,8 @@ def _serve_run(context, said: dict) -> TopicResult:
                                                     "first tool result")
     try:
         output = workrun_supercoder(
-            supercoder_prompt(context.bot_name, workspace, task_text, threads, view=view) + _stop_mid_task(),
+            supercoder_prompt(context.bot_name, workspace, task_text, threads, view=view, review=review)
+            + _stop_mid_task(),
             view.path,
             on_event=KillAtFirstTool(progress) if silent else KillAtFirstTool(progress, freeze=True) if frozen
             else progress,
@@ -1674,12 +1770,17 @@ def _serve_run(context, said: dict) -> TopicResult:
 
     context.step = "checkpoint"
     note_checkpoint(context.client, target.task, view, changes)
+    stray = stray_paths(view)
+    stray_line = (
+        "files in this mission's copy outside every repository are not part of the task's result and are never "
+        f"integrated: {', '.join(stray)}" if stray else None
+    )
 
-    report_path = workspace / REPORT_FILE
-    if not report_path.is_file():
+    close = (workspace / CLOSE_FILE).is_file()
+    if not close:
         # Not a failure: the conversation simply is not finished. The topic
-        # stays open and the next human post serves it again.
-        return TopicResult(sections)
+        # stays open and the next post serves it again.
+        return TopicResult([*sections, *([stray_line] if stray_line else [])])
 
     if target.task.finished:
         # A closed task is not closed again: its change is integrated, and a
@@ -1693,47 +1794,58 @@ def _serve_run(context, said: dict) -> TopicResult:
                         f"again{after}")
         return TopicResult(sections)
 
-    # The agreement is the requester's, and it has to be in what this
-    # serving read (robust_workflow p3 step 5, trial G): a run that the
-    # task's own start note began — nobody else has spoken in the topic —
-    # wrote `report.md` in its first serving, and the close-out then said
-    # "task 1 was accepted (#<the start note>)" and started task 2. A start
-    # note is why the task runs, never that anybody agreed it is done.
-    requester = requester_of(context.history, context.self_id, context.processed_up_to)
-    if requester is None or "because" in requester or requester.get("sender_id") == context.self_id:
+    if not answering:
+        # The agreement is the requester's, and it has to be in what this
+        # serving read (robust_workflow p3 step 5, trial G): a run that the
+        # task's own start note began asked to close in its first serving.
+        # A start note is why the task runs, never that anybody agreed.
         sections.append(
-            f"task {serial} of {label} is not closed: its run wrote a report, but "
-            "nobody has said in this topic that the task is done. It closes when its requester agrees here. "
-            f"Its work is checkpointed on {view.branch}; nothing is integrated"
+            f"task {serial} of {label} is not closed: nobody has said in this topic that the task is done. It closes "
+            f"when its requester agrees here to a result it shows. Its work is checkpointed on {view.branch}; "
+            "nothing is integrated"
         )
-        # Waiting for the requester's agreement is a request for their answer,
-        # and it is required: whatever the run's reply declared (a `report`
-        # of its work, most often), the post asks the requester to confirm
-        # (`agag.post.combine`). Nobody to ask is no request.
+        # Waiting for the requester's agreement is a request for their
+        # answer, and it is required (`agag.post.combine`). Nobody to ask is
+        # no request.
         asked = (requester or {}).get("sender_id")
         if asked is None or int(asked) == int(context.self_id):
             return TopicResult(sections)
         return TopicResult(sections, meta=PostMeta(intent=RESPONSE_REQUEST, to=int(asked), ask="confirmation"))
     evidence = int(requester.get("id") or 0)
-    if not result_shown_before(context.history, context.self_id, requester):
-        # Resumption is not acceptance (failsafe p2 step 1). In p1's T1 the
-        # requester's only post was "continue and report" after a stop; the
-        # resumed run inferred agreement from it and closed the task in the
-        # same serving. Agreement is about a result, so it has to come after
-        # one was shown: this serving's reply is that result.
+    ask_again = PostMeta(intent=RESPONSE_REQUEST, to=int(requester["sender_id"]), ask="confirmation")
+    if review is None:
+        # Resumption is not acceptance (failsafe p2 step 1): the requester's
+        # post came before any result was shown, so it asked for the work.
         sections.append(
-            f"task {serial} of {label} is not closed: its run wrote a report, but #{evidence} came before any "
-            "result of this task was shown here, so it asked for the work, not agreed to its result. It closes "
-            f"when its requester agrees here to what this reply shows. Its work is checkpointed on {view.branch}; "
-            "nothing is integrated"
+            f"task {serial} of {label} is not closed: #{evidence} came before any result of this task was shown "
+            "here, so it asked for the work, not agreed to its result. It closes when its requester agrees here "
+            f"to what this reply shows. Its work is checkpointed on {view.branch}; nothing is integrated"
         )
-        return TopicResult(sections, meta=PostMeta(intent=RESPONSE_REQUEST, to=int(requester["sender_id"]),
-                                                   ask="confirmation"))
+        return TopicResult(sections, meta=ask_again)
+
+    # The agreement covers what was shown, and nothing else (failsafe p4):
+    # the copy must still be the reviewed state, and hold nothing outside
+    # its repositories that the result would silently lose.
+    changed = changed_since(view, review.seen)
+    if changed or stray:
+        reasons = []
+        if changed:
+            reasons.append("the copy is not what the requester reviewed with #"
+                           f"{review.shown_id} ({'; '.join(f'{n}: {', '.join(f)}' for n, f in changed.items())})")
+        if stray:
+            reasons.append(stray_line)
+        sections.append(
+            f"task {serial} of {label} is not closed: {' and '.join(reasons)}. The agreement in #{evidence} covers "
+            "the result as shown, so a changed result needs the requester's agreement again — to what this reply "
+            f"shows. Nothing is integrated; the work stays checkpointed on {view.branch}"
+        )
+        return TopicResult(sections, meta=ask_again)
 
     context.step = "binding the accepted change"
-    # The requester agreed to the copy as it stood, committed or not, so all
-    # of it is what is accepted — bound to exact commits before anything
-    # shared moves.
+    # The requester agreed to the copy as it was shown, committed or not; it
+    # is still exactly that, so all of it is what is accepted — bound to
+    # exact commits, and to the post that showed it, before anything shared
+    # moves.
     commit_pending(view, f"{AUTO_MARKER} {label} task {serial}: the state accepted in #{evidence}")
     accepted = pending_changes(view)
     publish_path = workspace / PUBLISH_FILE
@@ -1741,9 +1853,11 @@ def _serve_run(context, said: dict) -> TopicResult:
         name.strip() for name in re.split(r"[\s,]+", publish_path.read_text(encoding="utf-8"))
         if name.strip() in view.worktrees
     }) if publish_path.is_file() else []
-    note = change_note("accepted", accepted, evidence=evidence, gen=number, publish=",".join(publish))
+    note = change_note("accepted", accepted, evidence=evidence, gen=number, publish=",".join(publish),
+                       shown=review.shown_id, checkpoint=review.reviewed[0] if review.reviewed else "")
     _send_note(context.client, target.task, note)
-    sections.append(_reviewed_line(view, accepted, changes, evidence))
+    where = f"checkpoint #{review.reviewed[0]}" if review.reviewed else "no change of its own"
+    sections.append(f"the accepted change is the result shown in #{review.shown_id} ({where}), unchanged since")
     return close_out(context, target, view, parse_change(note), sections, requester=requester)
 
 
