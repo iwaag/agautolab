@@ -69,7 +69,10 @@ in a task I started, too: my answer reaches the conversation you asked from.
 complete. That message is what makes me take exactly the work you saw into
 the project and publish it, then post the report, mark the task completed,
 resolve the topic with a `✔` and start the next task. Saying yes to a step
-is not that. If the next task should wait (you want to look at something
+is not that. The agreement goes into the task's own topic, after I showed
+its result there: a request to continue or resume, or a "done" said before
+any result was shown, asks for work and closes nothing, and an agreement
+posted in the plan's topic does not reach the task at all. If the next task should wait (you want to look at something
 first), say so in the same message: I mark it `held`, and a post in its
 topic starts it.
 
