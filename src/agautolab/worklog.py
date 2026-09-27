@@ -577,11 +577,16 @@ def record_result(client: ZulipClient, task: Task, report: str) -> Task:
 
 
 def cancel_tasks(client: ZulipClient, tasks: dict[int, Task]) -> int:
-    """Cancel every live task of a mission. Returns how many moved."""
+    """Cancel every live task of a mission. Returns how many moved.
+
+    A finished task stays finished: its work was accepted and integrated,
+    and cancelling the mission after it does not undo that (failsafe p3:
+    cancelling two retired trial missions rewrote their completed tasks as
+    cancelled)."""
     moved = 0
     for serial in sorted(tasks):
         task = tasks[serial]
-        if task.state == TASK_CANCELLED:
+        if task.state == TASK_CANCELLED or task.finished:
             continue
         set_task_state(client, task, TASK_CANCELLED)
         moved += 1

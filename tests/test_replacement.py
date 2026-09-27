@@ -308,3 +308,13 @@ def test_a_replaced_mission_is_never_swept_as_finished(realm):
     assert [task.state for task in tasks] == [TASK_COMPLETED]
     assert "replaced" in mission_done.reason_not_finished(retired, tasks)
     assert [c.label for c in mission_done.finished_missions(realm, BOT_ID)] == []
+
+
+def test_cancelling_a_mission_keeps_its_completed_task_completed(realm):
+    """failsafe p3: two retired trial missions were cancelled after their
+    only task had completed, and the cancellation rewrote it `cancelled`."""
+    mission, tasks = planned(realm)
+    moved = worklog.cancel_tasks(realm, worklog.mission_tasks(realm, mission, BOT_ID))
+    assert moved == 1
+    assert worklog.task_at(realm, tasks[0].task_id, BOT_ID).state == TASK_COMPLETED
+    assert worklog.task_at(realm, tasks[1].task_id, BOT_ID).state == TASK_CANCELLED
