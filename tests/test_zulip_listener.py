@@ -2895,4 +2895,26 @@ def test_kill_at_first_tool_kills_only_the_serving_s_own_live_run(monkeypatch, t
         assert killed == []
         watcher({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "a", "name": "Bash"}]}})
         watcher({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "b", "name": "Bash"}]}})
-    assert killed == [(4242, 9)] and len(seen) == 3
+    assert killed == [(4242, 9)] and len(seen) == 3  # SIGKILL
+
+
+def test_the_freeze_fault_stops_the_harness_after_its_first_tool_result(monkeypatch, tmp_path):
+    import json as _json
+    import signal as _signal
+
+    from agag import serving
+    from agautolab import role_run
+
+    monkeypatch.setattr(role_run, "EXECUTIONS_DIR", tmp_path)
+    (tmp_path / "s7-supercoder-1.json").write_text(_json.dumps(
+        {"schema": "agag.execution.v1", "pid": 4242, "ended_at": None, "started_at": 1}))
+    sent = []
+    monkeypatch.setattr(zulip_listener.os, "kill", lambda pid, sig: sent.append((pid, sig)))
+    watcher = zulip_listener.KillAtFirstTool(lambda e: None, freeze=True)
+    journal = serving.NullJournal()
+    journal._serving = serving.Serving(7, "c", "t", "owner", 1, ack_id=2)
+    with serving.bound(journal):
+        watcher({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "a", "name": "Bash"}]}})
+        assert sent == []
+        watcher({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "a"}]}})
+    assert sent == [(4242, _signal.SIGSTOP)]

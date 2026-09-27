@@ -81,6 +81,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import signal
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -1559,11 +1560,14 @@ def _serve_run(context, said: dict) -> TopicResult:
     progress = RunProgress(context.client, context.channel, context.topic, anchor=getattr(context, "anchor", 0))
     silent = _injected(SILENT_EXIT_FAULT, "the next task serving's harness is killed at its first tool call and "
                                           "the serving ends with no reply")
+    frozen = not silent and _injected(FREEZE_FAULT, "the next task serving's harness is frozen (SIGSTOP) after its "
+                                                    "first tool result")
     try:
         output = workrun_supercoder(
             supercoder_prompt(context.bot_name, workspace, task_text, threads, view=view) + _stop_mid_task(),
             view.path,
-            on_event=KillAtFirstTool(progress) if silent else progress,
+            on_event=KillAtFirstTool(progress) if silent else KillAtFirstTool(progress, freeze=True) if frozen
+            else progress,
             home=(context.channel, context.topic),
             selection=context.selection,
         )
@@ -1697,12 +1701,22 @@ STOP_UNMARKED = "Open the reply with a plain ```ag-reply fence and no intent att
 SILENT_EXIT_FAULT = SPEC.local / "faults" / "silent-exit"
 
 
+#: failsafe p2: the next task serving's harness is frozen (SIGSTOP) right
+#: after its first tool call returns: alive, with no event, no open tool call
+#: and no process under it — a run whose progress and wait cannot be
+#: established. `kill -CONT <pid>` lets it go on. One-shot, created only by
+#: a person.
+FREEZE_FAULT = SPEC.local / "faults" / "freeze-after-tool"
+
+
 class KillAtFirstTool:
     """An event watcher that kills the run's own harness process the first
-    time it calls a tool (the `silent-exit` trial fault)."""
+    time it calls a tool (the `silent-exit` trial fault), or with `freeze`
+    stops it after the first tool result (`freeze-after-tool`)."""
 
-    def __init__(self, inner):
+    def __init__(self, inner, *, freeze: bool = False):
         self.inner = inner
+        self.freeze = freeze
         self.done = False
 
     def __call__(self, event: dict) -> None:
@@ -1711,7 +1725,8 @@ class KillAtFirstTool:
             return
         message = event.get("message") if isinstance(event.get("message"), dict) else {}
         blocks = message.get("content") if isinstance(message.get("content"), list) else []
-        if not any(isinstance(b, dict) and b.get("type") == "tool_use" for b in blocks):
+        wanted = "tool_result" if self.freeze else "tool_use"
+        if not any(isinstance(b, dict) and b.get("type") == wanted for b in blocks):
             return
         self.done = True
         from agag.execution import records
@@ -1724,8 +1739,13 @@ class KillAtFirstTool:
         prefix = f"s{serving.id}-" if serving is not None else ""
         for path, doc in records(EXECUTIONS_DIR):
             if path.name.startswith(prefix) and doc.get("pid") and not doc.get("ended_at"):
-                log(f"fault injected: killing the harness (pid {doc['pid']}) at its first tool call")
-                os.kill(int(doc["pid"]), 9)
+                if self.freeze:
+                    log(f"fault injected: freezing the harness (pid {doc['pid']}) after its first tool result; "
+                        f"`kill -CONT {doc['pid']}` resumes it")
+                    os.kill(int(doc["pid"]), signal.SIGSTOP)
+                else:
+                    log(f"fault injected: killing the harness (pid {doc['pid']}) at its first tool call")
+                    os.kill(int(doc["pid"]), signal.SIGKILL)
                 return
 
 
