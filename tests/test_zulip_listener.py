@@ -144,9 +144,9 @@ def marked(answer: str) -> str:
     """A stub run's output under the reply contract (`agag.reply`): the
     answer inside an `ag-reply` mark after a line of the run's own, unless
     the test wrote the marks itself."""
-    if "```ag-reply" in answer:
+    if "<ag-reply" in answer:
         return answer
-    return f"thinking about it first.\n\n```ag-reply\n{answer}\n```"
+    return f"thinking about it first.\n\n<ag-reply>\n{answer}\n</ag-reply>"
 
 
 def wire(monkeypatch, tmp_path, calls, *, current_files=False, superdirector="planner says hi"):
@@ -1229,7 +1229,7 @@ def wire_run(monkeypatch, tmp_path, calls, *, target=TARGET, binding=TASK, repor
         if report is not None:
             (workspace / "report.md").write_text(report)
         # The run's words under the reply contract (clearer_chat_ui step 4).
-        return output if "ag-reply" in output else f"```ag-reply\n{output}\n```"
+        return output if "ag-reply" in output else f"<ag-reply>\n{output}\n</ag-reply>"
 
     monkeypatch.setattr(zulip_listener, "workrun_supercoder", supercoder)
     monkeypatch.setattr(
@@ -1663,7 +1663,7 @@ def test_a_report_nobody_agreed_to_asks_its_requester_whatever_the_run_declared(
     boundary, is listed as pending — and accepts and integrates nothing."""
     calls = []
     wire_run(monkeypatch, tmp_path, calls, report="all good\n",
-             output=f"```ag-reply {fence}\nAll tests pass.\n```")
+             output=f"<ag-reply {fence}>\nAll tests pass.\n</ag-reply>")
     history = [
         history_message(sender_id=BOT_ID, name="Autolab", content=ROOT_NOTE, id=11),
         history_message(sender_id=BOT_ID, name="Autolab", content=TASK_NOTE, id=12),
@@ -2059,7 +2059,7 @@ def test_a_serving_posts_the_progress_tail_before_the_outcome(monkeypatch, tmp_p
         on_event({"type": "assistant", "message": {"role": "assistant", "content": [
             {"type": "tool_use", "id": "t1", "name": "Bash",
              "input": {"command": "uv run pytest"}}]}})
-        return "```ag-reply intent=report\nwork done\n```"
+        return "<ag-reply intent=report>\nwork done\n</ag-reply>"
 
     monkeypatch.setattr(zulip_listener, "workrun_supercoder", streaming_run)
     zulip_listener.handle_workrun(RunClient(calls), WORK_CHANNEL, WORKRUN_TOPIC)
@@ -2086,7 +2086,7 @@ def test_run_wrappers_report_a_missing_closing_message(monkeypatch, tmp_path):
     monkeypatch.setattr(zulip_listener, "bmining_prompt", lambda bot_name: "PROMPT")
 
     assert zulip_listener.workrun_supercoder("p", tmp_path) == (
-        f"```ag-reply intent=report\n{zulip_listener.NO_CLOSING_MESSAGE}\n```")
+        f"<ag-reply intent=report>\n{zulip_listener.NO_CLOSING_MESSAGE}\n</ag-reply>")
     assert zulip_listener.run_superdirector("p", tmp_path) == zulip_listener.NO_CLOSING_MESSAGE
     assert zulip_listener.run_director("p", tmp_path) == zulip_listener.NO_CLOSING_MESSAGE
 
@@ -2808,7 +2808,7 @@ def test_a_resume_request_resumes_the_work_and_leaves_the_task_open(monkeypatch,
     no result had been shown when it was posted — so nothing is accepted,
     integrated or started, and the reply asks the requester to confirm."""
     calls = []
-    wire_run(monkeypatch, tmp_path, calls, report="all good\n", output="```ag-reply intent=report\nDone.\n```")
+    wire_run(monkeypatch, tmp_path, calls, report="all good\n", output="<ag-reply intent=report>\nDone.\n</ag-reply>")
     zulip_listener.handle_workrun(RunClient(calls, history=_t1_history()), WORK_CHANNEL, WORKRUN_TOPIC)
 
     assert calls_of(calls, "report") == [] and calls_of(calls, "integrate") == []

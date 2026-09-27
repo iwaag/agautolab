@@ -379,7 +379,13 @@ def serve(context) -> TopicResult:
     current_files = write_mission_workspace(
         context.client, current, context.channel, context.topic, context.self_id
     )
-    if not current_files:
+    context.step = "task status"
+    # Only a planned mission has tasks: a first request reads nothing more.
+    awaiting = tasks_awaiting_agreement(context.client, context.channel, context.topic, context.self_id) \
+        if current_files else []
+    if current_files:
+        (current / TASK_STATUS_FILE).write_text(task_status_text(awaiting), encoding="utf-8")
+    else:
         current.rmdir()
 
     context.step = "superdirector"
@@ -409,11 +415,92 @@ def serve(context) -> TopicResult:
     # director for the reply alone — the plan and flags it wrote are already
     # handled above and are not re-read.
     answer = established_answer(project, context.topic, context.history, context.self_id, done=established)
+    corrections = misplaced_agreements(awaiting, context.history, context.self_id, context.processed_up_to)
     return TopicResult(
-        [*notes, *response_sections, *([answer] if answer else [])], resolve_after=resolve_after, output=output,
+        [*notes, *response_sections, *corrections, *([answer] if answer else [])], resolve_after=resolve_after,
+        output=output,
         repair=repair_with(lambda again: run_superdirector(again, project_directory(project), conversation=conversation,
                                                            selection=context.selection), output),
     )
+
+
+#: The read-back of where each task stands, for the planner (failsafe p3).
+TASK_STATUS_FILE = "status.md"
+
+
+def shown_result(history: list[dict], self_id: int) -> int | None:
+    """The newest result a task showed for review in its own topic — a post
+    of ours declaring a `report` or asking for confirmation — when nobody
+    else has spoken there since. None when nothing waits for the requester
+    there (no result yet, or somebody answered and the task's serving owns
+    that answer)."""
+    from agag.post import QUESTION, parse_post
+
+    shown = None
+    for message in history:
+        if not is_speech(message):
+            continue
+        if message.get("sender_id") != self_id:
+            shown = None
+            continue
+        meta = parse_post(message.get("content")).meta
+        if meta is not None and (meta.intent == REPORT or (meta.intent == RESPONSE_REQUEST and meta.ask != QUESTION)):
+            shown = int(message.get("id") or 0) or None
+    return shown
+
+
+def tasks_awaiting_agreement(client: ZulipClient, channel: str, topic: str, self_id: int) -> list[tuple[Task, int | None]]:
+    """Every task of the mission this plan holds, with the result it waits
+    to have agreed to in its own topic (None when it waits for none)."""
+    mission = read_mission(client, channel, topic, self_id)
+    if mission is None:
+        return []
+    found = []
+    for serial, task in sorted(mission_tasks(client, mission, self_id).items()):
+        shown = None
+        if not task.finished and task.state != TASK_CANCELLED:
+            try:
+                shown = shown_result(client.topic_history(task.channel, task.topic, num_before=100), self_id)
+            except ZulipError as error:
+                log(f"could not read {task.channel}/{task.topic} for its status: {error!r}")
+        found.append((task, shown))
+    return found
+
+
+def task_status_text(awaiting: list[tuple[Task, int | None]]) -> str:
+    lines = ["# Where each task stands", "",
+             "A task closes only in its own topic, when its requester agrees there to the result it showed; "
+             "that close-out is what `completed` below records. Nothing said in this conversation closes a task.", ""]
+    for task, shown in awaiting:
+        where = f"#{task.channel} › {task.topic}"
+        if shown:
+            lines.append(f"- task {task.serial}: {task.state}; its result (#{shown}) waits for its requester's "
+                         f"agreement in {where}")
+        else:
+            lines.append(f"- task {task.serial}: {task.state} ({where})")
+    return "\n".join(lines) + "\n"
+
+
+def misplaced_agreements(awaiting: list[tuple[Task, int | None]], history: list[dict], self_id: int,
+                         processed_up_to: int) -> list[str]:
+    """The explicit correction when the requester spoke **here** after a task
+    showed its result in its own topic (failsafe p2 trial D: an agreement
+    relayed into the plan, and a planning reply that called the task closed
+    with no close-out). Said by the listener, from the record, whatever the
+    planner's reply says: the task is open until it closes in its topic."""
+    requester = requester_of(history, self_id, processed_up_to)
+    if requester is None or requester.get("sender_id") == self_id or "because" in requester:
+        return []
+    spoke = int(requester.get("id") or 0)
+    lines = []
+    for task, shown in awaiting:
+        if shown and spoke > shown:
+            lines.append(
+                f"task {task.serial} is still open: it closes only when its requester agrees in its own topic, "
+                f"#**{task.channel}>{task.topic}**, to the result it showed there (#{shown}). "
+                "An agreement posted in this plan closes nothing; please post it there."
+            )
+    return lines
 
 
 def commit_planning_notes(project: str, dirty_before: dict[str, set[str]], topic: str) -> list[str]:
@@ -1064,7 +1151,7 @@ def workrun_supercoder(prompt: str, cwd: Path,
     # a run that edited files for fourteen turns and then stopped without a
     # farewell still did the work — so silence is said as a report, marked,
     # rather than bought a repair run.
-    return output.strip() or f"```ag-reply intent=report\n{NO_CLOSING_MESSAGE}\n```"
+    return output.strip() or f"<ag-reply intent=report>\n{NO_CLOSING_MESSAGE}\n</ag-reply>"
 
 
 # --- live progress on workrun- topics ----------------------------------------
@@ -1688,8 +1775,8 @@ STOP_MID_TASK_INSTRUCTION = (
     "report.md. Your reply must say that the remaining work is still running and that you will report when "
     "it finishes, although nothing will be running. {mark}"
 )
-STOP_MARKED = "Mark the reply as progress: open it with ```ag-reply intent=progress."
-STOP_UNMARKED = "Open the reply with a plain ```ag-reply fence and no intent attribute at all."
+STOP_MARKED = "Mark the reply as progress: open it with <ag-reply intent=progress>."
+STOP_UNMARKED = "Open the reply with a plain <ag-reply> tag and no intent attribute at all."
 
 
 #: failsafe p2: the next task serving's harness process is killed (SIGKILL)

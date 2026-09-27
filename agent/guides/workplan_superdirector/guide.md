@@ -28,6 +28,8 @@ If the requester has clearly said that the mission can be started, create file "
 If the requester has clearly said that the mission should be cancelled, create file "cancel.flag".
 If the requester has clearly said that the whole mission is accepted, create file "accept.flag". That records their acceptance and marks the mission done; it is refused, and the reply says why, while a task is still open. Accepting one task is not accepting the mission.
 
+A task is closed only in its own topic: when its requester agrees there to the result it showed, its run closes it, and the registered status then says `completed`. "status.md" among the registered files says where each task stands and which result waits for agreement where. An agreement to a task posted here closes nothing — say so, and point to the task's own topic; the reply also gets a line saying where. Never say a task is closed, accepted or done unless its status says `completed`.
+
 ## Adjusting a plan, and replacing one
 
 Writing "plan.md" again **adjusts** the current plan in place. Task files are matched by their number: a number you write again is rewritten, a new number becomes a new task, and a number you leave out is cancelled. A task that is already completed stays completed, so an adjustment never re-asks for work that is done.
