@@ -1557,17 +1557,24 @@ def _serve_run(context, said: dict) -> TopicResult:
     # Into the task's own topic, whichever conversation this serving answers
     # in: progress belongs where the task lives.
     progress = RunProgress(context.client, context.channel, context.topic, anchor=getattr(context, "anchor", 0))
+    silent = _injected(SILENT_EXIT_FAULT, "the next task serving's harness is killed at its first tool call and "
+                                          "the serving ends with no reply")
     try:
         output = workrun_supercoder(
             supercoder_prompt(context.bot_name, workspace, task_text, threads, view=view) + _stop_mid_task(),
             view.path,
-            on_event=progress,
+            on_event=KillAtFirstTool(progress) if silent else progress,
             home=(context.channel, context.topic),
             selection=context.selection,
         )
         said["output"] = output
         said["repair"] = repair_with(lambda again: workrun_supercoder(
             again, view.path, home=(context.channel, context.topic), selection=context.selection), output)
+    except ListenerError as error:
+        if not silent:
+            raise
+        log(f"fault injected: {error}; this serving posts nothing")
+        return TopicResult([])
     finally:
         # The tail of the stream — what the run was doing when it ended —
         # posts before the outcome does, whichever outcome it is.
@@ -1679,6 +1686,47 @@ STOP_MID_TASK_INSTRUCTION = (
 )
 STOP_MARKED = "Mark the reply as progress: open it with ```ag-reply intent=progress."
 STOP_UNMARKED = "Open the reply with a plain ```ag-reply fence and no intent attribute at all."
+
+
+#: failsafe p2: the next task serving's harness process is killed (SIGKILL)
+#: at its first tool call, and the serving then ends without posting
+#: anything — a worker exit nobody reports. What stays is what any such exit
+#: leaves: an ack with no reply after it, a live execution record with no
+#: end and a dead pid, and a journal entry that delivered nothing. One-shot,
+#: created only by a person.
+SILENT_EXIT_FAULT = SPEC.local / "faults" / "silent-exit"
+
+
+class KillAtFirstTool:
+    """An event watcher that kills the run's own harness process the first
+    time it calls a tool (the `silent-exit` trial fault)."""
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.done = False
+
+    def __call__(self, event: dict) -> None:
+        self.inner(event)
+        if self.done:
+            return
+        message = event.get("message") if isinstance(event.get("message"), dict) else {}
+        blocks = message.get("content") if isinstance(message.get("content"), list) else []
+        if not any(isinstance(b, dict) and b.get("type") == "tool_use" for b in blocks):
+            return
+        self.done = True
+        from agag.execution import records
+        from agag.serving import current
+
+        from .role_run import EXECUTIONS_DIR
+
+        journal = current()
+        serving = journal.serving() if journal is not None else None
+        prefix = f"s{serving.id}-" if serving is not None else ""
+        for path, doc in records(EXECUTIONS_DIR):
+            if path.name.startswith(prefix) and doc.get("pid") and not doc.get("ended_at"):
+                log(f"fault injected: killing the harness (pid {doc['pid']}) at its first tool call")
+                os.kill(int(doc["pid"]), 9)
+                return
 
 
 def _stop_mid_task() -> str:

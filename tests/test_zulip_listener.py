@@ -2850,3 +2850,49 @@ def test_a_question_answered_is_not_a_result_agreed_to(monkeypatch, tmp_path):
 
     assert calls_of(calls, "report") == [] and calls_of(calls, "integrate") == []
     assert "#21 came before any result of this task was shown here" in last_reply(calls)
+
+
+def test_the_silent_exit_fault_kills_the_harness_and_posts_nothing(monkeypatch, tmp_path):
+    """failsafe p2 trial fault: the harness is killed at its first tool call
+    and the serving ends with no reply at all — not a failure notice, which
+    would be a closing post."""
+    calls = []
+    wire_run(monkeypatch, tmp_path, calls)
+    fault = tmp_path / "silent-exit"
+    fault.write_text("")
+    monkeypatch.setattr(zulip_listener, "SILENT_EXIT_FAULT", fault)
+
+    def killed(prompt, cwd, on_event=None, home=None, selection=None):
+        assert isinstance(on_event, zulip_listener.KillAtFirstTool)
+        raise zulip_listener.ListenerError("supercoder run exited -9: ")
+
+    monkeypatch.setattr(zulip_listener, "workrun_supercoder", killed)
+    zulip_listener.handle_workrun(RunClient(calls), WORK_CHANNEL, WORKRUN_TOPIC)
+
+    assert not fault.exists()
+    # The ack, and then nothing: no failure notice, no reply.
+    assert [c[2] for c in calls_of(calls, "write")] == ["Message received. Please wait for the reply."]
+
+
+def test_kill_at_first_tool_kills_only_the_serving_s_own_live_run(monkeypatch, tmp_path):
+    import json as _json
+
+    from agag import serving
+    from agautolab import role_run
+
+    monkeypatch.setattr(role_run, "EXECUTIONS_DIR", tmp_path)
+    doc = {"schema": "agag.execution.v1", "pid": 4242, "ended_at": None, "started_at": 1}
+    (tmp_path / "s7-supercoder-1.json").write_text(_json.dumps(doc))
+    (tmp_path / "s8-supercoder-1.json").write_text(_json.dumps({**doc, "pid": 999}))
+    killed = []
+    monkeypatch.setattr(zulip_listener.os, "kill", lambda pid, sig: killed.append((pid, sig)))
+    seen = []
+    watcher = zulip_listener.KillAtFirstTool(seen.append)
+    journal = serving.NullJournal()
+    journal._serving = serving.Serving(7, "c", "t", "owner", 1, ack_id=2)
+    with serving.bound(journal):
+        watcher({"type": "assistant", "message": {"content": [{"type": "text", "text": "hi"}]}})
+        assert killed == []
+        watcher({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "a", "name": "Bash"}]}})
+        watcher({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "b", "name": "Bash"}]}})
+    assert killed == [(4242, 9)] and len(seen) == 3

@@ -38,6 +38,7 @@ What is autolab's own:
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Mapping
@@ -129,7 +130,8 @@ def run_role(role: str, prompt: str, *, cwd: Path, timeout: float,
              stream: bool = False,
              on_event: Callable[[dict], None] | None = None,
              selection: Selection | None = None,
-             extra_meta: Mapping[str, object] | None = None) -> tuple[str, dict, int]:
+             extra_meta: Mapping[str, object] | None = None,
+             live: Path | None = None) -> tuple[str, dict, int]:
     """Resolve `role` (project profile first), run it once, return output, record, exit code.
 
     `on_event` is run_harness's live-progress seam: when set, the harness
@@ -137,6 +139,10 @@ def run_role(role: str, prompt: str, *, cwd: Path, timeout: float,
     is stamped into the run record beside the project (61510bd passes the
     conversation; until `front_desk` p1 this wrapper did not accept it and
     every listener-started run failed before the harness).
+
+    Inside a listener's serving every run keeps a live execution record
+    (`agag.execution`) in `EXECUTIONS_DIR` unless `live` names another path:
+    the health interface a monitor probes (`agag.health`, failsafe p2).
     """
     project = project or (project_name_from_direction(cwd) if role == "director" else None)
     # The conversation's selection outranks the project's standing setting:
@@ -167,4 +173,34 @@ def run_role(role: str, prompt: str, *, cwd: Path, timeout: float,
         selection=selection,
         extra_meta={"project": project, **dict(extra_meta or {})},
         agent=agent,
+        live=live if live is not None else live_path(role),
     )
+
+
+#: Where each run's live execution record is kept while it lasts, and for
+#: a while after (`KEEP_EXECUTIONS` newest). A monitor on this host reads
+#: them through `python -m agag.health --dir <this> --queue <listener.sqlite>`.
+EXECUTIONS_DIR = SPEC.local / "executions"
+KEEP_EXECUTIONS = 200
+
+
+def live_path(role: str) -> Path | None:
+    """A new record path for a run inside a listener's serving; None outside
+    one (a CLI run, a test), where nobody would probe it."""
+    from agag.serving import current
+
+    journal = current()
+    record = journal.serving() if journal is not None else None
+    if record is None or not getattr(record, "id", 0):
+        return None
+    prune_executions()
+    return EXECUTIONS_DIR / f"s{record.id}-{role}-{time.time_ns()}.json"
+
+
+def prune_executions(keep: int = KEEP_EXECUTIONS) -> None:
+    try:
+        paths = sorted(EXECUTIONS_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime)
+    except OSError:
+        return
+    for path in paths[:-keep] if len(paths) > keep else []:
+        path.unlink(missing_ok=True)

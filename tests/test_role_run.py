@@ -207,3 +207,32 @@ def test_extra_meta_reaches_the_record_beside_the_project(monkeypatch, tmp_path)
     assert code == 0
     assert record["project"] == "ghtrends"
     assert record["conversation"] == "pj-ghtrends/workplan-trend6"
+
+
+def test_a_run_inside_a_serving_keeps_a_live_execution_record(monkeypatch, tmp_path):
+    """failsafe p2 step 2: the health interface's input. Inside a listener's
+    serving the run is given a record path named after the serving and the
+    role, and the record names the serving's ack and conversation; outside
+    one (a CLI, a test) no record is kept."""
+    from agag import serving
+
+    calls = harness_calls(monkeypatch, "supercoder", harness="claude_code")
+    monkeypatch.setattr(role_run, "EXECUTIONS_DIR", tmp_path / "executions")
+    role_run.run_role("supercoder", "q", cwd=tmp_path, timeout=60)
+    assert calls[-1][1]["live"] is None
+
+    journal = serving.NullJournal(trigger_id=5)
+    journal._serving = serving.Serving(7, "work-m1", "workrun-task1-m1", "owner", 5, ack_id=41)
+    with serving.bound(journal):
+        role_run.run_role("supercoder", "q", cwd=tmp_path, timeout=60)
+    live = calls[-1][1]["live"]
+    assert live.path.parent == tmp_path / "executions" and live.path.name.startswith("s7-supercoder-")
+    assert live.doc["serving"]["ack"] == 41 and live.doc["serving"]["topic"] == "workrun-task1-m1"
+
+
+def test_old_execution_records_are_pruned(monkeypatch, tmp_path):
+    monkeypatch.setattr(role_run, "EXECUTIONS_DIR", tmp_path)
+    for n in range(5):
+        (tmp_path / f"r{n}.json").write_text("{}")
+    role_run.prune_executions(keep=2)
+    assert len(list(tmp_path.glob("*.json"))) == 2
