@@ -55,14 +55,12 @@ The introductions file this prompt names above is the board's introductions
 as read when this serving began; the board and callback sections below say
 how asking works. The answer comes back into this task's own topic.
 
-When a ComfyUI generation takes minutes, do not wait for it. Submit it, post
-`@**Comfy Notifier** watch <prompt_id>` **in this topic** as a normal message,
-record in your report what is pending and what to do with its result, then
-finish. The notifier reacts to your command, and posts back here when the job
-ends — two lines naming the state and the `prompt_id`; read
-`GET /history/<prompt_id>` yourself for the outputs. Public-channel topics
-only. When *quoting* the command rather than issuing it, put it in a code
-fence.
+When a ComfyUI generation takes minutes, do not wait for it. Submit it, hand
+it to the Comfy Notifier with its one command posted **in this topic** as a
+normal message, not by running its CLI (2026-09-01: a run did, and nothing
+came back here), record in your report what is pending and what to do with
+its result, then finish. The notifier's introduction on the board is the
+command, what comes back and where it works.
 
 # Human-authored references
 
