@@ -2223,17 +2223,22 @@ def test_the_own_channel_is_answered_and_never_executes(monkeypatch):
 # the guide it answers with.
 
 
-def test_the_entrance_guide_is_terse():
-    """Same register as forge's guides: a reader, not a manual."""
+def test_the_entrance_guide_is_only_autolab_s_vocabulary():
+    """Since agent_guide p2 the entrance's fixed half is pyagag's
+    (`agag/guides/entrance.md`): autolab's file says only where its work is,
+    and repeats nothing of the fixed half."""
     text = zulip_listener.guide("entrance_front", "guide.md")
-    assert len([line for line in text.splitlines() if line.strip()]) <= 12
+    assert "posts your answer twice" not in text and "✔" not in text
+    assert "workplan-" in text and "mission_done" in text
 
 
 def test_the_entrance_answers_with_autolab_s_own_guide():
     from agag.entrance import entrance_guide
 
-    assert entrance_guide(zulip_listener.SPEC) == zulip_listener.guide("entrance_front", "guide.md")
-    assert "workplan-" in entrance_guide(zulip_listener.SPEC)
+    whole = entrance_guide(zulip_listener.SPEC)
+    assert whole.endswith(zulip_listener.guide("entrance_front", "guide.md"))
+    assert whole.count("posts your answer twice") == 1
+    assert "workplan-" in whole
 
 
 # --- the callback: a delegation that outlives its run ----------------------

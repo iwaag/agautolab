@@ -1,13 +1,18 @@
-You are this instance's entrance. Answer what the chatlog asks about your own work, from the chat itself, and start no development work here.
+autolab's work is not in this channel: it is in the project channels and
+their execution channels.
 
-- `agentchat channels --prefix pj-` are the projects; `agentchat topics <pj-channel>` shows their missions as `workplan-` topics.
-- `agentchat channels --prefix work-` are the execution channels; each description names the project and the mission it belongs to.
-- `agentchat topics <work-channel>` shows one `workrun-task<N>-…` topic per task. A `✔` name is a finished conversation.
-- `agentchat read <channel> <topic>` for detail, and read only the topics the question needs.
-- Asked where your plans stand, list **every** `pj-` channel and look in each: a project you did not look at is one you cannot report on.
-- Start from the channel list every time. Your own earlier answers in this channel are history — they say what was true when you wrote them, not what is true now.
-- Development work is not started here — say it goes in a `workplan-…` topic in the project's own `pj-<slug>` channel.
-
-If you are asked to close out finished work: read the topics first to check they really are done, `agentchat resolve <channel> <topic>` each finished one, then `uv run python -m agautolab.mission_done` to mark the finished missions done. Do this when asked, not on your own.
-
-Your reply is posted into this topic for you. Never `agentchat send` into this channel — doing that posts your answer twice.
+- `agentchat channels --prefix pj-` are the projects and studies;
+  `agentchat topics <pj-channel>` shows their missions as `workplan-` topics.
+- `agentchat channels --prefix work-` are the execution channels; each
+  description names the project and the mission it belongs to, and
+  `agentchat topics <work-channel>` shows one `workrun-task<N>-…` topic per
+  task.
+- Asked where your plans stand, list **every** `pj-` channel and look in
+  each: a project you did not look at is one you cannot report on
+  (agent_standardize p10: an answer from `pj-simpleshooter` alone missed the
+  finished mission in `pj-runsmoke1`).
+- Development work is not started here: it goes in a `workplan-…` topic in
+  the project's own `pj-<slug>` channel.
+- Closing out finished work also marks its missions done:
+  `uv run python -m agautolab.mission_done` (its `--help` says what it
+  records), after the topics are resolved.

@@ -104,6 +104,7 @@ from agag.topics import (
     next_generation,
     next_record_path,
     prompt_with_guide,
+    shared_sections,
     requester_of,
     serve_topic,
     threads_placement,
@@ -316,6 +317,13 @@ def guide(*parts: str) -> str:
     return shared_guide(GUIDES, *parts)
 
 
+#: pyagag's shared guide sections (`agag.topics.SHARED_SECTIONS`, `agent_guide`
+#: p2 step 3): the planner reads the board and the references; a task run also
+#: asks other agents, so it gets the callback too.
+PLANNER_SECTIONS = ("board", "refs")
+WORKER_SECTIONS = ("board", "callback", "refs")
+
+
 def superdirector_prompt(bot_name: str, workspace: Path, current_files: bool) -> str:
     """The placement lines, then the guide: read from and write to the
     workspace by absolute path, work in the project itself."""
@@ -338,7 +346,7 @@ def superdirector_prompt(bot_name: str, workspace: Path, current_files: bool) ->
     # The reply mark (`agag.reply`): the covering note the director says
     # to the conversation is what it marks; its planning notes are its own.
     return prompt_with_guide(
-        lines, guide("workplan_superdirector", "guide.md"), reply=True
+        lines, guide("workplan_superdirector", "guide.md"), reply=True, shared=PLANNER_SECTIONS
     )
 
 
@@ -1099,7 +1107,9 @@ def supercoder_prompt(bot_name: str, workspace: Path, task: str, threads=(), vie
         *(_copy_lines(view) if view is not None else ["Your working directory is the project itself."]),
         "",
     ]
-    text = guide("workrun_supercoder", "guide.md")
+    # pyagag's shared sections follow the role's own guide, and a review
+    # serving's own contract comes last, right before the reply section.
+    text = guide("workrun_supercoder", "guide.md") + "\n\n" + shared_sections(WORKER_SECTIONS)
     if review is None:
         lines += ["The task this topic is for:", "", task.strip()]
     else:

@@ -13,11 +13,3 @@ the work would be split, and what is unknown before a plan could be written.
 Speak from the repositories you can read, and say when you are guessing. Do
 not open a plan or start any work from here; that happens in a project
 channel when somebody asks for it.
-
-# Human-authored references
-
-`agrefs` reads what the developer has published for agents to build from —
-stories, images, templates, runnable examples — at a pinned revision,
-`<source>@<rev>[:<path>]`. `agrefs list` shows every source with what it is
-for, and `agrefs --help` says how to read one, how to look at an image, and
-how to quote and pass a reference on.

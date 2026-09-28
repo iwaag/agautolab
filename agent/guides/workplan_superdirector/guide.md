@@ -52,12 +52,6 @@ Keep it to one request per task.
 
 # Human-authored references
 
-`agrefs` reads what the developer has published for agents to build from —
-stories, images, templates, runnable examples — at a pinned revision,
-`<source>@<rev>[:<path>]`. `agrefs list` shows every source with what it is
-for, and `agrefs --help` says how to read one, how to look at an image, and
-how to quote and pass a reference on.
-
 When the request names a reference source, `agrefs sync <source>[@<rev>]`
 first, and record the adoption in `direction/REFERENCES.md`: the source,
 the commit, the date, why, and which mission adopted it. Each `task[N].md`

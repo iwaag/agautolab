@@ -43,12 +43,9 @@ done. Show the result and let them agree to it.
 
 ## When the task is to ask another agent
 
-The introductions file this prompt names above says how to reach each agent
-and what it calls finished. Talk with them using `agentchat` (`--help`
-explains it).
-
-Post the request or reply and finish. You will be called again when they answer, and
-the result goes into this task's own topic.
+The introductions file this prompt names above is the board's introductions
+as read when this serving began; the board and callback sections below say
+how asking works. The answer comes back into this task's own topic.
 
 When a ComfyUI generation takes minutes, do not wait for it. Submit it, post
 `@**Comfy Notifier** watch <prompt_id>` **in this topic** as a normal message,
@@ -60,12 +57,6 @@ only. When *quoting* the command rather than issuing it, put it in a code
 fence.
 
 # Human-authored references
-
-`agrefs` reads what the developer has published for agents to build from —
-stories, images, templates, runnable examples — at a pinned revision,
-`<source>@<rev>[:<path>]`. `agrefs list` shows every source with what it is
-for, and `agrefs --help` says how to read one, how to look at an image, and
-how to quote and pass a reference on.
 
 Read the references the task names at the revision it names, and look at
 images with your image reader on `agrefs path …`. When you ask forge for an
