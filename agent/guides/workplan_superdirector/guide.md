@@ -52,20 +52,11 @@ Keep it to one request per task.
 
 # Human-authored references
 
-`agrefs` reads what the developer has published for a project to be built
-from — stories, images, templates, runnable examples — by name at a pinned
-revision: `<source>@<revision>[:<path>]`. `agrefs list` shows
-every source the developer has published for agents, with what each is for;
-`agrefs sync <source>` fetches the newest published revision and
-prints the commit it is; `agrefs show <source>@<rev>[:<path>]` prints a text
-file, lists a directory, or says what a binary is; `agrefs path …` is the
-file itself, which your own image reader can open (`agrefs --help` has the
-rest). A request that names a reference names *that* revision: work from
-it, quote what you used as `<source>@<rev>:<path>` in what you write, and
-never put a newer revision or a summary of your own in the place of the
-original without saying so. The originals are read-only; derivatives go
-into your own workspace. When a reference and the request disagree, or a
-reference cannot be reached, say so rather than inventing.
+`agrefs` reads what the developer has published for agents to build from —
+stories, images, templates, runnable examples — at a pinned revision,
+`<source>@<rev>[:<path>]`. `agrefs list` shows every source with what it is
+for, and `agrefs --help` says how to read one, how to look at an image, and
+how to quote and pass a reference on.
 
 When the request names a reference source, `agrefs sync <source>[@<rev>]`
 first, and record the adoption in `direction/REFERENCES.md`: the source,
