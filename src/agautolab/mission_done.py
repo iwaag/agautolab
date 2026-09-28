@@ -171,7 +171,14 @@ def main(argv: list[str] | None = None, out=None, err=None, client=None) -> int:
         prog="python -m agautolab.mission_done",
         description=(
             "Mark a mission done once every one of its tasks is finished. "
-            "With no argument, every project channel is swept."
+            "With no argument, every project channel is swept. It writes the "
+            "same acceptance record `agentchat accept` does — whose decision, "
+            "on which post (--evidence, by default the request this run "
+            "answers) — then the mission's `done` state in its `workplan-` "
+            "topic. One line per mission says whether it moved and why not. "
+            "Saying in a reply that a mission is done records nothing; this "
+            "does. Run it when you were asked to close out finished work, "
+            "after reading the topics."
         ),
     )
     parser.add_argument(
