@@ -506,7 +506,7 @@ def test_a_plan_reconciles_the_split_and_builds_the_run_surfaces(monkeypatch, tm
     run_topic = zulip_listener.run_topic_name(MISSION.mission_id, 1)
     assert sends(calls) == [
         (run_topic, f"[selfnote][task] {MISSION.mission_id}#1"),
-        (run_topic, f"[selfnote][rootchat] {CHANNEL}/{TOPIC} #{MISSION.mission_id}"),
+        (run_topic, f"[selfnote][rootchat] {CHANNEL}/{TOPIC} #{MISSION.mission_id} rel=work"),
         (run_topic, "# First\n\ndo this\n"),
         (run_topic, "[selfnote][doc] 42"),
     ]
@@ -604,7 +604,7 @@ def test_a_replan_mirrors_each_change_onto_its_own_run_topic(monkeypatch, tmp_pa
         ("send", WORK_CHANNEL, topic_of(2), "[selfnote][doc] 42"),
         # only the created task is anchored; the others already are
         ("send", WORK_CHANNEL, topic_of(3), f"[selfnote][task] {MISSION.mission_id}#3"),
-        ("send", WORK_CHANNEL, topic_of(3), f"[selfnote][rootchat] {CHANNEL}/{TOPIC} #{MISSION.mission_id}"),
+        ("send", WORK_CHANNEL, topic_of(3), f"[selfnote][rootchat] {CHANNEL}/{TOPIC} #{MISSION.mission_id} rel=work"),
         ("send", WORK_CHANNEL, topic_of(3), "# Third\n\nc\n"),
         ("send", WORK_CHANNEL, topic_of(3), "[selfnote][doc] 42"),
         ("send", WORK_CHANNEL, topic_of(4), "Cancelled by planner."),
@@ -644,7 +644,7 @@ def test_a_task_changed_after_completion_gets_a_fresh_anchored_rerun_topic(monke
     redo = zulip_listener.rerun_topic_name(MISSION.mission_id, 1)
     assert sends(calls) == [
         (redo, f"[selfnote][task] {MISSION.mission_id}#1"),
-        (redo, f"[selfnote][rootchat] {CHANNEL}/{TOPIC} #{MISSION.mission_id}"),
+        (redo, f"[selfnote][rootchat] {CHANNEL}/{TOPIC} #{MISSION.mission_id} rel=work"),
         # The rework names the completed task it reworks, so a reader has one
         # chain rather than two topics that happen to share a serial.
         (redo, f"[selfnote][replaces] {task_at(1).task_id}"),
@@ -960,11 +960,11 @@ def test_a_mission_serving_opens_one_run_topic_per_task(monkeypatch, tmp_path):
     second = zulip_listener.run_topic_name(MISSION.mission_id, 2)
     assert sends(calls) == [
         (first, f"[selfnote][task] {MISSION.mission_id}#1"),
-        (first, f"[selfnote][rootchat] {CHANNEL}/{TOPIC} #{MISSION.mission_id}"),
+        (first, f"[selfnote][rootchat] {CHANNEL}/{TOPIC} #{MISSION.mission_id} rel=work"),
         (first, "# First\n\na\n"),
         (first, "[selfnote][doc] 42"),
         (second, f"[selfnote][task] {MISSION.mission_id}#2"),
-        (second, f"[selfnote][rootchat] {CHANNEL}/{TOPIC} #{MISSION.mission_id}"),
+        (second, f"[selfnote][rootchat] {CHANNEL}/{TOPIC} #{MISSION.mission_id} rel=work"),
         (second, "# Second\n\nb\n"),
         (second, "[selfnote][doc] 42"),
     ]
