@@ -18,7 +18,9 @@ import pytest
 
 from agautolab.wfexec import Executor, Settings
 
-EXPERIMENT = Path(__file__).resolve().parents[2] / "experiments" / "workflow_editor"
+# The workflow editor checkout whose CLI is under test: WFE_EXPERIMENT, or the
+# frozen copy in pj-agdev (the editor's own project lives on Gitea since p4).
+EXPERIMENT = Path(os.environ.get("WFE_EXPERIMENT") or Path(__file__).resolve().parents[2] / "experiments" / "workflow_editor")
 NODE = "node"
 
 WORKFLOW = """schema: ag.workflow.v1
