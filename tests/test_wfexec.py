@@ -279,3 +279,46 @@ def test_default_policy_plans_reports_and_resumes_a_report_without_redoing_work(
     assert "docs/run-001" in log
     published = subprocess.run(["git", "show", "main:devdocs/runs/docs/run-001/report.md"], cwd=area["remote"], capture_output=True, text=True)
     assert published.returncode == 0 and "made.txt was built" in published.stdout
+
+
+def test_prolonged_store_lock_fails_ticks_without_doubling_attempts(area):
+    """workflow_editor p5/ex1 step 4: exec.sqlite's write lock is held past
+    the busy timeout while the executor would claim, and again while the
+    attempt ends. The ticks fail (bounded, named); after the lock goes the
+    executor claims once, launches once and records the one end."""
+    import sqlite3
+    req = area["area"] / "words.md"
+    req.write_text("Please build a small thing.")
+    wfe(area, "request", "ship", "--braindump", str(req), "--author", "Test Person", "--receipt", "pytest-lock-0001", "--workspace", "demo")
+    store = area["area"] / ".local" / "exec" / "exec.sqlite"
+    ex = executor(area)
+
+    def held(action):
+        db = sqlite3.connect(store, isolation_level=None)
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            started = time.monotonic()
+            with pytest.raises(RuntimeError) as failure:
+                action()
+            return time.monotonic() - started, str(failure.value)
+        finally:
+            db.execute("ROLLBACK")
+            db.close()
+
+    took, message = held(ex.tick)
+    assert 4.5 <= took < 30, f"bounded by the busy timeout ({took:.1f} s)"
+    assert "exec store:" in message and "SQLite code 5" in message, message
+    assert wfe(area, "exec", "status", "run-001")["attempts"] == []
+    assert ex.tick() == "launched"
+    attempt = wfe(area, "exec", "status", "run-001")["attempts"][0]["id"]
+    deadline = time.monotonic() + 30
+    while ex.current.proc.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.1)
+    took, message = held(ex.tick)  # the agent has exited; recording its end waits for the lock
+    assert "exec store:" in message, message
+    until(ex, "finished")
+    status = wfe(area, "exec", "status", "run-001")
+    assert [a["id"] for a in status["attempts"]] == [attempt], "one attempt, not a second"
+    assert status["attempts"][0]["state"] == "ended" and status["attempts"][0]["exit_code"] == 0
+    assert [e["op"] for e in record(area)["history"]].count("attempt.end") == 1, "one end recorded"
+    assert ex.tick() == "idle"
