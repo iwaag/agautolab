@@ -432,3 +432,189 @@ def test_two_notifiers_only_the_owner_sends(area, zulip, tmp_path, monkeypatch):
     stale = subprocess.run([area["wfe"], "notify", "sent", str(d["delivery"]), "--claim", d["claim"], "--message", "1",
                             "--stream", "1", "--channel", "x", "--topic", "y", "--json"], capture_output=True, text=True)
     assert stale.returncode != 0 and "already recorded" in stale.stdout + stale.stderr, "A's late result is refused"
+
+
+# ---- p5/ex1 step 3: reconciliation across history, places and failures ------------------
+
+
+def test_marker_older_than_the_last_hundred_messages(area, zulip, tmp_path, monkeypatch):  # noqa: F811
+    request_and_plan(area, monkeypatch, "pytest-notify-0201")
+    n = notifier(area, zulip, tmp_path)
+    lost = answer_and_lose_the_next_post(area, zulip, n)
+    stream = zulip.messages[-1]["stream_id"]
+    # The topic grows by 450 more of the bot's own messages (and a person's) before the retry.
+    for i in range(450):
+        zulip.messages.append({"id": 6000 + i, "type": "stream", "stream_id": stream, "display_recipient": "wf-demo.docs", "subject": "run-001",
+                               "content": f"other\nref docs/run-999 #{i}:x", "sender_id": 11 if i % 3 else 8, "timestamp": time.time()})
+    zulip.pages = 0
+    retry_now(area)
+    n.pass_once()
+    assert posted_events(zulip).count("#6:answered") == 1
+    assert zulip.pages >= 2, "the search paged back past the newest window"
+    assert {d["id"]: d for d in wfe(area, "notify", "deliveries")}[lost["id"]]["state"] == "sent"
+
+
+def test_search_that_cannot_reach_far_enough_stays_uncertain(area, zulip, tmp_path, monkeypatch):  # noqa: F811
+    import agautolab.wfnotify as wfnotify
+    request_and_plan(area, monkeypatch, "pytest-notify-0202")
+    n = notifier(area, zulip, tmp_path)
+    lost = answer_and_lose_the_next_post(area, zulip, n)
+    stream = zulip.messages[-1]["stream_id"]
+    for i in range(30):
+        zulip.messages.append({"id": 6000 + i, "type": "stream", "stream_id": stream, "display_recipient": "wf-demo.docs", "subject": "run-001",
+                               "content": f"ref docs/run-999 #{i}:x", "sender_id": 11, "timestamp": time.time()})
+    monkeypatch.setattr(wfnotify, "SEARCH_PAGE", 10)
+    monkeypatch.setattr(wfnotify, "SEARCH_PAGES_MAX", 2)
+    retry_now(area)
+    before = zulip.posts
+    n.pass_once()
+    assert zulip.posts == before, "no repost when absence is not established"
+    row = {d["id"]: d for d in wfe(area, "notify", "deliveries")}[lost["id"]]
+    assert row["state"] == "failed" and row["uncertain"] == 1 and "history not covered" in row["last_error"]
+    status = wfe(area, "notify", "status")
+    assert any(f"delivery {lost['id']} may have been posted" in p for p in status["problems"]), status["problems"]
+
+
+def test_moved_topic_is_searched_where_it_went(area, zulip, tmp_path, monkeypatch):  # noqa: F811
+    request_and_plan(area, monkeypatch, "pytest-notify-0203")
+    n = notifier(area, zulip, tmp_path)
+    lost = answer_and_lose_the_next_post(area, zulip, n)
+    for m in zulip.messages:
+        m["subject"] = "run-001 (renamed)"  # a person renamed the topic, the lost post included
+    retry_now(area)
+    n.pass_once()
+    assert posted_events(zulip, "run-001 (renamed)").count("#6:answered") == 1
+    assert zulip.topic("run-001") == []
+    assert {d["id"]: d for d in wfe(area, "notify", "deliveries")}[lost["id"]]["state"] == "sent"
+    with notify_db(area) as db:
+        moves = db.execute("SELECT topic, reason FROM relocations WHERE run_key = 'demo/docs/run-001'").fetchall()
+    assert moves == [("run-001", "left for #%d › run-001 (renamed)" % zulip.messages[0]["stream_id"])], "the old place is kept as history"
+
+
+def test_search_failure_is_not_absence(area, zulip, tmp_path, monkeypatch):  # noqa: F811
+    request_and_plan(area, monkeypatch, "pytest-notify-0204")
+    n = notifier(area, zulip, tmp_path)
+    lost = answer_and_lose_the_next_post(area, zulip, n)
+    zulip.search_fails = True
+    for _ in range(3):
+        retry_now(area)
+        n.pass_once()
+    assert posted_events(zulip).count("#6:answered") == 1
+    row = {d["id"]: d for d in wfe(area, "notify", "deliveries")}[lost["id"]]
+    assert row["uncertain"] == 1 and "cannot establish whether it was posted" in row["last_error"]
+    zulip.search_fails = False
+    retry_now(area)
+    n.pass_once()
+    assert posted_events(zulip).count("#6:answered") == 1
+    assert {d["id"]: d for d in wfe(area, "notify", "deliveries")}[lost["id"]]["state"] == "sent"
+
+
+def test_lost_access_and_reset_do_not_turn_uncertainty_into_a_fresh_send(area, zulip, tmp_path, monkeypatch):  # noqa: F811
+    request_and_plan(area, monkeypatch, "pytest-notify-0205")
+    n = notifier(area, zulip, tmp_path)
+    lost = answer_and_lose_the_next_post(area, zulip, n)
+    old_stream = zulip.messages[-1]["stream_id"]
+    zulip.unreadable.add(old_stream)  # the bot lost access to the channel
+    retry_now(area)
+    n.pass_once()
+    row = {d["id"]: d for d in wfe(area, "notify", "deliveries")}[lost["id"]]
+    assert row["uncertain"] == 1 and "Invalid channel ID" in row["last_error"]
+    # A person resets the channel; ours is provisioned again under a new id.
+    zulip.streams[[s["stream_id"] for s in zulip.streams].index(old_stream)]["name"] = "wf-demo.docs-old"
+    notes = wfe(area, "notify", "reset", "channel:demo/docs")["notes"]
+    assert any(f"delivery {lost['id']}" in x and "still looked for" in x for x in notes), notes
+    for _ in range(3):
+        retry_now(area)
+        n.pass_once()
+    assert zulip.topic("run-001") and all(m["stream_id"] == old_stream for m in zulip.topic("run-001")), "nothing posted to the new channel while the old place cannot be searched"
+    status = wfe(area, "notify", "status")
+    assert any(f"delivery {lost['id']} may have been posted" in p for p in status["problems"])
+    # The person checked the old channel and found nothing: the same payload goes out, once.
+    wfe(area, "notify", "resolve", str(lost["id"]), "--not-posted", "--by", "Test Person")
+    n.pass_once()
+    new_stream = next(s["stream_id"] for s in zulip.streams if s["name"] == "wf-demo.docs")
+    resent = [m for m in zulip.messages if m["stream_id"] == new_stream]
+    assert [m["content"] for m in resent][:1] == [lost["content"]]
+    assert {d["id"]: d for d in wfe(area, "notify", "deliveries")}[lost["id"]]["checked"] == "resolved by Test Person: not posted"
+
+
+# ---- legacy state, made by the pre-p5/ex1 editor and transport ---------------------------
+
+OLD_EDITOR, OLD_TRANSPORT = "32498e9", "daeaada"
+
+
+@pytest.fixture()
+def old_release(area, tmp_path):  # noqa: F811
+    """The released pre-p5/ex1 editor CLI (from agdevworld's history, with the
+    package's node_modules) and transport (from agautolab's history)."""
+    import importlib.util
+    import subprocess
+    import sys
+    from test_wfexec import PACKAGE, NODE
+    agdevworld = PACKAGE.parent
+    root = tmp_path / "old"
+    root.mkdir()
+    archive = subprocess.run(f"git -C '{agdevworld}' archive {OLD_EDITOR} workflow_editor | tar -x -C '{root}'", shell=True, capture_output=True, text=True)
+    source = subprocess.run(["git", "-C", str(Path(__file__).resolve().parents[1]), "show", f"{OLD_TRANSPORT}:src/agautolab/wfnotify.py"], capture_output=True, text=True)
+    if archive.returncode or source.returncode:
+        pytest.skip("the pre-p5/ex1 releases are not in this checkout's history")
+    (root / "workflow_editor" / "node_modules").symlink_to(PACKAGE / "node_modules")
+    launcher = area["area"] / "bin" / "wfe-old"
+    launcher.write_text(f'#!/bin/sh\nWFE_REGISTRY="{area["area"] / "registry.json"}" exec {NODE} "{root / "workflow_editor"}/cli/wfe.ts" "$@"\n')
+    launcher.chmod(0o755)
+    spec = importlib.util.spec_from_loader("wfnotify_old", loader=None)
+    module = importlib.util.module_from_spec(spec)
+    exec(compile(source.stdout, "wfnotify_old.py", "exec"), module.__dict__)  # noqa: S102 - the repository's own history
+    sys.modules.setdefault("wfnotify_old", module)
+    return {"wfe": str(launcher), "module": module}
+
+
+from pathlib import Path  # noqa: E402
+
+
+def test_legacy_state_is_migrated_and_reconciled(area, zulip, tmp_path, monkeypatch, old_release):  # noqa: F811
+    ex = request_and_plan(area, monkeypatch, "pytest-notify-0301")
+    old = old_release["module"].Notifier([old_release["wfe"]], zulip, zulip, inflight=tmp_path / "inflight.json", log=print)
+    for _ in range(3):
+        old.pass_once()
+    assert posted_events(zulip) == ["#2:started", "#4:question"]
+    wfe(area, "run", "answer", "docs/run-001", "q1", "--answer", "Agreed.", "--by", "Test Person")
+    zulip.mode = "lost"
+    old.pass_once()  # #6 posted, answer lost
+    assert ex.tick() == "launched"
+    until(ex, "finished")
+    with notify_db(area) as db:
+        db.execute("UPDATE outbox SET next_try = '2000-01-01T00:00:00.000Z' WHERE state = 'failed'")
+    zulip.mode = "down"
+    old.pass_once()  # the grown batch #6 #13 is attempted: refused connection, marked uncertain
+    zulip.mode = ""
+    with notify_db(area) as db:
+        legacy = db.execute("SELECT id, state, uncertain, message_id FROM outbox ORDER BY ord").fetchall()
+        version = db.execute("PRAGMA user_version").fetchone()[0]
+    assert version == 0
+    uncertain = [r[0].split("#")[1] for r in legacy if r[2]]
+    assert uncertain == ["6:answered", "13:reported"], legacy
+    # The old transport failed before it posted the grown batch, so its
+    # in-flight file still names the lost #6 only; #13 was never attempted
+    # but is marked uncertain all the same.
+    assert [i.split("#")[1] for i in json.loads((tmp_path / "inflight.json").read_text())["ids"]] == ["6:answered"]
+    sent_before = {r[0]: r[3] for r in legacy if r[1] == "sent"}
+    # The new releases take over the same area.
+    n = notifier(area, zulip, tmp_path)
+    for _ in range(3):
+        n.pass_once()
+    events = posted_events(zulip)
+    assert events.count("#6:answered") == 1, f"found as posted, not sent again: {markers(zulip)}"
+    assert events.count("#13:reported") == 1 and events.count("#15:completed") == 1, "never-posted and pending events went out once"
+    assert events.index("#6:answered") < events.index("#13:reported") < events.index("#15:completed")
+    with notify_db(area) as db:
+        after = {r[0]: (r[1], r[2]) for r in db.execute("SELECT id, state, message_id FROM outbox")}
+        version = db.execute("PRAGMA user_version").fetchone()[0]
+        notes = [r[0] for r in db.execute("SELECT note FROM notes")]
+    assert version == 2
+    assert all(after[i] == ("sent", m) for i, m in sent_before.items()), "sent evidence survives"
+    assert all(state == "sent" for state, _ in after.values())
+    assert any("uncertain sends" in x for x in notes)
+    assert list(tmp_path.glob("inflight.json.retired-*"))
+    legacy_rows = [d for d in wfe(area, "notify", "deliveries") if d["kind"] == "legacy"]
+    assert len(legacy_rows) == 1 and legacy_rows[0]["state"] == "resolved" and "1 event(s) found posted; 1 not posted" in legacy_rows[0]["checked"]
