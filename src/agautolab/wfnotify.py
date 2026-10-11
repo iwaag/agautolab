@@ -11,13 +11,24 @@ client, and reports each result back. It decides nothing about runs.
   subscribed. An existing folder or channel of the same name is adopted only
   when its description is the one this integration writes; anything else is
   reported as a problem with its repair path, never taken over by name.
-- **Delivery.** One topic per run. Before posting into a topic it has used,
-  the transport looks up its last message there and follows a rename or a
-  move. A send whose answer was lost — or that was in flight when the
-  process died (`.local/wfnotify/inflight.json`) — is looked for by its
-  marker line before anything is posted again, so a lost response does not
-  become a duplicate. Exactly-once is not claimed: a message deleted by hand
-  between the post and the search would be posted again.
+- **Delivery** (protocol 2, p5/ex1). One topic per run. The editor freezes
+  each message — its events, text, marker line and destination — when it is
+  first claimed, and never changes it; events that arrive later wait for the
+  next message. The transport records `begin` before every POST, so a crash
+  after posting cannot leave a message looking unattempted. A message that
+  may have been posted (answer lost, a begun send never finished, a failed
+  acknowledgment) is looked for — the sender's own messages in every place
+  it was sent to and where its topic moved, page by page back to before its
+  first send — and is acknowledged when found. Only a search that covered
+  all of that lets the same payload go out again; a search that could not
+  (an error, a channel the bot cannot read) keeps it uncertain and visible.
+  Exactly-once is not claimed: a message deleted by hand between the post
+  and the search would be posted again.
+- **One sender.** Claims carry this process's identity; while it lives,
+  another notifier is refused (`wfe notify claim`), and it takes over only
+  once this process is gone. The pre-p5/ex1 `.local/wfnotify/inflight.json`
+  is handed to the editor once (`wfe notify import-inflight`) and kept as
+  `inflight.json.retired-<time>`; the store is the only record of uncertainty.
 - **Separation.** Messages mention nobody. Run topics (`run-…`) in `wf-…`
   channels match no listener's prefixes, so no legacy listener serves
   them; Zulip replies answer nothing — answers are recorded in agdevworld.
@@ -32,6 +43,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import socket
 import subprocess
 import sys
 import threading
@@ -43,7 +55,14 @@ from agag.zulip import ZulipClient, ZulipError, ZulipRejected
 from agautolab.instance import AGAUTOLAB_ROOT, PROVISIONER_ENV, SPEC
 
 INTERVAL_SECONDS = 5.0
+# Pre-p5/ex1 record of one send in flight; read once, then retired.
 INFLIGHT = AGAUTOLAB_ROOT / ".local" / "wfnotify" / "inflight.json"
+PROTOCOL = 2  # `wfe notify protocol` must say the same
+SEARCH_PAGE = 200
+# Clock difference allowed between this host and Zulip when the search
+# stops at messages older than a delivery's first send.
+SEARCH_SLACK_SECONDS = 15 * 60
+SEARCH_PAGES_MAX = 500
 
 
 def owns(kind: str, description: str, key: str) -> bool:
@@ -58,14 +77,20 @@ def owns(kind: str, description: str, key: str) -> bool:
 
 class Notifier:
     def __init__(self, wfe: list[str], client: ZulipClient, admin: ZulipClient | None = None, *,
-                 env: dict[str, str] | None = None, inflight: Path = INFLIGHT, log=print):
+                 env: dict[str, str] | None = None, inflight: Path = INFLIGHT, log=print, pid: int | None = None):
         self.wfe_argv = wfe
         self.client = client
         self.admin = admin
         self.env = env or {}
         self.inflight = inflight
         self.log = log
+        # The sender identity: this process. Another process is refused while
+        # this one lives, whatever it is doing (a request may be in flight).
+        self.pid = pid or os.getpid()
+        self.owner = f"{socket.gethostname()}:{self.pid}"
         self._self_id: int | None = None
+        self._ready = False
+        self._refused: str | None = None
 
     # ---- wfe ------------------------------------------------------------------
 
@@ -73,7 +98,7 @@ class Notifier:
         proc = subprocess.run([*self.wfe_argv, *args, "--json"], capture_output=True, text=True, timeout=300, env={**os.environ, **self.env})
         out = proc.stdout.strip()
         if proc.returncode != 0:
-            raise RuntimeError(f"wfe {' '.join(args)} failed ({proc.returncode}): {proc.stderr.strip() or out}")
+            raise RuntimeError(f"wfe {' '.join(args[:2])} failed ({proc.returncode}): {proc.stderr.strip() or out}")
         return json.loads(out) if out else {}
 
     @property
@@ -82,18 +107,44 @@ class Notifier:
             self._self_id = int(self.client.whoami()["user_id"])
         return self._self_id
 
+    # ---- start ----------------------------------------------------------------------
+
+    def prepare(self) -> None:
+        """Once per process: the editor speaks this protocol, and the old
+        transport's in-flight record is in the store, not in a file."""
+        if self._ready:
+            return
+        spoken = self.wfe("notify", "protocol").get("protocol")
+        if spoken != PROTOCOL:
+            raise RuntimeError(f"the workflow editor speaks notify protocol {spoken}, this transport {PROTOCOL}; deploy matching releases (nothing is sent meanwhile)")
+        try:
+            legacy = json.loads(self.inflight.read_text())
+        except FileNotFoundError:
+            legacy = None
+        except (OSError, ValueError) as error:
+            raise RuntimeError(f"{self.inflight} cannot be read ({error}); move it aside after checking it, nothing is sent until then") from error
+        if legacy is not None:
+            ids = [str(i) for i in legacy.get("ids") or []]
+            if ids:
+                result = self.wfe("notify", "import-inflight", *[a for i in ids for a in ("--id", i)], *(["--marker", str(legacy["marker"])] if legacy.get("marker") else []))
+                self.log(f"inflight.json handed to the store: {'; '.join(result.get('notes', []))}")
+            retired = self.inflight.with_name(f"{self.inflight.name}.retired-{time.strftime('%Y%m%dT%H%M%S')}")
+            self.inflight.replace(retired)
+            self.log(f"{self.inflight.name} retired as {retired.name}")
+        self._ready = True
+
     # ---- one pass ----------------------------------------------------------------
 
     def pass_once(self, rounds: int = 20) -> dict:
-        """Asks what is due and does it, again while that makes progress:
-        the editor hands out one message per run at a time (order), and a
-        channel only after its folder."""
+        """Provisions what is due and delivers what it claims, again while
+        that makes progress: the editor hands out one message per run at a
+        time (order), and a channel only after its folder."""
+        self.prepare()
         done = {"provisioned": 0, "sent": 0, "failed": 0, "problems": []}
         for _ in range(rounds):
             due = self.wfe("notify", "due")
             if due.get("disabled"):
                 return {"disabled": due["disabled"]}
-            done["problems"] = due.get("problems", [])
             progress = 0
             for task in due.get("provision", []):
                 try:
@@ -102,7 +153,16 @@ class Notifier:
                         progress += 1
                 except ZulipError as error:
                     self.log(f"provisioning {task['key']} failed (retried next pass): {error}")
-            for delivery in due.get("deliveries", []):
+            claimed = self.wfe("notify", "claim", "--sender", self.owner, "--pid", str(self.pid))
+            done["problems"] = claimed.get("problems", [])
+            if claimed.get("refused"):
+                if claimed["refused"] != self._refused:
+                    self.log(f"not sending: {claimed['refused']}")
+                self._refused = claimed["refused"]
+                done["refused"] = claimed["refused"]
+                return done
+            self._refused = None
+            for delivery in claimed.get("deliveries", []):
                 if self.deliver(delivery):
                     done["sent"] += 1
                     progress += 1
@@ -161,92 +221,202 @@ class Notifier:
 
     # ---- delivery ---------------------------------------------------------------------
 
-    def _read_inflight(self) -> dict | None:
-        try:
-            return json.loads(self.inflight.read_text())
-        except (OSError, ValueError):
-            return None
+    @staticmethod
+    def _dest_args(dest: dict) -> list[str]:
+        return ["--stream", str(dest["streamId"]), "--channel", str(dest["channel"]), "--topic", str(dest["topic"])]
 
-    def _write_inflight(self, value: dict | None) -> None:
-        if value is None:
-            self.inflight.unlink(missing_ok=True)
-            return
-        self.inflight.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.inflight.with_suffix(".tmp")
-        tmp.write_text(json.dumps(value))
-        tmp.replace(self.inflight)
-
-    def _sent(self, d: dict, message_id: int, stream_id: int, channel: str, topic: str) -> None:
-        self.wfe("notify", "sent", *[a for i in d["ids"] for a in ("--id", i)], "--message", str(message_id),
-                 "--stream", str(stream_id), "--channel", channel, "--topic", topic)
-        self._write_inflight(None)
+    def _held(self, d: dict) -> list[str]:
+        return [str(d["delivery"]), "--claim", d["claim"], *[a for e in d["events"] for a in ("--event", e)]]
 
     def deliver(self, d: dict) -> bool:
-        ids, run = d["ids"], d["run"]
-        stream_id, channel, topic = int(d["streamId"]), str(d["channel"]), str(d["topic"])
+        run, label = d["run"], f"delivery {d['delivery']} ({' '.join(e[e.index('#'):] for e in d['events'])})"
+        dest = dict(d["destination"])
         # Follow the conversation if a person renamed the topic or moved it.
         if d.get("lastMessageId"):
             try:
                 last = self.client.message(int(d["lastMessageId"]), strict=True)
             except ZulipError as error:
-                return self._failed(ids, f"cannot look up the run's last message: {error}", uncertain=bool(d.get("uncertain")))
+                return self._failed(d, f"cannot look up the run's last message: {error}", uncertain=bool(d.get("reconcile")))
             if last and last.get("type") == "stream":
-                now = (int(last["stream_id"]), str(last.get("display_recipient")), str(last.get("subject")))
-                if (now[0], now[2]) != (stream_id, topic):
-                    self.wfe("notify", "moved", run, "--stream", str(now[0]), "--channel", now[1], "--topic", now[2])
-                    self.log(f"{run}: the topic moved to {now[1]!r} › {now[2]!r}; following it")
-                    stream_id, channel, topic = now
-        inflight = self._read_inflight()
-        uncertain = bool(d.get("uncertain")) or bool(inflight and inflight.get("ids") == ids)
-        if uncertain:
+                now = {"streamId": int(last["stream_id"]), "channel": str(last.get("display_recipient")), "topic": str(last.get("subject"))}
+                if (now["streamId"], now["topic"]) != (int(dest["streamId"]), dest["topic"]):
+                    self.wfe("notify", "moved", run, *self._dest_args(now))
+                    self.log(f"{run}: the topic moved to {now['channel']!r} › {now['topic']!r}; following it")
+                    dest = now
+        if d["kind"] == "legacy":
+            return self._legacy(d, dest)
+        evidence = None
+        if d.get("reconcile"):
             # The last attempt may have posted: look before posting again.
-            try:
-                history = self.client.topic_history(channel, topic, num_before=100)
-            except ZulipError as error:
-                return self._failed(ids, f"cannot check whether the earlier attempt posted: {error}", uncertain=True)
-            for message in reversed(history):
-                if int(message.get("sender_id", 0)) == self.self_id and str(message.get("content", "")).rstrip().endswith(d["marker"]):
-                    self._sent(d, int(message["id"]), stream_id, channel, topic)
-                    self.log(f"{run}: {', '.join(ids)} had been posted (message {message['id']}); recorded, not posted again")
-                    return True
-        self._write_inflight({"ids": ids, "marker": d["marker"], "at": time.time()})
+            found, evidence, error = self.search(d, dest)
+            if error:
+                return self._failed(d, f"cannot establish whether it was posted: {error}", uncertain=True)
+            if found:
+                where = {"streamId": int(found["stream_id"]), "channel": str(found.get("display_recipient")), "topic": str(found.get("subject"))}
+                self._sent(d, int(found["id"]), where, found=True)
+                self.log(f"{run}: {label} had been posted (message {found['id']}); recorded, not posted again")
+                return True
         try:
-            result = self.client.call("POST", "messages", {"type": "stream", "to": stream_id, "topic": topic, "content": d["content"]})
+            self.wfe("notify", "begin", *self._held(d), *self._dest_args(dest), *(["--checked-absent", evidence] if evidence else []))
+        except RuntimeError as error:
+            self.log(f"{run}: {label} not sent: {error}")
+            return False
+        try:
+            result = self.client.call("POST", "messages", {"type": "stream", "to": int(dest["streamId"]), "topic": dest["topic"], "content": d["content"]})
             message_id = int(result["id"])
         except ZulipRejected as error:
-            self._write_inflight(None)  # refused: nothing was posted
             text = str(error)
             if any(w in text.lower() for w in ("channel", "stream")):
                 key = f"channel:{run.rsplit('/', 1)[0]}"
-                self.wfe("notify", "target", key, "--problem", f"channel #{stream_id} refused a message ({text}); restore it or the bot's access, or run `wfe notify reset {key}` to open a new one")
-            return self._failed(ids, f"refused: {text}", uncertain=False)
+                self.wfe("notify", "target", key, "--problem", f"channel #{dest['streamId']} refused a message ({text}); restore it or the bot's access, or run `wfe notify reset {key}` to open a new one")
+            return self._failed(d, f"refused: {text}", uncertain=False)
         except (ZulipError, OSError) as error:
-            return self._failed(ids, f"no answer: {error}", uncertain=True)
-        self._sent(d, message_id, stream_id, channel, topic)
-        self.log(f"{run}: sent {', '.join(ids)} as message {message_id}")
+            return self._failed(d, f"no answer: {error}", uncertain=True)
+        if not self._sent(d, message_id, dest):
+            return False
+        self.log(f"{run}: sent {label} as message {message_id}")
         return True
 
-    def _failed(self, ids: list[str], error: str, *, uncertain: bool) -> bool:
+    def _sent(self, d: dict, message_id: int, dest: dict, *, found: bool = False) -> bool:
         try:
-            self.wfe("notify", "failed", *[a for i in ids for a in ("--id", i)], "--error", error, *(["--uncertain"] if uncertain else []))
+            self.wfe("notify", "sent", *self._held(d), "--message", str(message_id), *self._dest_args(dest), *(["--found"] if found else []))
+            return True
+        except RuntimeError as error:
+            # Posted, but not recorded: never posted again from here. The
+            # delivery stays begun, so the next claim looks for it first.
+            self.log(f"{d['run']}: delivery {d['delivery']} is message {message_id} but recording that failed ({error}); it will be found by its marker")
+            try:
+                self.wfe("notify", "failed", *self._held(d), "--error", f"posted as message {message_id}; recording it failed: {error}", "--uncertain")
+            except RuntimeError:
+                pass
+            return False
+
+    def search(self, d: dict, current: dict) -> tuple[dict | None, str | None, str | None]:
+        """The sender's message whose last line is the delivery's marker, in
+        every place the delivery may be. Returns (message, evidence of
+        absence, error): an error means absence is not established."""
+        rec = d["reconcile"]
+        places = [current, *rec["searchIn"]]
+        evidence = []
+        seen: set[tuple[int, str]] = set()
+        floor = _epoch(rec["since"]) - SEARCH_SLACK_SECONDS
+        for place in places:
+            key = (int(place["streamId"]), str(place["topic"]))
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                count, reached, match = self._scan(place, floor, lambda m: _last_line(m) == d["marker"])
+            except ZulipError as error:
+                return None, None, f"#{key[0]} › {key[1]}: {error}"
+            if match:
+                return match, None, None
+            if not reached:
+                return None, None, f"#{key[0]} › {key[1]}: history not covered after {count} message(s)"
+            evidence.append(f"#{key[0]} › {key[1]}: {count} of the sender's message(s) back to {rec['since']} (−{SEARCH_SLACK_SECONDS // 60} min)")
+        return None, "absent from " + "; ".join(evidence), None
+
+    def _scan(self, place: dict, floor: float, want) -> tuple[int, bool, dict | None]:
+        """Pages back through the sender's messages in one topic. Returns
+        (messages read, whether the history before `floor` was reached, the
+        first wanted message)."""
+        narrow = [{"operator": "channel", "operand": int(place["streamId"])}, {"operator": "topic", "operand": str(place["topic"])},
+                  {"operator": "sender", "operand": self.self_id}]
+        anchor: int | str = "newest"
+        count = 0
+        for _ in range(SEARCH_PAGES_MAX):
+            page = self.client.messages_page(narrow, anchor=anchor, num_before=SEARCH_PAGE, include_anchor=anchor == "newest")
+            messages = page.get("messages", [])
+            count += len(messages)
+            for m in reversed(messages):
+                if int(m.get("sender_id", 0)) == self.self_id and want(m):
+                    return count, True, m
+            if page.get("found_oldest") or not messages:
+                return count, True, None
+            if min(float(m.get("timestamp", 0)) for m in messages) < floor:
+                return count, True, None
+            anchor = min(int(m["id"]) for m in messages)
+        return count, False, None
+
+    def _legacy(self, d: dict, dest: dict) -> bool:
+        """Pre-p5/ex1 uncertain events: the posts found name the events they
+        carried. Every place searched completely → the rest were never posted."""
+        rec = d["reconcile"]
+        prefix = f"ref {rec['label']} "
+        tokens = rec["tokens"]
+        found: dict[str, dict] = {}
+        floor = _epoch(rec["since"]) - SEARCH_SLACK_SECONDS
+        error = None
+        seen: set[tuple[int, str]] = set()
+
+        def carried(m: dict) -> bool:
+            line = _last_line(m)
+            if not line.startswith(prefix):
+                return False
+            words = line[len(prefix):].split()
+            for t in tokens:
+                hit = t["token"] in words or (t["token"].endswith(":published") and "published" in words)
+                if hit and t["event"] not in found:
+                    found[t["event"]] = m
+            return False  # read every message
+
+        for place in [dest, *rec["searchIn"]]:
+            key = (int(place["streamId"]), str(place["topic"]))
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                count, reached, _ = self._scan(place, floor, carried)
+            except ZulipError as failure:
+                error = f"#{key[0]} › {key[1]}: {failure}"
+                break
+            if not reached:
+                error = f"#{key[0]} › {key[1]}: history not covered after {count} message(s)"
+                break
+        payload = [{"event": e, "message": int(m["id"]), "stream": int(m["stream_id"]), "channel": str(m.get("display_recipient")), "topic": str(m.get("subject"))} for e, m in found.items()]
+        try:
+            self.wfe("notify", "legacy", str(d["delivery"]), "--claim", d["claim"], "--found-json", json.dumps(payload),
+                     *(["--complete"] if error is None else ["--error", f"cannot establish which events were posted: {error}"]))
         except RuntimeError as failure:
-            self.log(f"could not record the failure of {ids}: {failure}")
-        self.log(f"{', '.join(ids)}: {error}{' (it may have been posted; checked before the retry)' if uncertain else ''}")
+            self.log(f"{d['run']}: legacy reconciliation {d['delivery']} not recorded: {failure}")
+            return False
+        self.log(f"{d['run']}: legacy reconciliation {d['delivery']}: {len(found)} of {len(tokens)} event(s) found posted" + (f"; incomplete: {error}" if error else "; the rest go out again"))
+        return error is None
+
+    def _failed(self, d: dict, error: str, *, uncertain: bool) -> bool:
+        try:
+            self.wfe("notify", "failed", *self._held(d), "--error", error, *(["--uncertain"] if uncertain else []))
+        except RuntimeError as failure:
+            self.log(f"could not record the failure of delivery {d['delivery']}: {failure}")
+        self.log(f"{d['run']}: delivery {d['delivery']}: {error}{' (it may have been posted; looked for before the retry)' if uncertain else ''}")
         return False
 
     # ---- running ---------------------------------------------------------------------
 
     def run_forever(self, stop: threading.Event | None = None, interval: float = INTERVAL_SECONDS) -> None:
         stop = stop or threading.Event()
-        self.log(f"workflow-run coordination: delivering to Zulip every {interval:g} s")
+        self.log(f"workflow-run coordination: delivering to Zulip every {interval:g} s as sender {self.owner}")
+        last_error = None
         while not stop.is_set():
             try:
                 result = self.pass_once()
+                last_error = None
                 if result.get("sent") or result.get("provisioned") or result.get("failed"):
                     self.log(f"notify pass: {result}")
             except Exception as error:  # noqa: BLE001 - keep delivering; the next pass retries
-                self.log(f"notify pass failed: {error}")
+                if str(error) != last_error:  # a standing failure is logged once
+                    self.log(f"notify pass failed: {error}")
+                last_error = str(error)
             stop.wait(interval)
+
+
+def _last_line(message: dict) -> str:
+    return str(message.get("content", "")).rstrip().split("\n")[-1].strip()
+
+
+def _epoch(iso: str) -> float:
+    from datetime import datetime
+    return datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
 
 
 def from_settings(wfe: list[str], notify: dict, env: dict[str, str] | None = None, log=print) -> Notifier | None:
