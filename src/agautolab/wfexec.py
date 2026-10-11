@@ -23,9 +23,16 @@ slot, one agent process at a time.
 Every state rule lives in the workflow editor (``shared/run.ts``,
 ``server/exec.ts``); this module only launches, watches and reports.
 
+Since workflow_editor p5 the same process delivers each run's coordination
+to Zulip on a thread of its own (``agautolab.wfnotify``), so delivery goes
+on while a run waits for a person and while the queue is idle, and a slow
+Zulip never holds up the slot.
+
 Run: ``uv run python -m agautolab.wfexec [--once]``. Settings:
 ``.local/wfexec.toml`` (``wfe`` = the launcher argv; optional
-``agent_command`` = an argv that replaces the harness, for trials).
+``agent_command`` = an argv that replaces the harness, for trials;
+``[notify] enabled = true`` with optional ``zulip_env`` / ``admin_env``
+turns Zulip delivery on).
 """
 from __future__ import annotations
 
@@ -36,6 +43,7 @@ import signal
 import subprocess
 import sys
 import time
+import threading
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -60,6 +68,7 @@ class Settings:
     profile: str | None = None
     timeout_seconds: float = 4 * 3600
     env: dict[str, str] = field(default_factory=dict)
+    notify: dict = field(default_factory=dict)
 
     @staticmethod
     def load(path: Path = SETTINGS) -> "Settings":
@@ -73,6 +82,7 @@ class Settings:
             profile=data.get("profile"),
             timeout_seconds=float(data.get("timeout_seconds", 4 * 3600)),
             env={str(k): str(v) for k, v in (data.get("env") or {}).items()},
+            notify=dict(data.get("notify") or {}),
         )
 
 
@@ -227,6 +237,16 @@ class Executor:
 
         signal.signal(signal.SIGTERM, leave)
         signal.signal(signal.SIGINT, leave)
+        quiet = threading.Event()
+        if not once:
+            try:
+                from agautolab.wfnotify import from_settings
+                notifier = from_settings(self.s.wfe, self.s.notify, env=self.s.env, log=lambda m: self.log(f"notify: {m}"))
+            except Exception as error:  # noqa: BLE001 - execution goes on without delivery, said once
+                notifier = None
+                self.log(f"notify: not started: {error}")
+            if notifier is not None:
+                threading.Thread(target=notifier.run_forever, args=(quiet,), daemon=True, name="wfnotify").start()
         while not stopping:
             try:
                 state = self.tick()
@@ -236,6 +256,7 @@ class Executor:
             if once and state in ("idle", "error"):
                 break
             time.sleep(POLL_SECONDS)
+        quiet.set()
         if self.current is not None:
             # The agent keeps running in its own session; a restarted executor
             # finds it alive and leaves the slot to it (reconcile).
