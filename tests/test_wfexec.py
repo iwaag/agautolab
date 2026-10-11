@@ -322,3 +322,71 @@ def test_prolonged_store_lock_fails_ticks_without_doubling_attempts(area):
     assert status["attempts"][0]["state"] == "ended" and status["attempts"][0]["exit_code"] == 0
     assert [e["op"] for e in record(area)["history"]].count("attempt.end") == 1, "one end recorded"
     assert ex.tick() == "idle"
+
+
+# workflow_editor p6: a workflow names its agent, profile and guides; the
+# host launches it with that profile and composes the common contract, the
+# project's guides and the brief, and the run records what it launched with.
+SETTINGS_WORKFLOW = """schema: ag.workflow.v2
+documentation: {policy: manual}
+id: ask
+name: Ask
+intent: |
+  Ask one thing.
+execution:
+  agent: guide-agent
+  profile: stub
+  guides: [agent/g.md]
+repositories:
+  root: {path: ., access: editable}
+nodes:
+  ask:
+    type: talk
+    description: Ask the person.
+"""
+PROMPT_STUB = textwrap.dedent('''
+    import os, subprocess, sys
+    wfe = os.environ["WFE_BIN"]
+    open(os.environ["PROMPT_OUT"], "w").write(sys.stdin.read())
+    for a in (["start", "ask/run-001", "ask"], ["ask", "ask/run-001", "ask", "--question", "Ok?", "--to", "Test Person"]):
+        subprocess.run([wfe, "run", *a, "--json"], check=True, capture_output=True)
+''')
+
+
+def test_workflow_settings_choose_profile_guides_and_identity(area, monkeypatch):
+    import hashlib
+    from agautolab.wfexec import GUIDE
+    project = area["project"]
+    (project / "agent").mkdir()
+    (project / "agent" / "g.md").write_text("# guide-agent\nProject fact: decks are blue.\n")
+    (project / "devdocs" / "workflows" / "ask.yaml").write_text(SETTINGS_WORKFLOW)
+    for args in (["add", "-A"], ["commit", "-q", "-m", "ask workflow"]):
+        subprocess.run(["git", *args], cwd=project, check=True, capture_output=True)
+    (area["area"] / "prompt_stub.py").write_text(PROMPT_STUB)
+    out = area["area"] / "prompt.txt"
+    monkeypatch.setenv("PROMPT_OUT", str(out))
+    req = area["area"] / "words.md"
+    req.write_text("Ask me.")
+    wfe(area, "request", "ask", "--braindump", str(req), "--author", "Test Person", "--receipt", "pytest-req-settings", "--workspace", "demo")
+    ex = Executor(Settings(wfe=[area["wfe"]], agent_command=[sys.executable, str(area["area"] / "prompt_stub.py")]), log=print)
+    asked: list = []
+    real = ex.agent_argv
+    monkeypatch.setattr(ex, "agent_argv", lambda cwd, profile=None: (asked.append(profile), real(cwd, profile))[1])
+    assert ex.tick() == "launched"
+    until(ex, "finished")
+    assert asked == ["stub"], "launched with the workflow's profile"
+    prompt = out.read_text()
+    contract = GUIDE.read_text()
+    assert prompt.startswith(contract.rstrip()), "the common contract comes first"
+    assert "# Project guide: agent/g.md\n\n# guide-agent\nProject fact: decks are blue." in prompt
+    assert prompt.index("# Project guide: agent/g.md") < prompt.index("# This attempt")
+    assert "you perform this run as guide-agent; the execution host autolab launched you" in prompt
+    r = wfe(area, "run", "show", "ask/run-001")["record"]
+    assert r["executor"] == {"name": "guide-agent", "backend": None, "host": "autolab"}
+    begin = next(e for e in r["history"] if e["op"] == "attempt.begin")
+    assert begin["settings"] == {
+        "agent": "guide-agent", "profile": "stub", "backend": "trial command",
+        "contract": {"name": "wfrun/guide.md", "sha256": hashlib.sha256(contract.encode()).hexdigest()},
+        "guides": [{"path": "agent/g.md", "sha256": hashlib.sha256(b"# guide-agent\nProject fact: decks are blue.\n").hexdigest()}],
+    }
+    assert r["nodes"]["ask"]["state"] == "waiting"

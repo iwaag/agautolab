@@ -5,10 +5,16 @@ the request becomes a run record in the project's devdocs and a job in the
 execution host's queue. This loop is autolab's side of it: one execution
 slot, one agent process at a time.
 
-- It takes the next job (``wfe exec claim``), which records the attempt's
-  beginning in the run record, and launches the agent in the project's
-  workspace in a process group of its own, with ``WFE_ATTEMPT`` set so its
-  ``wfe run`` reports carry the attempt id.
+- It takes the next job (``wfe exec claim``), offering the execution
+  profiles it can launch and the hash of the common workflow contract. The
+  editor records the attempt's beginning in the run record with the settings
+  the run's workflow asks for (the agent identity, the profile, the
+  project's guides by hash) and hands them back. The agent is launched in the
+  project's workspace in a process group of its own, with the workflow's
+  profile, ``WFE_ATTEMPT`` set so its ``wfe run`` reports carry the attempt
+  id, and a prompt composed of the common contract, the project's guides and
+  the run's brief (workflow_editor p6). The executing agent is whoever the
+  workflow names; autolab is the host that launches and publishes it.
 - When the process ends it reports how (``wfe exec finished``); the run
   record decides what that means (a talk question ends the process; an
   exit with work left running is an interruption) and the checkpoint is
@@ -37,6 +43,7 @@ turns Zulip delivery on).
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import signal
@@ -54,11 +61,21 @@ from agag.harness import build_argv
 from agautolab.instance import AGAUTOLAB_ROOT, SPEC
 
 ROLE = "wfrun"
+# The common workflow contract every run's prompt starts with; the project's
+# guides (named by its workflow) and the run's brief follow it.
 GUIDE = AGAUTOLAB_ROOT / "agent" / "guides" / "wfrun" / "guide.md"
+CONTRACT_NAME = "wfrun/guide.md"
 SETTINGS = AGAUTOLAB_ROOT / ".local" / "wfexec.toml"
 TERM_GRACE_SECONDS = 20
 RECONCILE_SECONDS = 60
 POLL_SECONDS = 2.0
+
+
+def _profile_names() -> list[str]:
+    from agag.agent import load_config
+    config, overlay = load_config(SPEC.agents_config, SPEC.agents_local_config)
+    names = set((config.get("profiles") or {}).keys()) | set(((overlay or {}).get("profiles") or {}).keys())
+    return sorted(names)
 
 
 @dataclass
@@ -116,27 +133,49 @@ class Executor:
 
     # ---- the agent -----------------------------------------------------------
 
-    def agent_argv(self, cwd: Path) -> tuple[list[str], str, dict[str, str]]:
-        """The argv, the backend it names (Agent ≠ Model), and its environment."""
+    def agent_argv(self, cwd: Path, profile: str | None = None) -> tuple[list[str], str, dict[str, str]]:
+        """The argv, the backend it names (Agent ≠ Model), and its environment.
+        `profile` is the run's workflow's; without one, the host's default."""
         if self.s.agent_command:
             return list(self.s.agent_command), "trial command", {}
-        agent = resolve_spec_role(SPEC, ROLE, profile_override=self.s.profile)
+        agent = resolve_spec_role(SPEC, ROLE, profile_override=profile or self.s.profile)
         argv = build_argv(
             agent, allowed_tools=agent.allowed_tools, skip_permissions=agent.harness in ("claude_code", "agy"),
             stream=True, cwd=cwd, timeout=self.s.timeout_seconds,
         )
         return argv, f"{agent.harness} / {agent.model}", dict(agent.environment)
 
-    def prompt(self, claim: dict) -> str:
-        guide = GUIDE.read_text()
-        return "\n".join([
-            guide.rstrip(), "", "# This attempt", "",
+    def prompt(self, claim: dict, contract: str | None = None) -> str:
+        """The common contract, then the project's guides as the claim
+        recorded them (by hash), then the brief."""
+        parts = [(contract if contract is not None else GUIDE.read_text()).rstrip()]
+        for g in (claim.get("execution") or {}).get("guides") or []:
+            parts += ["", f"# Project guide: {g['path']}", "", str(g["text"]).rstrip()]
+        parts += [
+            "", "# This attempt", "",
             f"Attempt: {claim['attempt']['id']} (in your environment as WFE_ATTEMPT; every `wfe run` report carries it).",
             claim["brief"], "",
             "Begin by reading the run: `wfe run show <run> --history`.",
-        ])
+        ]
+        return "\n".join(parts)
 
-    def launch(self, claim: dict, argv: list[str], extra_env: dict[str, str]) -> None:
+    def offer(self) -> tuple[dict[str, str], str, str]:
+        """The profiles this host can launch (name → backend label), and the
+        common contract with its hash, as offered at claim."""
+        contract = GUIDE.read_text()
+        digest = hashlib.sha256(contract.encode()).hexdigest()
+        if self.s.agent_command:
+            return {name: "trial command" for name in _profile_names()}, contract, digest
+        profiles: dict[str, str] = {}
+        for name in _profile_names():
+            try:
+                agent = resolve_spec_role(SPEC, ROLE, profile_override=name, check_available=False)
+            except Exception:  # noqa: BLE001 - a profile that does not resolve is not offered
+                continue
+            profiles[name] = f"{agent.harness} / {agent.model}"
+        return profiles, contract, digest
+
+    def launch(self, claim: dict, argv: list[str], extra_env: dict[str, str], contract: str | None = None) -> None:
         attempt = claim["attempt"]["id"]
         cwd = Path(claim["workspace"]["path"])
         log = Path(claim["attempt"]["log"])
@@ -150,7 +189,7 @@ class Executor:
         out.close()
         assert proc.stdin is not None
         try:
-            proc.stdin.write(self.prompt(claim).encode())
+            proc.stdin.write(self.prompt(claim, contract).encode())
             proc.stdin.close()
         except BrokenPipeError:
             pass
@@ -205,13 +244,16 @@ class Executor:
             self.log(f"attempt {r.attempt}: ended ({'signal ' + signal.Signals(-code).name if code < 0 else f'exit {code}'}) → {result.get('outcome')}; checkpoint {(result.get('checkpoint') or {}).get('state')}")
             self.current = None
             return "finished"
-        claim = self.wfe("exec", "claim", "--backend", self.backend_label())
+        profiles, contract, digest = self.offer()
+        claim = self.wfe("exec", "claim", "--backend", self.backend_label(),
+                         "--profiles-json", json.dumps(profiles), "--contract", f"{CONTRACT_NAME}={digest}")
         if "idle" in claim:
             return "idle"
         cwd = Path(claim["workspace"]["path"])
-        argv, _, extra_env = self.agent_argv(cwd)
+        execution = claim.get("execution") or {}
         try:
-            self.launch(claim, argv, extra_env)
+            argv, _, extra_env = self.agent_argv(cwd, execution.get("profile"))
+            self.launch(claim, argv, extra_env, contract)
         except Exception as error:  # the launch failed: the attempt ends as interrupted
             self.log(f"attempt {claim['attempt']['id']}: launch failed: {error}")
             self.wfe("exec", "finished", claim["attempt"]["id"], "--exit-code", "127")
