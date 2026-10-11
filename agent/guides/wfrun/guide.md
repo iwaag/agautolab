@@ -60,7 +60,10 @@ What you can see, and how:
   the final completion refuse while a received instruction is
   unacknowledged; the refusal lists them. An instruction that would change
   work already completed, or the run's graph, is a question to the person:
-  completed nodes are not reopened by you.
+  completed nodes are not reopened by you. When input changes the agreed
+  work, revise `plan.md` and ask about it again (`wfe run ask <run> <node>
+  --about-plan …`, which records the revised plan.md like the plan step's
+  question); the braindump stays as it was.
 
 ### Agreement, completion and acceptance
 

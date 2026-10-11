@@ -390,3 +390,57 @@ def test_workflow_settings_choose_profile_guides_and_identity(area, monkeypatch)
         "guides": [{"path": "agent/g.md", "sha256": hashlib.sha256(b"# guide-agent\nProject fact: decks are blue.\n").hexdigest()}],
     }
     assert r["nodes"]["ask"]["state"] == "waiting"
+
+
+# workflow_editor p6 step 5: an instruction arriving while a node runs does
+# not interrupt it; the next start is refused until the attempt acknowledges
+# it, and the attempt then goes on and ends normally (not interrupted).
+BOUNDARY_STUB = textwrap.dedent('''
+    import json, os, subprocess, sys, time
+    wfe = os.environ["WFE_BIN"]
+    RUN = "ship/run-001"
+    def run(*a, check=True):
+        p = subprocess.run([wfe, "run", *a, "--json"], capture_output=True, text=True)
+        if check and p.returncode: print("refused:", a, p.stdout, p.stderr, file=sys.stderr); sys.exit(3)
+        return p
+    run("start", RUN, "scope")
+    open(os.environ["STUB_SIGNAL"] + ".running", "w").write("scope")
+    while not os.path.exists(os.environ["STUB_SIGNAL"]):
+        time.sleep(0.1)
+    run("complete", RUN, "scope", "--outcome", "scope settled without a question")
+    refused = run("start", RUN, "build", check=False)
+    assert refused.returncode == 1 and "is a node boundary" in refused.stdout + refused.stderr, refused.stdout + refused.stderr
+    pending = json.loads(run("instructions", RUN).stdout)["pending"]
+    run("ack", RUN, *pending, "--response", "incorporate", "--note", "build follows it")
+    run("start", RUN, "build")
+    open("made.txt", "w").write("made, bigger\\n")
+    run("complete", RUN, "build", "--outcome", "made.txt", "--artifact", "made.txt")
+''')
+
+
+def test_instruction_during_a_node_is_taken_up_at_the_boundary(area, monkeypatch):
+    (area["area"] / "boundary_stub.py").write_text(BOUNDARY_STUB)
+    signal_file = area["area"] / "go"
+    monkeypatch.setenv("STUB_SIGNAL", str(signal_file))
+    req = area["area"] / "words.md"
+    req.write_text("Please build a small thing.")
+    wfe(area, "request", "ship", "--braindump", str(req), "--author", "Test Person", "--receipt", "pytest-req-boundary", "--workspace", "demo")
+    ex = Executor(Settings(wfe=[area["wfe"]], agent_command=[sys.executable, str(area["area"] / "boundary_stub.py")]), log=print)
+    assert ex.tick() == "launched"
+    end = time.monotonic() + 30
+    while not (area["area"] / "go.running").exists():
+        assert time.monotonic() < end, "the stub never started scope"
+        time.sleep(0.1)
+    wfe(area, "run", "instruct", "run-001", "--instruction", "Make it bigger.", "--from", "Test Person", "--by", "Test Person")
+    r = record(area)
+    assert r["nodes"]["scope"]["state"] == "running", "nothing interrupted the running node"
+    assert r["instructions"]["i1"]["during"] == ["scope"]
+    signal_file.write_text("go")
+    until(ex, "finished")
+    r = record(area)
+    assert r["execution"]["state"] == "completed"
+    assert r["control"]["last"]["outcome"] == "exited", "a healthy attempt is not marked interrupted"
+    ack = r["instructions"]["i1"]["ack"]
+    assert ack["response"] == "incorporate" and ack["attempt"] == r["control"]["last"]["id"]
+    ops = [e["op"] for e in r["history"]]
+    assert ops.index("instruction.ack") < max(i for i, e in enumerate(r["history"]) if e["op"] == "node.start" and e.get("node") == "build")
