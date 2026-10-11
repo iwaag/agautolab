@@ -611,7 +611,7 @@ def test_legacy_state_is_migrated_and_reconciled(area, zulip, tmp_path, monkeypa
         after = {r[0]: (r[1], r[2]) for r in db.execute("SELECT id, state, message_id FROM outbox")}
         version = db.execute("PRAGMA user_version").fetchone()[0]
         notes = [r[0] for r in db.execute("SELECT note FROM notes")]
-    assert version == 2
+    assert version == 3  # p6 adds the request conversations
     assert all(after[i] == ("sent", m) for i, m in sent_before.items()), "sent evidence survives"
     assert all(state == "sent" for state, _ in after.values())
     assert any("uncertain sends" in x for x in notes)
