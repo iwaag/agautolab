@@ -18,9 +18,10 @@ import pytest
 
 from agautolab.wfexec import Executor, Settings
 
-# The workflow editor checkout whose CLI is under test: WFE_EXPERIMENT, or the
-# frozen copy in pj-agdev (the editor's own project lives on Gitea since p4).
-EXPERIMENT = Path(os.environ.get("WFE_EXPERIMENT") or Path(__file__).resolve().parents[2] / "experiments" / "workflow_editor")
+# The workflow editor package whose CLI is under test: WFE_PACKAGE, or the
+# source in agdevworld (workflow_editor/, a system component since
+# workflow_editor p4/ex1). An installed release (<area>/service/current) works too.
+PACKAGE = Path(os.environ.get("WFE_PACKAGE") or Path(__file__).resolve().parents[2] / "agdevworld" / "workflow_editor")
 NODE = "node"
 
 WORKFLOW = """schema: ag.workflow.v1
@@ -66,8 +67,8 @@ STUB = textwrap.dedent('''
         run("complete", "run-001", "build", "--outcome", "made.txt", "--artifact", "made.txt")
 ''')
 
-node_available = subprocess.run([NODE, "--version"], capture_output=True).returncode == 0 and (EXPERIMENT / "node_modules").exists()
-pytestmark = pytest.mark.skipif(not node_available, reason="node or the workflow editor checkout is not available")
+node_available = subprocess.run([NODE, "--version"], capture_output=True).returncode == 0 and (PACKAGE / "node_modules").exists()
+pytestmark = pytest.mark.skipif(not node_available, reason="node or the workflow editor package is not available")
 
 
 @pytest.fixture()
@@ -82,7 +83,7 @@ def area(tmp_path, monkeypatch):
     registry = area / "registry.json"
     launcher = area / "bin" / "wfe"
     launcher.parent.mkdir()
-    launcher.write_text(f'#!/bin/sh\nWFE_REGISTRY="{registry}" exec {NODE} "{EXPERIMENT}/cli/wfe.ts" "$@"\n')
+    launcher.write_text(f'#!/bin/sh\nWFE_REGISTRY="{registry}" exec {NODE} "{PACKAGE}/cli/wfe.ts" "$@"\n')
     launcher.chmod(0o755)
     monkeypatch.setenv("WFE_BIN", str(launcher))
     project = area / "pj-demo"
