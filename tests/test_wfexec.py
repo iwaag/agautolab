@@ -24,7 +24,8 @@ from agautolab.wfexec import Executor, Settings
 PACKAGE = Path(os.environ.get("WFE_PACKAGE") or Path(__file__).resolve().parents[2] / "agdevworld" / "workflow_editor")
 NODE = "node"
 
-WORKFLOW = """schema: ag.workflow.v1
+WORKFLOW = """schema: ag.workflow.v2
+documentation: {policy: manual}
 id: ship
 name: Ship
 intent: |
@@ -41,6 +42,56 @@ nodes:
 edges:
   - {from: scope, to: build}
 """
+
+# The same work under the default documentation policy (workflow_editor p5):
+# the run plans, reports each node and reports the whole.
+DOC_WORKFLOW = """schema: ag.workflow.v2
+documentation: {policy: default}
+id: docs
+name: Docs
+intent: |
+  Build one thing, with a plan and reports.
+repositories:
+  root: {path: ., access: editable}
+nodes:
+  build:
+    type: do
+    description: Build it.
+"""
+
+# A stub that follows the documentation steps; STUB_MODE=die-in-report
+# crashes the first time it is writing a report.
+DOC_STUB = textwrap.dedent('''
+    import json, os, subprocess, sys
+    wfe = os.environ["WFE_BIN"]
+    RUN = "docs/run-001"
+    def run(*a):
+        p = subprocess.run([wfe, "run", *a, "--json"], capture_output=True, text=True)
+        if p.returncode: print("refused:", a, p.stderr, file=sys.stderr); sys.exit(3)
+        return p
+    rec = json.loads(subprocess.run([wfe, "run", "show", RUN, "--json"], capture_output=True, text=True).stdout)["record"]
+    folder = "devdocs/runs/docs/run-001/"
+    st = lambda n: rec["nodes"][n]["state"]
+    if st("_plan") == "pending":
+        run("start", RUN, "_plan")
+        open(folder + "plan.md", "w").write("# Plan\\n\\nBuild one thing; check that it exists.\\n")
+        run("ask", RUN, "_plan", "--question", "Agree to plan.md?", "--to", "Test Person")
+        sys.exit(0)
+    if st("_plan") == "waiting":
+        run("take-up", RUN, "q1")
+        run("complete", RUN, "_plan", "--outcome", "Plan agreed.")
+        run("start", RUN, "build")
+        open("made.txt", "w").write("made\\n")
+        run("complete", RUN, "build", "--outcome", "made.txt", "--artifact", "made.txt")
+        run("start", RUN, "_report.build")
+        if os.environ.get("STUB_MODE") == "die-in-report":
+            sys.exit(1)
+    open(folder + "report-build.md", "w").write("# build\\n\\nmade.txt exists.\\n")
+    run("complete", RUN, "_report.build", "--outcome", "Built made.txt. Verified: the file exists. Next: final report.")
+    run("start", RUN, "_final-report")
+    open(folder + "report.md", "w").write("# Report\\n\\nmade.txt was built; see report-build.md.\\n")
+    run("complete", RUN, "_final-report", "--outcome", "Delivered made.txt; awaiting the person's review.")
+''')
 
 # The stub agent: reads the run, does the next thing a real agent would.
 STUB = textwrap.dedent('''
@@ -89,17 +140,19 @@ def area(tmp_path, monkeypatch):
     project = area / "pj-demo"
     subprocess.run([str(launcher), "create", str(project), "--name", "Demo", "--no-gitea"], check=True, capture_output=True)
     (project / "devdocs" / "workflows" / "ship.yaml").write_text(WORKFLOW)
+    (project / "devdocs" / "workflows" / "docs.yaml").write_text(DOC_WORKFLOW)
     remote = area / "remote.git"
     for args in (["add", "-A"], ["commit", "-q", "-m", "workflow"], ["init", "-q", "--bare", "--initial-branch=main", str(remote)],
                  ["remote", "add", "origin", str(remote)], ["push", "-q", "-u", "origin", "main"]):
         subprocess.run(["git", *args], cwd=project, check=True, capture_output=True)
     stub = area / "stub.py"
     stub.write_text(STUB)
-    return {"area": area, "wfe": str(launcher), "project": project, "stub": stub, "remote": remote}
+    (area / "doc_stub.py").write_text(DOC_STUB)
+    return {"area": area, "wfe": str(launcher), "project": project, "stub": stub, "doc_stub": area / "doc_stub.py", "remote": remote}
 
 
-def executor(a) -> Executor:
-    s = Settings(wfe=[a["wfe"]], agent_command=[sys.executable, str(a["stub"])])
+def executor(a, stub: str = "stub") -> Executor:
+    s = Settings(wfe=[a["wfe"]], agent_command=[sys.executable, str(a[stub])])
     return Executor(s, log=lambda m: print(m))
 
 
@@ -188,3 +241,41 @@ def test_restarted_executor_keeps_a_live_attempt_and_calls_a_lost_one_unknown(ar
     assert r["control"]["hold"]["kind"] == "unknown"
     assert r["nodes"]["scope"]["state"] == "running", "not completed or failed by recovery"
     assert second.tick() == "idle", "nothing reruns by itself"
+
+
+def test_default_policy_plans_reports_and_resumes_a_report_without_redoing_work(area, monkeypatch):
+    monkeypatch.setenv("STUB_MODE", "die-in-report")
+    req = area["area"] / "words.md"
+    req.write_text("Please build one thing.")
+    wfe(area, "request", "docs", "--braindump", str(req), "--author", "Test Person", "--receipt", "pytest-req-docs-01", "--workspace", "demo")
+    ex = executor(area, "doc_stub")
+    show = lambda: wfe(area, "run", "show", "docs/run-001")["record"]
+    assert ex.tick() == "launched"
+    until(ex, "finished")
+    r = show()
+    assert r["nodes"]["_plan"]["state"] == "waiting", "the plan is consulted on before any work"
+    assert r["questions"]["q1"]["document"]["path"].endswith("/plan.md")
+    assert r["nodes"]["build"]["state"] == "pending"
+    wfe(area, "run", "answer", "docs/run-001", "q1", "--answer", "Agreed.", "--by", "Test Person")
+    assert ex.tick() == "launched"
+    until(ex, "finished")
+    r = show()
+    assert r["nodes"]["build"]["state"] == "completed", "the work is done"
+    assert r["nodes"]["_report.build"]["state"] == "running", "the report was being written"
+    assert r["control"]["hold"]["kind"] == "interrupted"
+    assert r["execution"]["state"] != "completed"
+    monkeypatch.setenv("STUB_MODE", "")
+    wfe(area, "run", "resume", "docs/run-001", "--reason", "finish the report", "--by", "Test Person")
+    assert ex.tick() == "launched"
+    until(ex, "finished")
+    r = show()
+    assert r["execution"]["state"] == "completed"
+    assert r["nodes"]["_final-report"]["document"]["path"].endswith("/report.md")
+    assert r["nodes"]["_plan"]["agreement"] == {"question": "q1"}
+    completes = [e for e in r["history"] if e["op"] == "node.complete" and e["node"] == "build"]
+    assert len(completes) == 1, "the completed work was not repeated"
+    assert r["decisions"] == [], "the final report is not acceptance"
+    log = subprocess.run(["git", "log", "--format=%s", "main"], cwd=area["remote"], capture_output=True, text=True).stdout
+    assert "docs/run-001" in log
+    published = subprocess.run(["git", "show", "main:devdocs/runs/docs/run-001/report.md"], cwd=area["remote"], capture_output=True, text=True)
+    assert published.returncode == 0 and "made.txt was built" in published.stdout

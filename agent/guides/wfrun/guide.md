@@ -35,6 +35,28 @@ What you can see, and how:
   up the answer (`wfe run take-up`) before acting on it, then complete the
   node. Recording an answer, taking it up and completing are separate
   records.
+- The run's documentation policy is frozen with it ("This attempt" names
+  it). Under `default` the run has documentation steps beside the
+  authored nodes: `_plan` (a talk: write `plan.md`, ask the person to agree
+  to it, complete after taking up their agreement to that same plan.md),
+  `_report.<node>` after each authored node (write `report-<node>.md`), and
+  `_final-report` last (write `report.md`). They are recorded like any node,
+  successors wait for them, and each completes only when its document is a
+  nonempty file of the run folder; the record keeps its hash. A question
+  from `_plan` records which plan.md it asked about, so a plan you change
+  after asking is asked about again. Each step's purpose and instructions
+  are in "This attempt" while it is running or ready. Under `manual`, and
+  in runs created before these steps existed, no plan or report is asked of
+  you unless a node or the person asks.
+- A report states what was done, what supports it, what is uncertain, and
+  what comes next — no invented checks, no claim that an unchanged file
+  changed. The outcome you complete a documentation step with is quoted in
+  coordination messages: one to three short lines (the result, the main
+  verification fact, the next action). Completing `_final-report` completes
+  the execution; it is not the person's acceptance of the result.
+- When authored work fails and you can still write, a partial
+  `report-<node>.md` attached to that node (`wfe run attach … --node`) is
+  evidence of where it stopped; it does not complete the report step.
 - Record work when it happens: `start` when you begin a node, `progress`
   for a note the person should see, `complete` with the outcome and the
   files it produced (`--artifact`), `fail` when something prevents
