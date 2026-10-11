@@ -38,7 +38,8 @@ Run: ``uv run python -m agautolab.wfexec [--once]``. Settings:
 ``.local/wfexec.toml`` (``wfe`` = the launcher argv; optional
 ``agent_command`` = an argv that replaces the harness, for trials;
 ``[notify] enabled = true`` with optional ``zulip_env`` / ``admin_env``
-turns Zulip delivery on).
+turns Zulip delivery on; ``[intake] enabled = true`` with optional
+``zulip_env`` turns on requests from Zulip, ``agautolab.wfintake``).
 """
 from __future__ import annotations
 
@@ -86,6 +87,7 @@ class Settings:
     timeout_seconds: float = 4 * 3600
     env: dict[str, str] = field(default_factory=dict)
     notify: dict = field(default_factory=dict)
+    intake: dict = field(default_factory=dict)
 
     @staticmethod
     def load(path: Path = SETTINGS) -> "Settings":
@@ -100,6 +102,7 @@ class Settings:
             timeout_seconds=float(data.get("timeout_seconds", 4 * 3600)),
             env={str(k): str(v) for k, v in (data.get("env") or {}).items()},
             notify=dict(data.get("notify") or {}),
+            intake=dict(data.get("intake") or {}),
         )
 
 
@@ -289,6 +292,16 @@ class Executor:
                 self.log(f"notify: not started: {error}")
             if notifier is not None:
                 threading.Thread(target=notifier.run_forever, args=(quiet,), daemon=True, name="wfnotify").start()
+            # Requests, answers and instructions from Zulip (workflow_editor
+            # p6), received while an agent runs or waits, like delivery.
+            try:
+                from agautolab.wfintake import from_settings as intake_from_settings
+                intake = intake_from_settings(self.s.wfe, self.s.intake, env=self.s.env, log=lambda m: self.log(f"intake: {m}"))
+            except Exception as error:  # noqa: BLE001 - execution goes on without intake, said once
+                intake = None
+                self.log(f"intake: not started: {error}")
+            if intake is not None:
+                threading.Thread(target=intake.run_forever, args=(quiet,), daemon=True, name="wfintake").start()
         while not stopping:
             try:
                 state = self.tick()
