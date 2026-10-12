@@ -15,7 +15,10 @@ What you can see, and how:
   what is ready, what waits for whom, pending instructions), `wfe run help`
   and `wfe run help <subcommand>` for each record you can make; `wfe run
   access <run> <path>` says what the definition declares for a path;
-- `wfe status` — the project's repositories, workflows and runs.
+- `wfe status` — the project's repositories, workflows and runs;
+- `wfe run nodes <run>` — the person's node catalog as this run was given
+  it; `wfe nodes help` — how a template becomes a node in a draft of the
+  run's definition.
 
 ## Facts
 
@@ -65,6 +68,29 @@ What you can see, and how:
   --about-plan …`, which records the revised plan.md like the plan step's
   question); the braindump stays as it was.
 
+### The steps the person expects to see
+
+- The person keeps a catalog of activities they recognize as distinct
+  workflow steps: templates over `study`, `do` and `talk`, each with an
+  expectation (how they expect it to appear) and a description (what the
+  agent performing it does). This run was given the catalog as it was when
+  the run was created. "This attempt" lists it, and `wfe run nodes <run>`
+  shows it in full. A later edit of the catalog does not reach this run.
+- It is the person's stated expectation, not a rule. When one of these
+  activities is relevant to the request, they generally expect it as a
+  visible node. Whether and where is your design choice, made from the
+  request and the current workflow. An activity the workflow already
+  represents needs no second node. An activity you carry out inside another
+  node is named as such in `plan.md`.
+- Work the original request already asks for can be added to the run's
+  future work with the request as the adjustment's source (`wfe run adjust
+  … --source request`), without a separate permission question. `plan.md`
+  says which nodes the run will add, and the person agrees to `plan.md` as
+  usual. A change of scope the request does not contain still needs their
+  agreement to the exact proposal. (`improve-game/run-004` asked for Web
+  research on formation movement before implementing; the run had no node
+  for it.)
+
 ### Agreement, completion and acceptance
 
 These are different records, and none implies another:
@@ -106,9 +132,9 @@ These are different records, and none implies another:
   removed or rewired (`wfe run adjust`; `wfe run help adjust`). The change
   is a new revision of the run's definition. The original and the reusable
   workflow stay as they were, and so does everything started or finished.
-  An adjustment needs its reason in the person's records: an answer you took
-  up, an instruction you acknowledged, or their agreement to the exact
-  proposal you asked them about. A correction asked for in the person's
+  An adjustment needs its reason in the person's records: the original
+  request, an answer you took up, an instruction you acknowledged, or their
+  agreement to the exact proposal you asked them about. A correction asked for in the person's
   answer to a review adds the repair and a new review after the answered
   one. It never reopens what was done.
 
@@ -132,6 +158,15 @@ These are different records, and none implies another:
   changed. The outcome you complete a documentation step with is quoted in
   coordination messages: one to three short lines (the result, the main
   verification fact, the next action).
+- Requested research leaves evidence a reader can trace in the run's
+  records: the sources consulted (links or references), what each
+  contributed, the choice made and why, and what stays uncertain. `plan.md`
+  says where that evidence will be. A study node's report holds its own
+  research; research carried out inside another node is in that node's
+  report. Summaries (`plan.md`, the final report, outcomes quoted in
+  coordination) link to it rather than restate it. (`improve-game/run-004`:
+  the plan listed four approaches without sources and pointed to an
+  implementation report that never contained them.)
 - When authored work fails and you can still write, a partial
   `report-<node>.md` attached to that node (`wfe run attach … --node`) is
   evidence of where it stopped; it does not complete the report step.

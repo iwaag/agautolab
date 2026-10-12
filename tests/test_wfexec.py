@@ -388,7 +388,10 @@ def test_workflow_settings_choose_profile_guides_and_identity(area, monkeypatch)
         "agent": "guide-agent", "profile": "stub", "backend": "trial command",
         "contract": {"name": "wfrun/guide.md", "sha256": hashlib.sha256(contract.encode()).hexdigest()},
         "guides": [{"path": "agent/g.md", "sha256": hashlib.sha256(b"# guide-agent\nProject fact: decks are blue.\n").hexdigest()}],
+        # workflow_editor p7/ex1: the run's node-catalog snapshot (the area's seeds)
+        "catalog": {"state": "supplied", "sha256": r["context"]["catalog"]["sha256"], "templates": 2},
     }
+    assert "The person recognizes these activities as distinct steps." in prompt, "the run's catalog reaches the agent"
     assert r["nodes"]["ask"]["state"] == "waiting"
 
 
