@@ -84,6 +84,34 @@ These are different records, and none implies another:
   Asking for changes is not a rejection: change the deliverables and ask
   again. Without such a node, the person decides themselves.
 
+### Presentations and changes to the run's future work
+
+- A **presentation** is a frozen copy of a result, served on this host for
+  the person to open with one click: the result and an explanation (what
+  changed, how to try it, what to check) on one screen. `wfe present
+  register` copies a directory and the explanation into the run folder as
+  the next presentation (`p1`, `p2`, …; from a running node). `wfe present
+  start` serves it and prints its link. It is recorded as available only
+  after the link answered. It keeps serving after your session ends, through
+  the person's wait and a stopped run. `wfe present help` says the rest.
+- A review question about it is `wfe run ask … --presentation <p>`. The
+  answer applies to that revision only; a later presentation supersedes it.
+  The delivery of the question and of the link is the execution host's. The
+  person never has to locate files or start anything.
+- A presentation is open until it is stopped and the stop verified (`wfe
+  present stop <run> --all`). The completion that would complete the run is
+  refused while one is open. Cancelling the run stops them by itself;
+  stopping (holding) the run does not.
+- The run's **future work** can change: nodes not yet started can be added,
+  removed or rewired (`wfe run adjust`; `wfe run help adjust`). The change
+  is a new revision of the run's definition. The original and the reusable
+  workflow stay as they were, and so does everything started or finished.
+  An adjustment needs its reason in the person's records: an answer you took
+  up, an instruction you acknowledged, or their agreement to the exact
+  proposal you asked them about. A correction asked for in the person's
+  answer to a review adds the repair and a new review after the answered
+  one. It never reopens what was done.
+
 ### Documentation
 
 - The run's documentation policy is frozen with it ("This attempt" names
