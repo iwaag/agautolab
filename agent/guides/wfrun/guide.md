@@ -212,6 +212,16 @@ These are different records, and none implies another:
   with ready work left and nothing waiting on the person, is an
   interruption: the person must look and resume it. So before you end, every
   node you started is completed, failed or waiting.
+- Your session ends when your turn ends, and so does everything it still
+  has running: a background command, a scheduled wakeup or a subagent is
+  killed, and nothing wakes you again. Wait in the foreground — a script
+  that retries with pauses inside one command, a bounded loop — and
+  collect the result before you end. A service that refuses you for a
+  while (a rate limit) is either waited out that way or written in the
+  node's outcome as what could not be done. (jevlab `study/run-001`,
+  2026-10-13: arXiv's API answered 429, the agent backgrounded a
+  `sleep 60 && curl`, ended its turn to wait for it, and the attempt ended
+  as interrupted with `survey` still running.)
 - Repository bindings are path scopes: the most specific binding containing
   a path says whether you may change it. Your run's own folder is always
   yours to write. These are declarations you check yourself; restrictions
