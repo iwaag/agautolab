@@ -157,6 +157,11 @@ These are different records, and none implies another:
 - When the person has to be consulted again, add a new talk with its own id
   after the work it follows. A finished talk keeps its question and answer;
   it is not reused or rewritten.
+- Work a talk agrees on is done in a node of its own after the talk, even
+  when it is small: the person follows the run by its nodes, and a talk's
+  outcome records the conversation, not the work. (p8/ex2 rehearsal: the
+  agreed `--pretty` option was implemented inside the confirming talk, so
+  the run's graph never showed it.)
 - When completing a node would complete the run — no final report and
   nothing pending after it — and the conversation added work, record both
   together: `wfe run adjust <run> --definition … --source … --completing
