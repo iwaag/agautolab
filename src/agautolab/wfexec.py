@@ -10,7 +10,8 @@ slot, one agent process at a time.
   editor records the attempt's beginning in the run record with the settings
   the run's workflow asks for (the agent identity, the profile, the
   project's guides by hash) and hands them back. The agent is launched in the
-  project's workspace in a process group of its own, with the workflow's
+  run's own working copy (``cwd`` of the claim; workflow_editor p9: each run
+  has its own copy of the project, on its own branches) in a process group of its own, with the workflow's
   profile, ``WFE_ATTEMPT`` set so its ``wfe run`` reports carry the attempt
   id, and a prompt composed of the common contract, the project's guides and
   the run's brief (workflow_editor p6). The executing agent is whoever the
@@ -180,7 +181,7 @@ class Executor:
 
     def launch(self, claim: dict, argv: list[str], extra_env: dict[str, str], contract: str | None = None) -> None:
         attempt = claim["attempt"]["id"]
-        cwd = Path(claim["workspace"]["path"])
+        cwd = Path(claim["cwd"])
         log = Path(claim["attempt"]["log"])
         log.parent.mkdir(parents=True, exist_ok=True)
         env = {**os.environ, **extra_env, **self.s.env, "WFE_ATTEMPT": attempt, "PWD": str(cwd), "NO_COLOR": "1"}
@@ -252,7 +253,7 @@ class Executor:
                          "--profiles-json", json.dumps(profiles), "--contract", f"{CONTRACT_NAME}={digest}")
         if "idle" in claim:
             return "idle"
-        cwd = Path(claim["workspace"]["path"])
+        cwd = Path(claim["cwd"])
         execution = claim.get("execution") or {}
         try:
             argv, _, extra_env = self.agent_argv(cwd, execution.get("profile"))

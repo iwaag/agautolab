@@ -196,9 +196,13 @@ def test_request_wait_answer_resume_complete(area):
     assert r["execution"]["state"] == "completed"
     assert r["control"]["attempts"] == 2
     assert [e["op"] for e in r["history"]].count("attempt.begin") == 2
-    assert (area["project"] / "made.txt").exists()
-    published = subprocess.run(["git", "show", "main:made.txt"], cwd=area["remote"], capture_output=True, text=True)
-    assert published.stdout == "made by the stub\n", "the checkpoint was published"
+    # The run worked in its own copy and saved to its own branch (workflow_editor p9).
+    assert (area["project"] / ".local/wfe/runs/ship/run-001/tree/made.txt").exists()
+    assert not (area["project"] / "made.txt").exists(), "the project workspace is the person's"
+    published = subprocess.run(["git", "show", "wfe/demo/ship/run-001:made.txt"], cwd=area["remote"], capture_output=True, text=True)
+    assert published.stdout == "made by the stub\n", "the checkpoint was published on the run branch"
+    shared = subprocess.run(["git", "show", "main:made.txt"], cwd=area["remote"], capture_output=True, text=True)
+    assert shared.returncode != 0, "and not on the shared branch"
 
 
 def test_stop_is_carried_out_and_confirmed(area, monkeypatch):
@@ -275,9 +279,9 @@ def test_default_policy_plans_reports_and_resumes_a_report_without_redoing_work(
     completes = [e for e in r["history"] if e["op"] == "node.complete" and e["node"] == "build"]
     assert len(completes) == 1, "the completed work was not repeated"
     assert r["decisions"] == [], "the final report is not acceptance"
-    log = subprocess.run(["git", "log", "--format=%s", "main"], cwd=area["remote"], capture_output=True, text=True).stdout
+    log = subprocess.run(["git", "log", "--format=%s", "wfe/demo/docs/run-001"], cwd=area["remote"], capture_output=True, text=True).stdout
     assert "docs/run-001" in log
-    published = subprocess.run(["git", "show", "main:devdocs/runs/docs/run-001/report.md"], cwd=area["remote"], capture_output=True, text=True)
+    published = subprocess.run(["git", "show", "wfe/demo/docs/run-001:devdocs/runs/docs/run-001/report.md"], cwd=area["remote"], capture_output=True, text=True)
     assert published.returncode == 0 and "made.txt was built" in published.stdout
 
 
