@@ -138,11 +138,37 @@ These are different records, and none implies another:
   answer to a review adds the repair and a new review after the answered
   one. It never reopens what was done.
 
+### Growing the run's work from the conversation
+
+- A run may start with little more than the braindump and a talk. Its graph
+  is where the work agreed in the conversation is written down: when the
+  braindump, an answer you took up or an instruction you acknowledged makes
+  the next work concrete, that work becomes nodes of this run (`wfe run
+  adjust`), with the source that says why — `request`, `answer:<q>`,
+  `instruction:<i>`. A change of the agreed scope is the person's agreement
+  to the exact proposal (`agreement:<q>`). Each concrete step needs no
+  confirmation of its own; agreeing to work and approving the result stay
+  separate records.
+- Adjust at the boundary: after the talk completes and before the next node
+  starts. `wfe run adjust … --dry-run` shows the difference and every
+  refusal first. Then choose the next node from the updated graph (`wfe run
+  show`); with nothing more to add, the run goes on to the end it already
+  has.
+- When the person has to be consulted again, add a new talk with its own id
+  after the work it follows. A finished talk keeps its question and answer;
+  it is not reused or rewritten.
+- When completing a node would complete the run — no final report and
+  nothing pending after it — and the conversation added work, record both
+  together: `wfe run adjust <run> --definition … --source … --completing
+  <node> --outcome …`. A plain completion first would end the run, and a
+  completed run is not adjusted.
+
 ### Documentation
 
 - The run's documentation policy is frozen with it ("This attempt" names
-  it). Under `default` the run has documentation steps beside the authored
-  nodes: `_plan` (a talk: write `plan.md`, ask the person to agree to it,
+  it). It decides which documentation steps the run has beside the authored
+  nodes — `default` all three, `custom` the ones it chose, `manual` none:
+  `_plan` (a talk: write `plan.md`, ask the person to agree to it,
   complete after taking up their agreement to that same plan.md),
   `_report.<node>` after each authored node (write `report-<node>.md`), and
   `_final-report` last (write `report.md`). They are recorded like any node,
@@ -150,9 +176,10 @@ These are different records, and none implies another:
   nonempty file of the run folder; the record keeps its hash. A question
   from `_plan` records which plan.md it asked about, so a plan you change
   after asking is asked about again. Each step's purpose and instructions
-  are in "This attempt" while it is running or ready. Under `manual`, and
-  in runs created before these steps existed, no plan or report is asked of
-  you unless a node or the person asks.
+  are in "This attempt" while it is running or ready. A document the run
+  has no step for (all of them under `manual`, and in runs created before
+  these steps existed) is not asked of you unless a node or the person
+  asks.
 - A report states what was done, what supports it, what is uncertain, and
   what comes next — no invented checks, no claim that an unchanged file
   changed. The outcome you complete a documentation step with is quoted in
