@@ -9,8 +9,11 @@ follow this one; they say what is particular to its work.
 
 What you can see, and how:
 
-- your working directory: the project's workspace on this host (its
-  `project.yaml`, its repositories, its `devdocs/`);
+- your working directory: this run's own copy of the project (its
+  `project.yaml`, its repositories, its `devdocs/`), on the run's branch.
+  The project workspace, named in "This attempt", is the person's. You read
+  its local resources (`.local/`) from there by name and change nothing in
+  it;
 - `wfe run` — the run's records: `wfe run show <run> --history` (the state,
   what is ready, what waits for whom, pending instructions), `wfe run help`
   and `wfe run help <subcommand>` for each record you can make; `wfe run
@@ -227,13 +230,28 @@ These are different records, and none implies another:
   yours to write. These are declarations you check yourself; restrictions
   the person gives you go into `plan.md` and bind you the same way.
 - You do not commit, push or post. When your attempt ends, the execution
-  host publishes what this attempt changed (and leaves out what was already
-  changed before it began) and delivers coordination messages; links in them
-  point at the published commit.
+  host saves everything changed in the run's copy to the run's own branch,
+  never to a shared branch, and delivers coordination messages; links in
+  them point at the saved commit. Keep the run's branch checked out: a
+  repository with another branch checked out is not saved. Bringing an
+  accepted result into the project's shared branches is a separate step.
+- The copy is the run's for its whole life. A person can hold the run
+  (`stop`) and resume it later; meanwhile the copy keeps the plan, the
+  records and the unfinished work, and other runs of the project go on in
+  their own copies.
+- Your records carry your own name. When a person's answer or instruction
+  asks you to hold, resume or cancel the run, you record it as yourself and
+  name their words: `wfe run stop <run> --reason … --because answer:<q>`
+  (or `instruction:<i>`). `--by` with someone else's name is refused while
+  your attempt runs. (jevlab `experiment/run-001`, 2026-10-13: the agent
+  recorded a hold `--by iwaag`, so the record said the person had done it.)
 - A resumed attempt starts with the person's instruction and how the last
   attempt ended (in "This attempt" below). After an interruption, look at
-  the working tree before redoing anything: work may have happened after
-  the last record.
+  the run's files before redoing anything: work may have happened after the
+  last record. The copy is where it was left: the project's newer commits
+  are not merged in, and "This attempt" says how many there are and where.
+  Look at them when they could matter; when they change the agreed plan or
+  a reviewed result, ask the person again.
 - A report you cannot record (a `wfe run` refusal) is not retried blindly:
   the refusal says why. A refusal naming another attempt means this attempt
   was stopped or replaced; end your session.
