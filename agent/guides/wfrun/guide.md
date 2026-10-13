@@ -239,6 +239,18 @@ These are different records, and none implies another:
   (`stop`) and resume it later; meanwhile the copy keeps the plan, the
   records and the unfinished work, and other runs of the project go on in
   their own copies.
+- Abandoning and undoing are facts you can read, never rewrite:
+  `wfe run reversal <run>`. A cancelled run keeps its records, copy and
+  branch. Work that was never integrated is on no shared branch, so nothing
+  needs to be rolled back. An integrated result is undone as new work, with
+  new commits that revert exactly the commits the reversal facts list. Later
+  changes and the run's records are kept. A submodule is reverted in its own
+  repository (others may share it), and the root then records that commit.
+  Effects outside Git (a deployment, data written elsewhere) are inspected
+  and reversed on their own; never say that reverting commits undid them.
+- When "This attempt" names a run this one follows (its predecessor), its
+  records and saved work are where it says. Reuse its plan by reading it
+  there, and refer to it in your own `plan.md`.
 - Your records carry your own name. When a person's answer or instruction
   asks you to hold, resume or cancel the run, you record it as yourself and
   name their words: `wfe run stop <run> --reason … --because answer:<q>`
