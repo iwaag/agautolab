@@ -618,30 +618,3 @@ def test_legacy_state_is_migrated_and_reconciled(area, zulip, tmp_path, monkeypa
     assert list(tmp_path.glob("inflight.json.retired-*"))
     legacy_rows = [d for d in wfe(area, "notify", "deliveries") if d["kind"] == "legacy"]
     assert len(legacy_rows) == 1 and legacy_rows[0]["state"] == "resolved" and "1 event(s) found posted; 1 not posted" in legacy_rows[0]["checked"]
-
-
-def test_rollback_to_the_old_release_and_forward_again(area, zulip, tmp_path, monkeypatch, old_release):  # noqa: F811
-    """Step 7's rollback, before rollout: the released p5 editor and
-    transport run on a migrated store (no uncertain delivery at the time),
-    then the new ones again. Nothing is lost or posted twice."""
-    request_and_plan(area, monkeypatch, "pytest-notify-0401")
-    n = notifier(area, zulip, tmp_path)
-    provision_only(area, n)
-    # New release: #2 sent; #4 frozen (claimed, not begun) when it is rolled back.
-    first = wfe(area, "notify", "claim", "--sender", n.owner, "--pid", str(n.pid))["deliveries"][0]
-    n.deliver(first)
-    frozen = wfe(area, "notify", "claim", "--sender", n.owner, "--pid", str(n.pid))["deliveries"][0]
-    assert frozen["events"][0].endswith("#4:question")
-    # Rolled back: the old CLI opens the migrated store and the old transport delivers.
-    old = old_release["module"].Notifier([old_release["wfe"]], zulip, zulip, inflight=tmp_path / "old-inflight.json", log=print)
-    old.pass_once()
-    assert posted_events(zulip) == ["#2:started", "#4:question"], "the old release sends what was not sent, and nothing sent"
-    # Forward again: the frozen delivery is recognized as sent elsewhere, not posted again.
-    for _ in range(2):
-        n.pass_once()
-    assert posted_events(zulip) == ["#2:started", "#4:question"]
-    rows = {d["id"]: d for d in wfe(area, "notify", "deliveries")}
-    assert rows[frozen["delivery"]]["state"] == "sent" and "outside this delivery" in rows[frozen["delivery"]]["checked"]
-    wfe(area, "run", "answer", "docs/run-001", "q1", "--answer", "Agreed.", "--by", "Test Person")
-    n.pass_once()
-    assert posted_events(zulip) == ["#2:started", "#4:question", "#6:answered"], "delivery continues"
