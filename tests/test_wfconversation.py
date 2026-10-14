@@ -91,6 +91,20 @@ class FakeZulip:
     def whoami(self):
         return {"user_id": BOT, "full_name": "autolab"}
 
+    # Provisioning of channels other than the one this test routes (since
+    # p8/ex2 every project also has the basic workflow freework): created
+    # here with ids of their own, never the routed STREAM.
+    def channels(self, include_archived=False):
+        self._check()
+        return [dict(c) for c in getattr(self, "made", [])]
+
+    def create_channel(self, name, description="", principals=None, folder_id=None):
+        self._check()
+        self.made = getattr(self, "made", []) + [{"name": name, "stream_id": 900 + len(getattr(self, "made", [])), "description": description, "folder_id": folder_id}]
+
+    def realm_owners(self):
+        return [PERSON]
+
     def users(self):
         self._check()
         return [{"user_id": PERSON, "is_bot": False}, {"user_id": BOT, "is_bot": True}]
