@@ -27,10 +27,17 @@ What you can see, and how:
 
 - This attempt is one launch of you. Your environment carries its id
   (`WFE_ATTEMPT`); `wfe run` adds it to your records. When the attempt
-  ends, a later attempt may continue the same run in a new session: it
-  starts from the records and the working tree, never from this
-  conversation. So everything the next session needs goes into the records,
-  `plan.md` and the reports in the run folder.
+  ends, a later attempt continues the run. The run's session policy decides
+  in which conversation (`wfe run session <run>`): `fresh` starts a new one
+  every attempt, from the records and the working tree; `run` resumes this
+  conversation, unless the run's configuration changed or the conversation
+  was lost or retired, and then a new one starts from the records. So
+  everything a new session needs still goes into the records, `plan.md` and
+  the reports in the run folder (agent_session p1).
+- A resumed conversation remembers earlier attempts; the record decides what
+  was answered, accepted, held or completed. Each attempt has its own id:
+  an earlier attempt's id is ended and its reports are refused, and
+  processes started in an earlier attempt are gone.
 - The run follows its fixed definition (`definition/<workflow>.yaml` in the
   run folder), not the current workflow file. A node starts only when every
   predecessor has completed; `wfe run start` refuses otherwise.
