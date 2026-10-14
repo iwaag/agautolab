@@ -42,6 +42,17 @@ the id the harness reports in its init event (``wfe exec session
 --attached``). A process still lives only as long as its attempt: a wait for
 a person ends it, and the conversation waits in the store.
 
+Launch ownership (agent_session p1 ex1). The agent is spawned behind a launch
+gate: a tiny wrapper that waits on a pipe this loop holds and execs the
+harness only when it reads ``go``, written after ``wfe exec started``
+registered its process. An executor that dies before that closes the pipe,
+and the wrapper exits without doing any agent work, so an unregistered
+process is never a writer. From the spawn on, the loop owns the process: a
+launch that fails after it (registration, the gate, the prompt) terminates
+and reaps the group before the attempt is finalized; if that cannot be
+confirmed, the loop keeps the process and the slot (``reconcile
+--holding``) and says so, rather than letting another writer start.
+
 Every state rule lives in the workflow editor (``shared/run.ts``,
 ``server/exec.ts``); this module only launches, watches and reports.
 
@@ -63,6 +74,7 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -86,6 +98,18 @@ SETTINGS = AGAUTOLAB_ROOT / ".local" / "wfexec.toml"
 TERM_GRACE_SECONDS = 20
 RECONCILE_SECONDS = 60
 POLL_SECONDS = 2.0
+# How long a failed launch waits for its process group after SIGTERM and
+# again after SIGKILL before it reports the group as not confirmed gone.
+ABANDON_WAIT_SECONDS = 5.0
+# The launch gate: argv[1] is the read end of the executor's pipe. Anything
+# but `go` (EOF: the executor is gone) exits before the harness is started.
+GATE = (
+    "import os,sys\n"
+    "fd=int(sys.argv[1])\n"
+    "go=os.read(fd,2)\n"
+    "os.close(fd)\n"
+    "sys.exit(75) if go!=b'go' else os.execvp(sys.argv[2],sys.argv[2:])\n"
+)
 
 
 def _profile_names() -> list[str]:
@@ -140,6 +164,10 @@ class Running:
     # harness's init event says which id it actually uses.
     session_id: str | None = None
     attached: bool = True
+    # Why this attempt ends abnormally although its process may exit 0: a
+    # launch that failed after the spawn (agent_session p1 ex1). Its end is
+    # recorded only once the process group is confirmed gone.
+    abandon: str | None = None
 
 
 class Executor:
@@ -251,6 +279,10 @@ class Executor:
         return profiles, contract, digest, sessions
 
     def launch(self, claim: dict, argv: list[str], extra_env: dict[str, str], contract: str | None = None) -> None:
+        """Spawns the agent behind the launch gate, takes ownership of it
+        (``self.current``) at once, registers it, opens the gate and sends
+        the prompt. Raises after the spawn only with ``self.current`` set:
+        the caller then stops what was spawned before ending the attempt."""
         attempt = claim["attempt"]["id"]
         cwd = Path(claim["cwd"])
         log = Path(claim["attempt"]["log"])
@@ -259,19 +291,80 @@ class Executor:
         wfe_dir = str(Path(self.s.wfe[0]).parent) if "/" in self.s.wfe[0] else ""
         if wfe_dir:
             env["PATH"] = f"{wfe_dir}:{env.get('PATH', '')}"
-        out = log.open("ab")
-        proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.PIPE, stdout=out, stderr=subprocess.STDOUT, start_new_session=True)
-        out.close()
-        assert proc.stdin is not None
+        prompt = self.prompt(claim, contract).encode()
+        if shutil.which(argv[0], path=env.get("PATH")) is None:
+            raise FileNotFoundError(f"{argv[0]}: no such command")
+        gate_r, gate_w = os.pipe()
         try:
-            proc.stdin.write(self.prompt(claim, contract).encode())
-            proc.stdin.close()
-        except BrokenPipeError:
-            pass
-        self.wfe("exec", "started", attempt, "--pid", str(proc.pid))
+            with log.open("ab") as out:
+                proc = subprocess.Popen([sys.executable, "-I", "-c", GATE, str(gate_r), *argv], cwd=cwd, env=env,
+                                        stdin=subprocess.PIPE, stdout=out, stderr=subprocess.STDOUT,
+                                        start_new_session=True, pass_fds=(gate_r,))
+        except BaseException:
+            os.close(gate_w)
+            raise
+        finally:
+            os.close(gate_r)
         sid = ((claim.get("execution") or {}).get("session") or {}).get("id")
         self.current = Running(attempt, proc, time.monotonic(), log=log, session_id=sid, attached=not sid)
+        try:
+            self.wfe("exec", "started", attempt, "--pid", str(proc.pid))
+            self.open_gate(gate_w)
+        finally:
+            os.close(gate_w)  # before `go`: EOF, and the gate exits without starting the harness
+        assert proc.stdin is not None
+        try:
+            proc.stdin.write(prompt)
+            proc.stdin.close()
+        except BrokenPipeError:
+            pass  # the harness is gone already; its end is recorded as it ended
         self.log(f"attempt {attempt}: launched pid {proc.pid} for {claim['ref']['workflow']}/{claim['ref']['run']} in {claim['workspace']['id']}")
+
+    @staticmethod
+    def open_gate(fd: int) -> None:
+        os.write(fd, b"go")
+
+    @staticmethod
+    def group_gone(r: Running) -> bool:
+        """The attempt's process group has no member left (its leader reaped)."""
+        r.proc.poll()
+        try:
+            os.killpg(r.proc.pid, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            return False
+        return False
+
+    def terminate(self, r: Running) -> bool:
+        """SIGTERM, then SIGKILL, to the attempt's group, each followed by
+        a bounded wait; True once the group is confirmed gone."""
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.killpg(r.proc.pid, sig)
+            except ProcessLookupError:
+                pass
+            except PermissionError as error:
+                self.log(f"attempt {r.attempt}: {sig.name} refused: {error}")
+            end = time.monotonic() + ABANDON_WAIT_SECONDS
+            while time.monotonic() < end:
+                if self.group_gone(r):
+                    return True
+                time.sleep(0.05)
+        return self.group_gone(r)
+
+    def abandon(self, r: Running, why: str) -> str:
+        """A launch failed after the spawn: stop what was spawned, and end
+        the attempt only once its group is confirmed gone. Otherwise the
+        loop keeps it (the slot stays held) and the next ticks go on."""
+        r.abandon = r.abandon or why
+        if r.term_sent is None:
+            r.term_sent = time.monotonic()
+        if not self.terminate(r):
+            self.log(f"attempt {r.attempt}: process group {r.proc.pid} is not confirmed gone after a failed launch ({why}); "
+                     "the executor keeps it and the slot until it is")
+            return "launch-unconfirmed"
+        return self.finish(r)
 
     # ---- one tick ----------------------------------------------------------------
 
@@ -320,36 +413,26 @@ class Executor:
         self.wfe("exec", "heartbeat", "--name", self.name, "--pid", str(os.getpid()),
                  "--detail", f"executing {self.current.attempt}" if self.current else "idle")
         if time.monotonic() - self.last_reconcile > RECONCILE_SECONDS:
-            notes = self.wfe("exec", "reconcile").get("notes", [])
+            holding = ["--holding", self.current.attempt] if self.current else []
+            notes = self.wfe("exec", "reconcile", *holding).get("notes", [])
             for n in notes:
                 self.log(f"reconcile: {n}")
             self.last_reconcile = time.monotonic()
         r = self.current
         if r is not None:
+            if r.abandon:
+                # A failed launch not yet confirmed stopped: keep stopping it.
+                return self.abandon(r, r.abandon)
             due = {a["id"]: a for a in self.wfe("exec", "stops")}
             if r.attempt in due:
                 self.stop_group(r, "stop or cancel requested")
             elif time.monotonic() - r.started > self.s.timeout_seconds:
                 self.stop_group(r, "the attempt's time budget ran out")
             self.attach(r)
-            code = r.proc.poll()
-            if code is None:
+            if r.proc.poll() is None:
                 return "executing"
             self.attach(r)
-            # The leader is gone; the group may still hold children.
-            try:
-                os.killpg(r.proc.pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
-            args = ["exec", "finished", r.attempt]
-            if code < 0:
-                args += ["--signal", signal.Signals(-code).name]
-            else:
-                args += ["--exit-code", str(code)]
-            result = self.wfe(*args)
-            self.log(f"attempt {r.attempt}: ended ({'signal ' + signal.Signals(-code).name if code < 0 else f'exit {code}'}) → {result.get('outcome')}; checkpoint {(result.get('checkpoint') or {}).get('state')}")
-            self.current = None
-            return "finished"
+            return self.finish(r)
         profiles, contract, digest, sessions = self.offer()
         claim = self.wfe("exec", "claim", "--backend", self.backend_label(),
                          "--profiles-json", json.dumps(profiles), "--contract", f"{CONTRACT_NAME}={digest}",
@@ -358,15 +441,39 @@ class Executor:
             return "idle"
         cwd = Path(claim["cwd"])
         execution = claim.get("execution") or {}
+        attempt = claim["attempt"]["id"]
         try:
             session = self.session_of(claim)
             argv, _, extra_env = self.agent_argv(cwd, execution.get("profile"), session)
             self.launch(claim, argv, extra_env, contract)
         except Exception as error:  # the launch failed: the attempt ends as interrupted
-            self.log(f"attempt {claim['attempt']['id']}: launch failed: {error}")
-            self.wfe("exec", "finished", claim["attempt"]["id"], "--exit-code", "127")
+            self.log(f"attempt {attempt}: launch failed: {error}")
+            if self.current is not None and self.current.attempt == attempt:
+                return self.abandon(self.current, f"launch failed: {error}")  # something was spawned
+            self.wfe("exec", "finished", attempt, "--exit-code", "127")
             return "launch-failed"
         return "launched"
+
+    def finish(self, r: Running) -> str:
+        """The attempt's leader is gone: clear its group and record the end.
+        A failure to record keeps the attempt current; the next tick retries."""
+        code = r.proc.poll()
+        try:  # the leader is gone; the group may still hold children
+            os.killpg(r.proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        args = ["exec", "finished", r.attempt]
+        if r.abandon:
+            args += ["--exit-code", "127"]
+        elif code is not None and code < 0:
+            args += ["--signal", signal.Signals(-code).name]
+        else:
+            args += ["--exit-code", str(code)]
+        result = self.wfe(*args)
+        how = r.abandon or (f"signal {signal.Signals(-code).name}" if code is not None and code < 0 else f"exit {code}")
+        self.log(f"attempt {r.attempt}: ended ({how}) → {result.get('outcome')}; checkpoint {(result.get('checkpoint') or {}).get('state')}")
+        self.current = None
+        return "finished"
 
     def session_of(self, claim: dict) -> Session | None:
         """The conversation this attempt is launched in. A resume first checks

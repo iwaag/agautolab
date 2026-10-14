@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import textwrap
@@ -666,3 +667,127 @@ def test_early_crash_and_restart_keep_one_writer_and_replace_an_unstored_session
     assert [s["state"] for s in r["sessions"]] == ["replaced", "open"]
     assert "missing on" in r["sessions"][0]["ended"]["reason"]
     assert [x["mode"] for x in prompts(sessions)] == ["new"]
+
+
+# ---- launch ownership (agent_session p1 ex1) -------------------------------------------
+# The agent starts only behind the launch gate; `MARKER` gets a line the moment
+# agent work begins, so "no agent work" is a missing file, not a guess.
+MARKER_STUB = 'import os, runpy, sys\nopen(os.environ["MARKER"], "a").write("ran\\n")\nrunpy.run_path(sys.argv[1], run_name="__main__")\n'
+
+
+@pytest.fixture()
+def launch(area, monkeypatch):
+    (area["area"] / "marker_stub.py").write_text(MARKER_STUB)
+    marker = area["area"] / "marker"
+    monkeypatch.setenv("MARKER", str(marker))
+    req = area["area"] / "words.md"
+    req.write_text("Please build a small thing.")
+    wfe(area, "request", "ship", "--braindump", str(req), "--author", "Test Person", "--receipt", "pytest-launch-0001", "--workspace", "demo")
+    return {**area, "marker": marker}
+
+
+def marker_executor(a) -> Executor:
+    s = Settings(wfe=[a["wfe"]], agent_command=[sys.executable, str(a["area"] / "marker_stub.py"), str(a["stub"])])
+    return Executor(s, log=lambda m: print(m))
+
+
+def group_alive(pid: int) -> bool:
+    try:
+        os.killpg(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+
+
+def attempt_rows(a) -> list[dict]:
+    return wfe(a, "exec", "status", "run-001", "--workspace", "demo")["attempts"]
+
+
+def age_launching_rows(a) -> None:
+    """The restart came more than two minutes after the claim."""
+    import sqlite3
+    (db,) = list(a["area"].rglob("exec/exec.sqlite"))
+    with sqlite3.connect(db) as c:
+        c.execute("UPDATE attempts SET began = '2026-01-01T00:00:00.000Z' WHERE state = 'launching'")
+
+
+@pytest.mark.parametrize("where", ["started", "gate"])
+def test_a_launch_failing_after_the_spawn_stops_the_process_before_the_attempt_ends(launch, monkeypatch, where):
+    ex = marker_executor(launch)
+    real, seen = ex.wfe, {}
+
+    def wfe_(*args, **kw):
+        if args[:2] == ("exec", "started"):
+            seen["pid"] = int(args[4])
+            if where == "started":
+                raise RuntimeError("injected: the store refused `started`")
+        if args[:2] == ("exec", "finished"):
+            seen["alive at finish"] = group_alive(seen["pid"])
+        return real(*args, **kw)
+
+    ex.wfe = wfe_
+    if where == "gate":
+        def gate(fd):
+            raise OSError("injected: the gate pipe failed")
+        monkeypatch.setattr(Executor, "open_gate", staticmethod(gate))
+    assert ex.tick() == "finished"
+    assert seen["alive at finish"] is False, "the group was gone before the attempt was finalized"
+    assert not launch["marker"].exists(), "no agent work started"
+    assert ex.current is None
+    r = record(launch)
+    assert r["control"]["attempt"] is None and r["control"]["hold"]["kind"] == "interrupted"
+    assert [a["state"] for a in attempt_rows(launch)] == ["ended"]
+
+
+def test_an_unconfirmed_stop_keeps_the_process_and_the_slot(launch, monkeypatch):
+    ex = marker_executor(launch)
+    real = ex.wfe
+    ex.wfe = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("injected")) if a[:2] == ("exec", "started") else real(*a, **k)
+    monkeypatch.setattr("agautolab.wfexec.ABANDON_WAIT_SECONDS", 0.2)
+    gone = Executor.group_gone
+    monkeypatch.setattr(Executor, "group_gone", staticmethod(lambda r: False))
+    assert ex.tick() == "launch-unconfirmed"
+    assert ex.current is not None and ex.current.abandon
+    age_launching_rows(launch)
+    ex.last_reconcile = 0
+    assert ex.tick() == "launch-unconfirmed", "reconcile --holding leaves the owned attempt alone"
+    assert [a["state"] for a in attempt_rows(launch)] == ["launching"], "the slot stays held"
+    monkeypatch.setattr(Executor, "group_gone", staticmethod(gone))
+    assert ex.tick() == "finished"
+    assert record(launch)["control"]["hold"]["kind"] == "interrupted"
+
+
+def test_an_executor_dying_before_registration_leaves_no_writer(launch, tmp_path):
+    ready = tmp_path / "ready"
+    fake = tmp_path / "wfe-dies-at-started"
+    fake.write_text(f'#!/bin/sh\nif [ "$1" = exec ] && [ "$2" = started ]; then echo "$5" > "{ready}.tmp" && mv "{ready}.tmp" "{ready}"; exec sleep 60; fi\nexec "{launch["wfe"]}" "$@"\n')
+    fake.chmod(0o755)
+    code = ("import sys; from agautolab.wfexec import Executor, Settings; "
+            "Executor(Settings(wfe=[sys.argv[1]], agent_command=[sys.executable, sys.argv[2], sys.argv[3]])).tick()")
+    first = subprocess.Popen([sys.executable, "-c", code, str(fake), str(launch["area"] / "marker_stub.py"), str(launch["stub"])], start_new_session=True)
+    try:
+        end = time.monotonic() + 60
+        while not ready.exists():
+            assert first.poll() is None and time.monotonic() < end, "the executor never reached `started`"
+            time.sleep(0.05)
+        pid = int(ready.read_text())
+        assert group_alive(pid), "the agent was spawned, behind its gate"
+        os.killpg(first.pid, signal.SIGKILL)  # the executor (and its pending `started`) dies
+    finally:
+        first.wait()
+    end = time.monotonic() + 10
+    while group_alive(pid):
+        assert time.monotonic() < end, "the abandoned gate did not exit"
+        time.sleep(0.05)
+    assert not launch["marker"].exists(), "the unregistered process never started agent work"
+    second = marker_executor(launch)
+    assert second.tick() == "idle", "the launching row keeps the slot until it is stale"
+    age_launching_rows(launch)
+    second.last_reconcile = 0
+    second.tick()
+    assert record(launch)["control"]["hold"]["kind"] == "unknown"
+    wfe(launch, "run", "resume", "run-001", "--reason", "looked: nothing ran", "--by", "Test Person")
+    assert second.tick() == "launched"
+    until(second, "finished")
+    assert launch["marker"].read_text() == "ran\n", "exactly one writer ever worked"
+    assert record(launch)["nodes"]["scope"]["state"] == "waiting"
