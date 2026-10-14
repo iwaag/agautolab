@@ -27,6 +27,21 @@ slot, one agent process at a time.
   vanished into ``unknown`` and re-queues requests and answers whose queue
   entry was lost. Nothing is rerun or completed by itself.
 
+Sessions (agent_session p1). A run's workflow chooses its session policy:
+``fresh`` (a new harness conversation every attempt) or ``run`` (later
+attempts resume the run's retained conversation). The editor decides at
+claim which session an attempt uses — new under an id it mints, or the
+run's current one by id — and records it in ``attempt.begin`` before
+anything is launched. This loop offers which profiles can keep such
+conversations (``agag.harness.SESSION_HARNESSES``), passes the id to the
+harness (``--session-id`` / ``--resume``), checks before a resume that the
+conversation is still in this host's store (a missing one is replaced
+through ``wfe exec session --missing`` before launch), gives a resumed
+session a continuation prompt instead of the whole bootstrap, and records
+the id the harness reports in its init event (``wfe exec session
+--attached``). A process still lives only as long as its attempt: a wait for
+a person ends it, and the conversation waits in the store.
+
 Every state rule lives in the workflow editor (``shared/run.ts``,
 ``server/exec.ts``); this module only launches, watches and reports.
 
@@ -58,7 +73,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from agag.agent import resolve_spec_role
-from agag.harness import build_argv
+from agag.harness import SESSION_HARNESSES, Session, build_argv, session_stored, stream_session_id
 
 from agautolab.instance import AGAUTOLAB_ROOT, SPEC
 
@@ -89,6 +104,11 @@ class Settings:
     env: dict[str, str] = field(default_factory=dict)
     notify: dict = field(default_factory=dict)
     intake: dict = field(default_factory=dict)
+    # Trials with `agent_command`: offer explicit sessions for every profile
+    # and hand the session to the command as WFE_SESSION_MODE / WFE_SESSION_ID;
+    # a conversation counts as stored when `<trial_session_store>/<id>` exists.
+    trial_sessions: bool = False
+    trial_session_store: Path | None = None
 
     @staticmethod
     def load(path: Path = SETTINGS) -> "Settings":
@@ -104,6 +124,8 @@ class Settings:
             env={str(k): str(v) for k, v in (data.get("env") or {}).items()},
             notify=dict(data.get("notify") or {}),
             intake=dict(data.get("intake") or {}),
+            trial_sessions=bool(data.get("trial_sessions", False)),
+            trial_session_store=Path(data["trial_session_store"]) if data.get("trial_session_store") else None,
         )
 
 
@@ -113,6 +135,11 @@ class Running:
     proc: subprocess.Popen
     started: float
     term_sent: float | None = None
+    log: Path | None = None
+    # The session this attempt was launched in (agent_session p1), until the
+    # harness's init event says which id it actually uses.
+    session_id: str | None = None
+    attached: bool = True
 
 
 class Executor:
@@ -137,21 +164,37 @@ class Executor:
 
     # ---- the agent -----------------------------------------------------------
 
-    def agent_argv(self, cwd: Path, profile: str | None = None) -> tuple[list[str], str, dict[str, str]]:
+    def agent_argv(self, cwd: Path, profile: str | None = None, session: Session | None = None) -> tuple[list[str], str, dict[str, str]]:
         """The argv, the backend it names (Agent ≠ Model), and its environment.
-        `profile` is the run's workflow's; without one, the host's default."""
+        `profile` is the run's workflow's; without one, the host's default.
+        `session`: the conversation to create or resume (agent_session p1)."""
         if self.s.agent_command:
-            return list(self.s.agent_command), "trial command", {}
+            env = {"WFE_SESSION_MODE": session.mode, "WFE_SESSION_ID": session.id} if session else {}
+            return list(self.s.agent_command), "trial command", env
         agent = resolve_spec_role(SPEC, ROLE, profile_override=profile or self.s.profile)
         argv = build_argv(
             agent, allowed_tools=agent.allowed_tools, skip_permissions=agent.harness in ("claude_code", "agy"),
-            stream=True, cwd=cwd, timeout=self.s.timeout_seconds,
+            stream=True, cwd=cwd, timeout=self.s.timeout_seconds, session=session,
         )
         return argv, f"{agent.harness} / {agent.model}", dict(agent.environment)
 
+    def session_stored(self, profile: str | None, session_id: str) -> bool | None:
+        """Whether this host still holds the conversation to resume."""
+        if self.s.agent_command:
+            if self.s.trial_session_store is None:
+                return None
+            return (self.s.trial_session_store / session_id).exists()
+        agent = resolve_spec_role(SPEC, ROLE, profile_override=profile or self.s.profile, check_available=False)
+        return session_stored(agent, session_id)
+
     def prompt(self, claim: dict, contract: str | None = None) -> str:
-        """The common contract, then the project's guides as the claim
-        recorded them (by hash), then the brief."""
+        """A new session: the common contract, then the project's guides as
+        the claim recorded them (by hash), then the brief. A resumed session
+        already holds the contract and guides (the editor resumes only under
+        the same configuration), so it gets the continuation instead."""
+        session = (claim.get("execution") or {}).get("session") or {}
+        if session.get("mode") == "resume":
+            return self.continuation(claim)
         parts = [(contract if contract is not None else GUIDE.read_text()).rstrip()]
         for g in (claim.get("execution") or {}).get("guides") or []:
             parts += ["", f"# Project guide: {g['path']}", "", str(g["text"]).rstrip()]
@@ -163,21 +206,49 @@ class Executor:
         ]
         return "\n".join(parts)
 
-    def offer(self) -> tuple[dict[str, str], str, str]:
-        """The profiles this host can launch (name → backend label), and the
-        common contract with its hash, as offered at claim."""
+    def continuation(self, claim: dict) -> str:
+        """What a resumed session is told at the start of a new attempt: the
+        new attempt identity, why it runs (the brief: answers, instructions,
+        recovery, changes since its base) and where the record is. The
+        contract and guides are already in the conversation, unchanged."""
+        attempt = claim["attempt"]["id"]
+        return "\n".join([
+            f"# This attempt: {attempt}", "",
+            f"This is a new attempt of the same run, continuing your conversation. Your attempt is now {attempt} "
+            "(WFE_ATTEMPT in your environment); every earlier attempt id in this conversation is ended, and a "
+            "report carrying one is refused. Processes you started in earlier attempts are gone.",
+            "What you remember is context, not record: what was answered, accepted, held or completed is what "
+            "the run's record says now.", "",
+            claim["brief"], "",
+            "Begin by reading the run's current state: `wfe run show <run> --history`.",
+        ])
+    def offer(self) -> tuple[dict[str, str], str, str, dict[str, str]]:
+        """The profiles this host can launch (name → backend label), the
+        common contract with its hash, and which profiles keep explicit
+        sessions ('' = the host's default profile), as offered at claim."""
         contract = GUIDE.read_text()
         digest = hashlib.sha256(contract.encode()).hexdigest()
         if self.s.agent_command:
-            return {name: "trial command" for name in _profile_names()}, contract, digest
+            names = _profile_names()
+            sessions = {name: "explicit" for name in [*names, ""]} if self.s.trial_sessions else {}
+            return {name: "trial command" for name in names}, contract, digest, sessions
         profiles: dict[str, str] = {}
+        sessions: dict[str, str] = {}
         for name in _profile_names():
             try:
                 agent = resolve_spec_role(SPEC, ROLE, profile_override=name, check_available=False)
             except Exception:  # noqa: BLE001 - a profile that does not resolve is not offered
                 continue
             profiles[name] = f"{agent.harness} / {agent.model}"
-        return profiles, contract, digest
+            if agent.harness in SESSION_HARNESSES:
+                sessions[name] = SESSION_HARNESSES[agent.harness]
+        try:
+            default = resolve_spec_role(SPEC, ROLE, profile_override=self.s.profile, check_available=False)
+            if default.harness in SESSION_HARNESSES:
+                sessions[""] = SESSION_HARNESSES[default.harness]
+        except Exception:  # noqa: BLE001 - no default profile: none offered for ''
+            pass
+        return profiles, contract, digest, sessions
 
     def launch(self, claim: dict, argv: list[str], extra_env: dict[str, str], contract: str | None = None) -> None:
         attempt = claim["attempt"]["id"]
@@ -198,7 +269,8 @@ class Executor:
         except BrokenPipeError:
             pass
         self.wfe("exec", "started", attempt, "--pid", str(proc.pid))
-        self.current = Running(attempt, proc, time.monotonic())
+        sid = ((claim.get("execution") or {}).get("session") or {}).get("id")
+        self.current = Running(attempt, proc, time.monotonic(), log=log, session_id=sid, attached=not sid)
         self.log(f"attempt {attempt}: launched pid {proc.pid} for {claim['ref']['workflow']}/{claim['ref']['run']} in {claim['workspace']['id']}")
 
     # ---- one tick ----------------------------------------------------------------
@@ -216,6 +288,34 @@ class Executor:
         except ProcessLookupError:
             pass
 
+    def attach(self, r: Running) -> None:
+        """Record the session id the harness announced in its init event,
+        once (agent_session p1). The intended id is already recorded; this
+        confirms it, or records that the harness used another."""
+        if r.attached or r.log is None:
+            return
+        try:
+            with r.log.open("r", errors="replace") as f:
+                for _ in range(200):
+                    line = f.readline()
+                    if not line:
+                        return
+                    sid = stream_session_id(line)
+                    if sid:
+                        break
+                else:
+                    return
+        except OSError:
+            return
+        try:
+            self.wfe("exec", "session", r.attempt, "--attached", sid)
+            r.attached = True
+            if sid != r.session_id:
+                self.log(f"attempt {r.attempt}: the harness reports session {sid}, not the intended {r.session_id}")
+        except RuntimeError as error:
+            self.log(f"attempt {r.attempt}: session not recorded: {error}")
+            r.attached = True  # said once; the record keeps the intended id
+
     def tick(self) -> str:
         self.wfe("exec", "heartbeat", "--name", self.name, "--pid", str(os.getpid()),
                  "--detail", f"executing {self.current.attempt}" if self.current else "idle")
@@ -231,9 +331,11 @@ class Executor:
                 self.stop_group(r, "stop or cancel requested")
             elif time.monotonic() - r.started > self.s.timeout_seconds:
                 self.stop_group(r, "the attempt's time budget ran out")
+            self.attach(r)
             code = r.proc.poll()
             if code is None:
                 return "executing"
+            self.attach(r)
             # The leader is gone; the group may still hold children.
             try:
                 os.killpg(r.proc.pid, signal.SIGKILL)
@@ -248,21 +350,45 @@ class Executor:
             self.log(f"attempt {r.attempt}: ended ({'signal ' + signal.Signals(-code).name if code < 0 else f'exit {code}'}) → {result.get('outcome')}; checkpoint {(result.get('checkpoint') or {}).get('state')}")
             self.current = None
             return "finished"
-        profiles, contract, digest = self.offer()
+        profiles, contract, digest, sessions = self.offer()
         claim = self.wfe("exec", "claim", "--backend", self.backend_label(),
-                         "--profiles-json", json.dumps(profiles), "--contract", f"{CONTRACT_NAME}={digest}")
+                         "--profiles-json", json.dumps(profiles), "--contract", f"{CONTRACT_NAME}={digest}",
+                         "--sessions-json", json.dumps(sessions))
         if "idle" in claim:
             return "idle"
         cwd = Path(claim["cwd"])
         execution = claim.get("execution") or {}
         try:
-            argv, _, extra_env = self.agent_argv(cwd, execution.get("profile"))
+            session = self.session_of(claim)
+            argv, _, extra_env = self.agent_argv(cwd, execution.get("profile"), session)
             self.launch(claim, argv, extra_env, contract)
         except Exception as error:  # the launch failed: the attempt ends as interrupted
             self.log(f"attempt {claim['attempt']['id']}: launch failed: {error}")
             self.wfe("exec", "finished", claim["attempt"]["id"], "--exit-code", "127")
             return "launch-failed"
         return "launched"
+
+    def session_of(self, claim: dict) -> Session | None:
+        """The conversation this attempt is launched in. A resume first checks
+        that the conversation is still in this host's store: a missing one
+        is replaced before launch (nothing ran in it in this attempt), and
+        the claim is updated to the new session so the prompt is the whole
+        bootstrap."""
+        execution = claim.get("execution") or {}
+        ss = execution.get("session") or {}
+        if not ss.get("id"):
+            return None
+        if ss.get("mode") == "resume":
+            stored = self.session_stored(execution.get("profile"), ss["id"])
+            if stored is False:
+                attempt = claim["attempt"]["id"]
+                got = self.wfe("exec", "session", attempt, "--missing", "--detail", "no transcript in the harness store")
+                self.log(f"attempt {attempt}: session {ss['id']} is missing on this host; replaced by {got.get('id')}")
+                ss = {**ss, "mode": "new", "id": got.get("id"), "replaces": {"id": ss["id"], "reason": "missing on this host"}}
+                execution["session"] = ss
+                if not ss["id"]:
+                    return None
+        return Session(ss["mode"], ss["id"])
 
     def backend_label(self) -> str:
         if self.s.agent_command:

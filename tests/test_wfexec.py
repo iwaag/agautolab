@@ -375,7 +375,7 @@ def test_workflow_settings_choose_profile_guides_and_identity(area, monkeypatch)
     ex = Executor(Settings(wfe=[area["wfe"]], agent_command=[sys.executable, str(area["area"] / "prompt_stub.py")]), log=print)
     asked: list = []
     real = ex.agent_argv
-    monkeypatch.setattr(ex, "agent_argv", lambda cwd, profile=None: (asked.append(profile), real(cwd, profile))[1])
+    monkeypatch.setattr(ex, "agent_argv", lambda cwd, profile=None, session=None: (asked.append(profile), real(cwd, profile, session))[1])
     assert ex.tick() == "launched"
     until(ex, "finished")
     assert asked == ["stub"], "launched with the workflow's profile"
@@ -394,6 +394,9 @@ def test_workflow_settings_choose_profile_guides_and_identity(area, monkeypatch)
         "guides": [{"path": "agent/g.md", "sha256": hashlib.sha256(b"# guide-agent\nProject fact: decks are blue.\n").hexdigest()}],
         # workflow_editor p7/ex1: the run's node-catalog snapshot (the area's seeds)
         "catalog": {"state": "supplied", "sha256": r["context"]["catalog"]["sha256"], "templates": 2},
+        # agent_session p1: no session policy declared = fresh; a trial
+        # command offers no sessions, so the attempt has no session id.
+        "session": {"policy": "fresh", "mode": "new", "id": None},
     }
     assert "The person recognizes these activities as distinct steps." in prompt, "the run's catalog reaches the agent"
     assert r["nodes"]["ask"]["state"] == "waiting"
@@ -451,3 +454,215 @@ def test_instruction_during_a_node_is_taken_up_at_the_boundary(area, monkeypatch
     assert ack["response"] == "incorporate" and ack["attempt"] == r["control"]["last"]["id"]
     ops = [e["op"] for e in r["history"]]
     assert ops.index("instruction.ack") < max(i for i, e in enumerate(r["history"]) if e["op"] == "node.start" and e.get("node") == "build")
+
+
+# ---- sessions (agent_session p1) --------------------------------------------------
+# A stub that behaves like a harness keeping explicit conversations: `new`
+# refuses an id already stored, `resume` of an id it lacks fails before doing
+# anything, the init line announces the id, and every prompt is appended to
+# the conversation (its store file) and to PROMPTS (for assertions).
+SESSION_WORKFLOW = WORKFLOW.replace("id: ship\n", "id: keep\nexecution: {session: run, guides: [agent/g.md]}\n")
+FRESH_WORKFLOW = WORKFLOW.replace("id: ship\n", "id: anew\nexecution: {session: fresh}\n")
+SESSION_STUB = textwrap.dedent('''
+    import json, os, signal, subprocess, sys, time
+    from pathlib import Path
+    wfe = os.environ["WFE_BIN"]
+    store = Path(os.environ["SESSION_STORE"])
+    mode, sid = os.environ.get("WFE_SESSION_MODE"), os.environ.get("WFE_SESSION_ID")
+    prompt = sys.stdin.read()
+    if os.environ.get("STUB_MODE") == "die-before-store":
+        time.sleep(60)
+    conv = store / sid
+    if mode == "new" and conv.exists():
+        print(f"Error: Session ID {sid} is already in use."); sys.exit(1)
+    if mode == "resume" and not conv.exists():
+        print(json.dumps({"type": "result", "subtype": "error_during_execution", "errors": [f"No conversation found with session ID: {sid}"]})); sys.exit(1)
+    print(json.dumps({"type": "system", "subtype": "init", "session_id": sid}), flush=True)
+    with conv.open("a") as f: f.write(json.dumps({"mode": mode, "prompt": prompt}) + "\\n")
+    with open(os.environ["PROMPTS"], "a") as f: f.write(json.dumps({"sid": sid, "mode": mode, "prompt": prompt}) + "\\n")
+    run_ref = os.environ["RUN_REF"]
+    def run(*a):
+        p = subprocess.run([wfe, "run", *a, "--json"], capture_output=True, text=True)
+        if p.returncode: print("refused:", p.stderr, file=sys.stderr)
+        return p
+    nodes = json.loads(subprocess.run([wfe, "run", "show", run_ref, "--json"], capture_output=True, text=True).stdout)["record"]["nodes"]
+    if nodes["scope"]["state"] == "pending":
+        run("start", run_ref, "scope")
+        if os.environ.get("STUB_MODE") == "sleep":
+            time.sleep(60)
+        run("ask", run_ref, "scope", "--question", "Small or large?", "--to", "Test Person")
+    elif nodes["scope"]["state"] == "waiting":
+        run("take-up", run_ref, "q1")
+        run("complete", run_ref, "scope", "--outcome", "small")
+        run("start", run_ref, "build")
+        open("made.txt", "w").write("made\\n")
+        run("complete", run_ref, "build", "--outcome", "made.txt", "--artifact", "made.txt")
+''')
+
+
+@pytest.fixture()
+def sessions(area, monkeypatch):
+    project = area["project"]
+    (project / "agent").mkdir(exist_ok=True)
+    (project / "agent" / "g.md").write_text("# guide\nFact one.\n")
+    (project / "devdocs" / "workflows" / "keep.yaml").write_text(SESSION_WORKFLOW)
+    (project / "devdocs" / "workflows" / "anew.yaml").write_text(FRESH_WORKFLOW)
+    for args in (["add", "-A"], ["commit", "-q", "-m", "session workflows"], ["push", "-q"]):
+        subprocess.run(["git", *args], cwd=project, check=True, capture_output=True)
+    store = area["area"] / "sessions"
+    store.mkdir()
+    (area["area"] / "session_stub.py").write_text(SESSION_STUB)
+    monkeypatch.setenv("SESSION_STORE", str(store))
+    monkeypatch.setenv("PROMPTS", str(area["area"] / "prompts.jsonl"))
+    return {**area, "store": store}
+
+
+def session_executor(a, trial_sessions: bool = True) -> Executor:
+    s = Settings(wfe=[a["wfe"]], agent_command=[sys.executable, str(a["area"] / "session_stub.py")],
+                 trial_sessions=trial_sessions, trial_session_store=a["store"])
+    return Executor(s, log=lambda m: print(m))
+
+
+def prompts(a) -> list[dict]:
+    p = a["area"] / "prompts.jsonl"
+    return [json.loads(l) for l in p.read_text().splitlines()] if p.exists() else []
+
+
+def request(a, workflow: str, receipt: str, monkeypatch, run: str = "run-001") -> str:
+    req = a["area"] / "words.md"
+    req.write_text("Please build a small thing.")
+    wfe(a, "request", workflow, "--braindump", str(req), "--author", "Test Person", "--receipt", receipt, "--workspace", "demo")
+    monkeypatch.setenv("RUN_REF", f"{workflow}/{run}")
+    return f"{workflow}/{run}"
+
+
+def answer(a, ref: str, receipt: str) -> None:
+    wfe(a, "run", "answer", ref, "q1", "--answer", "Small.", "--by", "Test Person", "--receipt", receipt)
+
+
+def test_run_policy_resumes_one_explicit_session_across_a_wait(sessions, monkeypatch):
+    from agautolab.wfexec import GUIDE
+    ref = request(sessions, "keep", "pytest-sess-0001", monkeypatch)
+    ex = session_executor(sessions)
+    assert ex.tick() == "launched"
+    until(ex, "finished")
+    first = wfe(sessions, "run", "show", ref)["record"]
+    sid = first["sessions"][0]["id"]
+    assert first["sessions"][0]["attached"] == sid and first["sessions"][0]["state"] == "open"
+    begin = next(e for e in first["history"] if e["op"] == "attempt.begin")
+    assert begin["settings"]["session"] == {"policy": "run", "mode": "new", "id": sid}, "the id is recorded before launch"
+    answer(sessions, ref, "pytest-sess-ans-1")
+    assert ex.tick() == "launched"
+    until(ex, "finished")
+    r = wfe(sessions, "run", "show", ref)["record"]
+    assert r["execution"]["state"] == "completed"
+    assert len(r["sessions"]) == 1 and len(r["sessions"][0]["attempts"]) == 2, "one session served both attempts"
+    second = [e for e in r["history"] if e["op"] == "attempt.begin"][1]
+    assert second["settings"]["session"] == {"policy": "run", "mode": "resume", "id": sid}
+    p = prompts(sessions)
+    assert [x["mode"] for x in p] == ["new", "resume"] and p[0]["sid"] == p[1]["sid"] == sid
+    assert p[0]["prompt"].startswith(GUIDE.read_text().rstrip()), "a new session gets the whole bootstrap"
+    assert p[1]["prompt"].startswith(f"# This attempt: {second['attempt']}"), "a resumed one the continuation"
+    assert GUIDE.read_text().strip()[:200] not in p[1]["prompt"] and "Fact one." not in p[1]["prompt"], "contract and guides are not appended again"
+    assert "earlier attempt id in this conversation is ended" in p[1]["prompt"]
+    # Another run of the same workflow has a session of its own.
+    ref2 = request(sessions, "keep", "pytest-sess-0002", monkeypatch, run="run-002")
+    assert ex.tick() == "launched"
+    until(ex, "finished")
+    other = wfe(sessions, "run", "show", ref2)["record"]["sessions"][0]["id"]
+    assert other != sid and prompts(sessions)[-1]["mode"] == "new"
+
+
+def test_fresh_policy_starts_a_new_session_each_attempt(sessions, monkeypatch):
+    ref = request(sessions, "anew", "pytest-sess-0003", monkeypatch)
+    ex = session_executor(sessions)
+    assert ex.tick() == "launched"
+    until(ex, "finished")
+    answer(sessions, ref, "pytest-sess-ans-3")
+    assert ex.tick() == "launched"
+    until(ex, "finished")
+    r = wfe(sessions, "run", "show", ref)["record"]
+    assert r["execution"]["state"] == "completed"
+    assert [s["state"] for s in r["sessions"]] == ["replaced", "open"]
+    assert r["sessions"][0]["id"] != r["sessions"][1]["id"]
+    assert "fresh policy" in r["sessions"][0]["ended"]["reason"]
+    assert [x["mode"] for x in prompts(sessions)] == ["new", "new"]
+
+
+def test_run_policy_is_refused_where_no_session_can_be_resumed(sessions, monkeypatch):
+    ref = request(sessions, "keep", "pytest-sess-0004", monkeypatch)
+    ex = session_executor(sessions, trial_sessions=False)
+    assert ex.tick() == "idle", "nothing launched"
+    r = wfe(sessions, "run", "show", ref)["record"]
+    assert r["control"]["attempts"] == 0 and not r.get("sessions")
+    jobs = wfe(sessions, "exec", "status", ref, "--workspace", "demo")["jobs"]
+    assert jobs[-1]["state"] == "dropped" and "session policy is \"run\"" in jobs[-1]["note"]
+    assert prompts(sessions) == [], "never silently fresh"
+
+
+def test_missing_session_is_replaced_before_launch(sessions, monkeypatch):
+    ref = request(sessions, "keep", "pytest-sess-0005", monkeypatch)
+    ex = session_executor(sessions)
+    assert ex.tick() == "launched"
+    until(ex, "finished")
+    sid = wfe(sessions, "run", "show", ref)["record"]["sessions"][0]["id"]
+    (sessions["store"] / sid).unlink()  # the host lost the conversation
+    answer(sessions, ref, "pytest-sess-ans-5")
+    assert ex.tick() == "launched"
+    until(ex, "finished")
+    r = wfe(sessions, "run", "show", ref)["record"]
+    assert r["execution"]["state"] == "completed"
+    old, new = r["sessions"]
+    assert old["state"] == "replaced" and "missing on" in old["ended"]["reason"] and len(old["attempts"]) == 1
+    assert new["state"] == "open" and new["id"] != sid and new["attached"] == new["id"]
+    p = prompts(sessions)
+    assert [x["mode"] for x in p] == ["new", "new"], "the replacement starts from the whole bootstrap"
+    assert not any(x["mode"] == "resume" for x in p), "the missing session was never resumed blindly"
+
+
+def test_changed_guide_or_retirement_starts_a_new_session(sessions, monkeypatch):
+    ref = request(sessions, "keep", "pytest-sess-0006", monkeypatch)
+    ex = session_executor(sessions)
+    assert ex.tick() == "launched"
+    until(ex, "finished")
+    copy = sessions["project"] / ".local/wfe/runs/keep/run-001/tree"
+    (copy / "agent" / "g.md").write_text("# guide\nFact two.\n")  # the guide the run reads changed
+    answer(sessions, ref, "pytest-sess-ans-6")
+    assert ex.tick() == "launched"
+    until(ex, "finished")
+    r = wfe(sessions, "run", "show", ref)["record"]
+    assert [s["state"] for s in r["sessions"]] == ["replaced", "open"]
+    begin = [e for e in r["history"] if e["op"] == "attempt.begin"][1]["settings"]["session"]
+    assert begin["mode"] == "new" and "guide agent/g.md changed" in begin["replaces"]["reason"]
+    assert "Fact two." in prompts(sessions)[-1]["prompt"], "the new session is instructed with the new guide"
+    # A person retires the current session between attempts.
+    out = subprocess.run([sessions["wfe"], "run", "session", ref, "--retire", "--reason", "start clean", "--by", "Test Person"], cwd=sessions["project"], capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr + out.stdout
+    r = wfe(sessions, "run", "show", ref)["record"]
+    assert r["sessions"][-1]["state"] == "retired" and r["sessions"][-1]["ended"]["by"] == "Test Person"
+
+
+def test_early_crash_and_restart_keep_one_writer_and_replace_an_unstored_session(sessions, monkeypatch):
+    monkeypatch.setenv("STUB_MODE", "die-before-store")
+    ref = request(sessions, "keep", "pytest-sess-0007", monkeypatch)
+    first = session_executor(sessions)
+    assert first.tick() == "launched"
+    pid = first.current.proc.pid
+    sid = wfe(sessions, "run", "show", ref)["record"]["sessions"][0]["id"]
+    second = session_executor(sessions)  # the executor restarted after launch
+    assert second.tick() == "idle", "the live attempt keeps the slot: no second writer of the session"
+    os.killpg(pid, 9)  # dies before the harness stored the conversation
+    first.current.proc.wait()
+    second.last_reconcile = 0
+    second.tick()
+    r = wfe(sessions, "run", "show", ref)["record"]
+    assert r["control"]["hold"]["kind"] == "unknown"
+    assert r["sessions"][0]["id"] == sid and "attached" not in r["sessions"][0], "intended, never confirmed"
+    monkeypatch.setenv("STUB_MODE", "")
+    wfe(sessions, "run", "resume", ref, "--reason", "looked: nothing happened", "--by", "Test Person")
+    assert second.tick() == "launched"
+    until(second, "finished")
+    r = wfe(sessions, "run", "show", ref)["record"]
+    assert [s["state"] for s in r["sessions"]] == ["replaced", "open"]
+    assert "missing on" in r["sessions"][0]["ended"]["reason"]
+    assert [x["mode"] for x in prompts(sessions)] == ["new"]
