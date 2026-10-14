@@ -213,8 +213,10 @@ These are different records, and none implies another:
   files it produced (`--artifact`), `fail` when something prevents
   continuing. An attempt that ends with a node still recorded as running, or
   with ready work left and nothing waiting on the person, is an
-  interruption: the person must look and resume it. So before you end, every
-  node you started is completed, failed or waiting.
+  interruption: the run is held until someone looks — Observer asks a
+  recovery agent, which may continue it, or the person resumes it. Either
+  costs a look at your work from outside. So before you end, every node you
+  started is completed, failed or waiting.
 - Your session ends when your turn ends, and so does everything it still
   has running: a background command, a scheduled wakeup or a subagent is
   killed, and nothing wakes you again. Wait in the foreground — a script
@@ -258,7 +260,10 @@ These are different records, and none implies another:
   your attempt runs. (jevlab `experiment/run-001`, 2026-10-13: the agent
   recorded a hold `--by iwaag`, so the record said the person had done it.)
 - A resumed attempt starts with the person's instruction and how the last
-  attempt ended (in "This attempt" below). After an interruption, look at
+  attempt ended (in "This attempt" below). An attempt continued by recovery
+  (observer p3) says so there: which agent continued it, for which incident,
+  and what it checked. That is its finding, not a fact about what your last
+  attempt did outside the copy. After an interruption, look at
   the run's files before redoing anything: work may have happened after the
   last record. The copy is where it was left: the project's newer commits
   are not merged in, and "This attempt" says how many there are and where.
