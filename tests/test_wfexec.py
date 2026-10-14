@@ -473,6 +473,9 @@ SESSION_STUB = textwrap.dedent('''
     prompt = sys.stdin.read()
     if os.environ.get("STUB_MODE") == "die-before-store":
         time.sleep(60)
+    if os.environ.get("STUB_MODE") == "other-session":  # the harness opens a conversation nobody chose
+        print(json.dumps({"type": "system", "subtype": "init", "session_id": f"other-{sid}"}), flush=True)
+        time.sleep(60)
     conv = store / sid
     if mode == "new" and conv.exists():
         print(f"Error: Session ID {sid} is already in use."); sys.exit(1)
@@ -746,11 +749,11 @@ def test_an_unconfirmed_stop_keeps_the_process_and_the_slot(launch, monkeypatch)
     monkeypatch.setattr("agautolab.wfexec.ABANDON_WAIT_SECONDS", 0.2)
     gone = Executor.group_gone
     monkeypatch.setattr(Executor, "group_gone", staticmethod(lambda r: False))
-    assert ex.tick() == "launch-unconfirmed"
+    assert ex.tick() == "stop-unconfirmed"
     assert ex.current is not None and ex.current.abandon
     age_launching_rows(launch)
     ex.last_reconcile = 0
-    assert ex.tick() == "launch-unconfirmed", "reconcile --holding leaves the owned attempt alone"
+    assert ex.tick() == "stop-unconfirmed", "reconcile --holding leaves the owned attempt alone"
     assert [a["state"] for a in attempt_rows(launch)] == ["launching"], "the slot stays held"
     monkeypatch.setattr(Executor, "group_gone", staticmethod(gone))
     assert ex.tick() == "finished"
@@ -791,3 +794,80 @@ def test_an_executor_dying_before_registration_leaves_no_writer(launch, tmp_path
     until(second, "finished")
     assert launch["marker"].read_text() == "ran\n", "exactly one writer ever worked"
     assert record(launch)["nodes"]["scope"]["state"] == "waiting"
+
+
+# ---- session mismatch (agent_session p1 ex1) -------------------------------------------
+
+def wfe_fails(a, *args: str) -> str:
+    p = subprocess.run([a["wfe"], *args, "--json"], cwd=a["project"], capture_output=True, text=True)
+    assert p.returncode != 0, p.stdout
+    return p.stderr + p.stdout
+
+
+def test_a_reported_session_mismatch_stops_the_attempt_and_nothing_continues_it(sessions, monkeypatch):
+    monkeypatch.setenv("STUB_MODE", "other-session")
+    ref = request(sessions, "keep", "pytest-sess-0008", monkeypatch)
+    ex = session_executor(sessions)
+    assert ex.tick() == "launched"
+    pid = ex.current.proc.pid
+    until(ex, "finished")
+    assert not group_alive(pid), "the attempt was stopped and its group confirmed gone"
+    r = wfe(sessions, "run", "show", ref)["record"]
+    (cur,) = r["sessions"]
+    assert cur["state"] == "open" and cur["mismatch"] is True
+    assert cur["attached"] == f"other-{cur['id']}", "both ids are kept"
+    assert r["control"]["hold"]["kind"] == "interrupted"
+    assert "session mismatch" in r["control"]["hold"]["reason"] and cur["id"] in r["control"]["hold"]["reason"]
+    assert r["nodes"]["scope"]["state"] == "pending", "no work went on in the unverified conversation"
+    for refused in (wfe_fails(sessions, "run", "resume", ref, "--reason", "go on", "--by", "Test Person"),
+                    wfe_fails(sessions, "run", "recover", ref, "--incident", "i-test-1", "--attempt", r["control"]["last"]["id"], "--reason", "looked", "--by", "Observer")):
+        assert "session-mismatch" in refused and "--retire" in refused, refused
+    assert ex.tick() == "idle"
+
+
+def test_retiring_a_mismatched_session_permits_a_new_one_and_keeps_the_recovery_budget(sessions, monkeypatch):
+    monkeypatch.setenv("STUB_MODE", "other-session")
+    ref = request(sessions, "keep", "pytest-sess-0009", monkeypatch)
+    ex = session_executor(sessions)
+    ids = []
+    for n in (1, 2, 3):
+        assert ex.tick() == "launched"
+        until(ex, "finished")
+        r = wfe(sessions, "run", "show", ref)["record"]
+        ids.append(r["sessions"][-1]["id"])
+        assert r["sessions"][-1]["mismatch"] is True and r["control"]["hold"]["kind"] == "interrupted"
+        wfe(sessions, "run", "session", ref, "--retire", "--reason", f"looked {n}: nothing ran in it", "--by", "Observer")
+        r = wfe(sessions, "run", "show", ref)["record"]
+        assert r["control"]["hold"]["kind"] == "interrupted", "retiring lifts no hold"
+        recover = ("run", "recover", ref, "--incident", f"i-test-{n}", "--attempt", r["control"]["last"]["id"], "--reason", "the conversation was retired", "--by", "Observer")
+        if n < 3:
+            wfe(sessions, *recover)
+        else:
+            assert "recover-budget" in wfe_fails(sessions, *recover), "two retirements reset nothing"
+    r = wfe(sessions, "run", "show", ref)["record"]
+    assert len(set(ids)) == 3, "each permitted attempt selected a new session"
+    assert [s["state"] for s in r["sessions"]] == ["retired"] * 3
+    assert [x["mode"] for x in prompts(sessions)] == [], "no attempt worked in any of them"
+    assert ex.tick() == "idle"
+
+
+def test_a_failed_attachment_record_is_retried(sessions, monkeypatch):
+    ref = request(sessions, "keep", "pytest-sess-0010", monkeypatch)
+    ex = session_executor(sessions)
+    real, calls = ex.wfe, []
+
+    def wfe_(*args, **kw):
+        if args[:2] == ("exec", "session") and "--attached" in args or args[:2] == ("exec", "finished") and "--attached" in args:
+            calls.append(args[1])
+            if len(calls) == 1:
+                raise RuntimeError("injected: the record was busy")
+        return real(*args, **kw)
+
+    ex.wfe = wfe_
+    assert ex.tick() == "launched"
+    until(ex, "finished")
+    assert len(calls) >= 2, "the failed record was tried again"
+    r = wfe(sessions, "run", "show", ref)["record"]
+    (cur,) = r["sessions"]
+    assert cur["attached"] == cur["id"] and not cur.get("mismatch")
+    assert r["nodes"]["scope"]["state"] == "waiting" and r["control"]["hold"] is None

@@ -39,8 +39,12 @@ conversation is still in this host's store (a missing one is replaced
 through ``wfe exec session --missing`` before launch), gives a resumed
 session a continuation prompt instead of the whole bootstrap, and records
 the id the harness reports in its init event (``wfe exec session
---attached``). A process still lives only as long as its attempt: a wait for
-a person ends it, and the conversation waits in the store.
+--attached``; a failed record is retried and carried by the end report). An
+id other than the intended one stops the attempt, which ends interrupted
+(``--interrupted "session mismatch: …"``); WFE then refuses to continue that
+conversation until it is retired (agent_session p1 ex1). A process still
+lives only as long as its attempt: a wait for a person ends it, and the
+conversation waits in the store.
 
 Launch ownership (agent_session p1 ex1). The agent is spawned behind a launch
 gate: a tiny wrapper that waits on a pipe this loop holds and execs the
@@ -164,9 +168,14 @@ class Running:
     # harness's init event says which id it actually uses.
     session_id: str | None = None
     attached: bool = True
-    # Why this attempt ends abnormally although its process may exit 0: a
-    # launch that failed after the spawn (agent_session p1 ex1). Its end is
-    # recorded only once the process group is confirmed gone.
+    # The id the harness's init event reported, once read; recorded when
+    # `attached` turns True (a failed record is retried, and carried by the
+    # end report: agent_session p1 ex1).
+    reported: str | None = None
+    # Why the execution host ends this attempt itself although its process
+    # may exit 0: a launch that failed after the spawn, or a session
+    # mismatch (agent_session p1 ex1). Its end is recorded, as interrupted
+    # for this reason, only once the process group is confirmed gone.
     abandon: str | None = None
 
 
@@ -354,16 +363,17 @@ class Executor:
         return self.group_gone(r)
 
     def abandon(self, r: Running, why: str) -> str:
-        """A launch failed after the spawn: stop what was spawned, and end
-        the attempt only once its group is confirmed gone. Otherwise the
+        """The execution host ends the attempt itself (a launch that failed
+        after the spawn, a session mismatch): stop the process group, and
+        end the attempt only once the group is confirmed gone. Otherwise the
         loop keeps it (the slot stays held) and the next ticks go on."""
         r.abandon = r.abandon or why
         if r.term_sent is None:
             r.term_sent = time.monotonic()
         if not self.terminate(r):
-            self.log(f"attempt {r.attempt}: process group {r.proc.pid} is not confirmed gone after a failed launch ({why}); "
+            self.log(f"attempt {r.attempt}: process group {r.proc.pid} is not confirmed gone ({r.abandon}); "
                      "the executor keeps it and the slot until it is")
-            return "launch-unconfirmed"
+            return "stop-unconfirmed"
         return self.finish(r)
 
     # ---- one tick ----------------------------------------------------------------
@@ -382,32 +392,36 @@ class Executor:
             pass
 
     def attach(self, r: Running) -> None:
-        """Record the session id the harness announced in its init event,
-        once (agent_session p1). The intended id is already recorded; this
-        confirms it, or records that the harness used another."""
+        """Record the session id the harness announced in its init event
+        (agent_session p1). The intended id is already recorded; this
+        confirms it, or records that the harness used another — and then the
+        attempt is stopped: work does not go on in a conversation nobody
+        chose (p1 ex1). A failed record stays pending and is retried."""
         if r.attached or r.log is None:
             return
-        try:
-            with r.log.open("r", errors="replace") as f:
-                for _ in range(200):
-                    line = f.readline()
-                    if not line:
+        if r.reported is None:
+            try:
+                with r.log.open("r", errors="replace") as f:
+                    for _ in range(200):
+                        line = f.readline()
+                        if not line:
+                            return
+                        sid = stream_session_id(line)
+                        if sid:
+                            break
+                    else:
                         return
-                    sid = stream_session_id(line)
-                    if sid:
-                        break
-                else:
-                    return
-        except OSError:
-            return
+            except OSError:
+                return
+            r.reported = sid
+            if r.session_id and sid != r.session_id:
+                self.log(f"attempt {r.attempt}: the harness reports session {sid}, not the intended {r.session_id}; stopping the attempt")
+                r.abandon = r.abandon or f"session mismatch: launched in session {r.session_id}, the harness reported {sid}"
         try:
-            self.wfe("exec", "session", r.attempt, "--attached", sid)
+            self.wfe("exec", "session", r.attempt, "--attached", r.reported)
             r.attached = True
-            if sid != r.session_id:
-                self.log(f"attempt {r.attempt}: the harness reports session {sid}, not the intended {r.session_id}")
         except RuntimeError as error:
-            self.log(f"attempt {r.attempt}: session not recorded: {error}")
-            r.attached = True  # said once; the record keeps the intended id
+            self.log(f"attempt {r.attempt}: session {r.reported} not recorded yet (retrying): {error}")
 
     def tick(self) -> str:
         self.wfe("exec", "heartbeat", "--name", self.name, "--pid", str(os.getpid()),
@@ -429,9 +443,13 @@ class Executor:
             elif time.monotonic() - r.started > self.s.timeout_seconds:
                 self.stop_group(r, "the attempt's time budget ran out")
             self.attach(r)
+            if r.abandon:
+                return self.abandon(r, r.abandon)
             if r.proc.poll() is None:
                 return "executing"
             self.attach(r)
+            if r.abandon:
+                return self.abandon(r, r.abandon)
             return self.finish(r)
         profiles, contract, digest, sessions = self.offer()
         claim = self.wfe("exec", "claim", "--backend", self.backend_label(),
@@ -463,14 +481,17 @@ class Executor:
         except (ProcessLookupError, PermissionError):
             pass
         args = ["exec", "finished", r.attempt]
-        if r.abandon:
-            args += ["--exit-code", "127"]
-        elif code is not None and code < 0:
+        if code is not None and code < 0:
             args += ["--signal", signal.Signals(-code).name]
         else:
             args += ["--exit-code", str(code)]
+        if r.abandon:
+            args += ["--interrupted", r.abandon]
+        if r.reported and not r.attached:
+            args += ["--attached", r.reported]  # recorded with the end, or named in its detail
         result = self.wfe(*args)
-        how = r.abandon or (f"signal {signal.Signals(-code).name}" if code is not None and code < 0 else f"exit {code}")
+        how = f"signal {signal.Signals(-code).name}" if code is not None and code < 0 else f"exit {code}"
+        how = f"{r.abandon}; {how}" if r.abandon else how
         self.log(f"attempt {r.attempt}: ended ({how}) → {result.get('outcome')}; checkpoint {(result.get('checkpoint') or {}).get('state')}")
         self.current = None
         return "finished"
