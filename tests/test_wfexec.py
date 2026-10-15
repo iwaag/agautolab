@@ -640,6 +640,9 @@ def test_missing_session_is_replaced_before_launch(sessions, monkeypatch):
     p = prompts(sessions)
     assert [x["mode"] for x in p] == ["new", "new"], "the replacement starts from the whole bootstrap"
     assert not any(x["mode"] == "resume" for x in p), "the missing session was never resumed blindly"
+    # p1 ex2: the replacement reconstructs: the original request and the
+    # pending answer are in its prompt, not only a pointer to the history.
+    assert "braindump.md (author Test Person)" in p[1]["prompt"] and "    Small." in p[1]["prompt"]
 
 
 def test_changed_guide_or_retirement_starts_a_new_session(sessions, monkeypatch):
