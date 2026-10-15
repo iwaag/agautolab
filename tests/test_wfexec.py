@@ -569,12 +569,30 @@ def test_run_policy_resumes_one_explicit_session_across_a_wait(sessions, monkeyp
     assert p[1]["prompt"].startswith(f"# This attempt: {second['attempt']}"), "a resumed one the continuation"
     assert GUIDE.read_text().strip()[:200] not in p[1]["prompt"] and "Fact one." not in p[1]["prompt"], "contract and guides are not appended again"
     assert "earlier attempt id in this conversation is ended" in p[1]["prompt"]
+    # p1 ex2: the answer itself, no history read, no stable run facts again.
+    assert "    Small." in p[1]["prompt"] and "q1 answer 0 from Test Person" in p[1]["prompt"]
+    assert "--history" not in p[1]["prompt"] and "Working copy:" not in p[1]["prompt"]
     # Another run of the same workflow has a session of its own.
     ref2 = request(sessions, "keep", "pytest-sess-0002", monkeypatch, run="run-002")
     assert ex.tick() == "launched"
     until(ex, "finished")
     other = wfe(sessions, "run", "show", ref2)["record"]["sessions"][0]["id"]
     assert other != sid and prompts(sessions)[-1]["mode"] == "new"
+
+
+def test_prompt_kinds_new_continuation_and_reconstruction():
+    """agent_session p1 ex2: a new session gets the whole bootstrap; an
+    ordinary resume the editor's continuation; a resume the editor marked
+    for reconstruction the whole bootstrap again, saying why."""
+    ex = Executor(Settings(wfe=["wfe"]), log=lambda m: None)
+    base = {"attempt": {"id": "a2"}, "brief": "Run: p / w/run-001\nThe person's request is braindump.md.", "continuation": "Run: p / w/run-001\nPending: Small."}
+    new = ex.prompt({**base, "execution": {"session": {"policy": "run", "mode": "new", "id": "s"}}}, contract="CONTRACT")
+    assert new.startswith("CONTRACT") and "The person's request is braindump.md." in new and "Pending: Small." not in new
+    cont = ex.prompt({**base, "execution": {"session": {"policy": "run", "mode": "resume", "id": "s"}}}, contract="CONTRACT")
+    assert cont.startswith("# This attempt: a2") and "Pending: Small." in cont and "CONTRACT" not in cont and "--history" not in cont
+    rec = ex.prompt({**base, "continuation": None, "execution": {"session": {"policy": "run", "mode": "resume", "id": "s", "reconstruct": "the conversation was compacted in attempt a1"}}}, contract="CONTRACT")
+    assert rec.startswith("# Attempt a2: the run's instructions again") and "the conversation was compacted in attempt a1" in rec
+    assert "CONTRACT" in rec and "The person's request is braindump.md." in rec
 
 
 def test_fresh_policy_starts_a_new_session_each_attempt(sessions, monkeypatch):

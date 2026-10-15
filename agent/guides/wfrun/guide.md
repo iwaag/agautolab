@@ -15,10 +15,13 @@ What you can see, and how:
   The project workspace, named in "This attempt", is the person's. You read
   its local resources (`.local/`) from there by name and change nothing in
   it;
-- `wfe run` — the run's records: `wfe run show <run> --history` (the state,
-  what is ready, what waits for whom, pending instructions), `wfe run help`
-  and `wfe run help <subcommand>` for each record you can make; `wfe run
-  access <run> <path>` says what the definition declares for a path;
+- `wfe run` — the run's records: `wfe run state <run>` (the state, what is
+  ready, what waits for whom, and every answer, instruction and delegation
+  fact not yet taken up, in full; `--since <seq>` adds what was recorded
+  after that seq), `wfe run show <run>` (the whole record; `--history`:
+  every entry), `wfe run help` and `wfe run help <subcommand>` for each
+  record you can make; `wfe run access <run> <path>` says what the
+  definition declares for a path;
 - `wfe status` — the project's repositories, workflows and runs;
 - `wfe run nodes <run>` — the person's node catalog as this run was given
   it; `wfe nodes help` — how a template becomes a node in a draft of the
@@ -41,6 +44,15 @@ What you can see, and how:
   was answered, accepted, held or completed. Each attempt has its own id:
   an earlier attempt's id is ended and its reports are refused, and
   processes started in an earlier attempt are gone.
+- A resumed attempt starts with what you cannot remember: what was recorded
+  since your previous attempt began and not by it, the run's state at that
+  seq, and the answers, instructions and delegation facts not yet taken up,
+  in full. What this conversation was told before still applies; a document
+  is read again when it changed or you are unsure of it, not because an
+  attempt began. A conversation that was compacted is given the run's
+  instructions in full again. If you find a summary where the beginning of
+  this conversation was, read the run's state, its request and `plan.md`
+  before going on (agent_session p1 ex2).
 - The run follows its fixed definition (`definition/<workflow>.yaml` in the
   run folder), not the current workflow file. A node starts only when every
   predecessor has completed; `wfe run start` refuses otherwise.
@@ -70,7 +82,7 @@ What you can see, and how:
 - Instructions can arrive while you work. They never interrupt you, and you
   never have to stop to look for them. At every node boundary — before you
   start a node and before the last completion of the run — you look at the
-  pending ones (`wfe run show <run>`, `wfe run instructions <run>`) and
+  pending ones (`wfe run state <run>`) and
   acknowledge each with what you will do: `incorporate` it into upcoming
   work, `clarify` it with a question to the person, or `new-run` when it
   asks for something this run cannot become (say why). `wfe run start` and

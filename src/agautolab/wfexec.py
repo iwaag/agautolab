@@ -37,7 +37,9 @@ conversations (``agag.harness.SESSION_HARNESSES``), passes the id to the
 harness (``--session-id`` / ``--resume``), checks before a resume that the
 conversation is still in this host's store (a missing one is replaced
 through ``wfe exec session --missing`` before launch), gives a resumed
-session a continuation prompt instead of the whole bootstrap, and records
+session the editor's compact continuation instead of the whole bootstrap
+(the whole bootstrap again when the editor found it compacted, agent_session
+p1 ex2), and records
 the id the harness reports in its init event (``wfe exec session
 --attached``; a failed record is retried and carried by the end report). An
 id other than the intended one stops the attempt, which ends interrupted
@@ -228,16 +230,30 @@ class Executor:
         """A new session: the common contract, then the project's guides as
         the claim recorded them (by hash), then the brief. A resumed session
         already holds the contract and guides (the editor resumes only under
-        the same configuration), so it gets the continuation instead."""
+        the same configuration), so it gets the editor's compact continuation
+        instead (agent_session p1 ex2). A resumed session the editor could
+        not show to still hold them (compacted, or a compaction that cannot
+        be ruled out: ``session.reconstruct``) gets the whole bootstrap again,
+        in the same conversation, and is told why."""
         session = (claim.get("execution") or {}).get("session") or {}
-        if session.get("mode") == "resume":
+        if session.get("mode") == "resume" and claim.get("continuation"):
             return self.continuation(claim)
-        parts = [(contract if contract is not None else GUIDE.read_text()).rstrip()]
+        attempt = claim["attempt"]["id"]
+        parts: list[str] = []
+        if session.get("mode") == "resume":
+            parts += [
+                f"# Attempt {attempt}: the run's instructions again", "",
+                f"This is a new attempt of the same run, continuing your conversation, but {session.get('reconstruct') or 'it may no longer hold its beginning'}: "
+                "what it said earlier may be summarized or missing. So the run's instructions follow in full, as a new "
+                "session gets them. Where they or the record differ from what you remember, they decide. Every earlier "
+                "attempt id in this conversation is ended, and processes you started in earlier attempts are gone.", "",
+            ]
+        parts += [(contract if contract is not None else GUIDE.read_text()).rstrip()]
         for g in (claim.get("execution") or {}).get("guides") or []:
             parts += ["", f"# Project guide: {g['path']}", "", str(g["text"]).rstrip()]
         parts += [
             "", "# This attempt", "",
-            f"Attempt: {claim['attempt']['id']} (in your environment as WFE_ATTEMPT; every `wfe run` report carries it).",
+            f"Attempt: {attempt} (in your environment as WFE_ATTEMPT; every `wfe run` report carries it).",
             claim["brief"], "",
             "Begin by reading the run: `wfe run show <run> --history`.",
         ]
@@ -245,9 +261,11 @@ class Executor:
 
     def continuation(self, claim: dict) -> str:
         """What a resumed session is told at the start of a new attempt: the
-        new attempt identity, why it runs (the brief: answers, instructions,
-        recovery, changes since its base) and where the record is. The
-        contract and guides are already in the conversation, unchanged."""
+        new attempt identity, then the editor's continuation — why it runs,
+        what was recorded since its previous attempt began, the compact
+        state and the pending input in full (agent_session p1 ex2). The
+        contract, guides and stable run facts are already in the
+        conversation, unchanged; nothing asks it to read the whole run."""
         attempt = claim["attempt"]["id"]
         return "\n".join([
             f"# This attempt: {attempt}", "",
@@ -256,8 +274,7 @@ class Executor:
             "report carrying one is refused. Processes you started in earlier attempts are gone.",
             "What you remember is context, not record: what was answered, accepted, held or completed is what "
             "the run's record says now.", "",
-            claim["brief"], "",
-            "Begin by reading the run's current state: `wfe run show <run> --history`.",
+            claim["continuation"],
         ])
     def offer(self) -> tuple[dict[str, str], str, str, dict[str, str]]:
         """The profiles this host can launch (name → backend label), the
