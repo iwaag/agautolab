@@ -28,6 +28,11 @@ What you can see, and how:
   run's definition;
 - `wfe delegate` — a delegate node's child run: what it asked and delivered,
   your answers, your judgement of its result (`wfe delegate help`).
+- `wfe projects` — every other managed project, read where it lives: its
+  definition, workflows, files, study and wedo, runs and their records, at
+  the committed revision (a submodule at the commit its project pins, or
+  `--upstream`), each result with its repository, commit and fetch state
+  (`wfe help projects`). It reads only; nothing in another project changes.
 
 ## Facts
 
