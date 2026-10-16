@@ -17,6 +17,9 @@ effort = "medium"
 [models."openai/gpt-5.4-mini"]
 effort = "low"
 
+[models."openai/gpt-6-luna"]
+effort = "medium"
+
 [profiles.local]
 harness = "agcode"
 model = "ollama/qwen3.8:27b-mlx-bf16"
@@ -62,6 +65,13 @@ model = "openai/gpt-5.6-terra"
 [profiles.codex-mini]
 harness = "codex"
 model = "openai/gpt-5.4-mini"
+
+# cagent's workflows run on this one (project_migration p6 ex2): Claude
+# declined the Developer's chosen platform instead of developing support
+# for it. Selected per workflow with `execution.profile: luna`.
+[profiles.luna]
+harness = "codex"
+model = "openai/gpt-6-luna"
 
 # The instance entrance, and the gateway window. On `sonnet` since
 # `agent_standardize` p10: the `local` profile cost more than it saved,
