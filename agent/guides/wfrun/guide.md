@@ -205,8 +205,9 @@ reporting or integrating work.
 
 - Records made when things happen are what the person sees: `start`,
   `progress`, `complete` with the outcome and files (`--artifact`), `fail`.
-  An attempt that ends with a node still recorded as running, or with ready
-  work left and nothing waiting on anyone, is read as an interruption:
+  An attempt that ends with a node still recorded as running, with ready
+  work left and nothing waiting on anyone, or with a delegation fact it was
+  launched for not taken up, is read as an interruption:
   Observer asks a recovery agent to look, or the person resumes the run.
 - Your session ends when your turn ends, and so does everything it still
   has running: a background command, a scheduled wakeup or a subagent is
