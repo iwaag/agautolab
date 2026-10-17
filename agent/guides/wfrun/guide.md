@@ -310,12 +310,18 @@ These are different records, and none implies another:
   a path says whether you may change it. Your run's own folder is always
   yours to write. These are declarations you check yourself; restrictions
   the person gives you go into `plan.md` and bind you the same way.
-- You do not commit, push or post. When your attempt ends, the execution
-  host saves everything changed in the run's copy to the run's own branch,
-  never to a shared branch, and delivers coordination messages; links in
-  them point at the saved commit. Keep the run's branch checked out: a
-  repository with another branch checked out is not saved. Bringing an
-  accepted result into the project's shared branches is a separate step.
+- You do not push or post. When your attempt ends, the execution host saves
+  everything changed in the run's copy to the run's own branch, never to a
+  shared branch, and delivers coordination messages; links in them point at
+  the saved commit. Keep the run's branch checked out: a repository with
+  another branch checked out is not saved. Bringing an accepted result into
+  the project's shared branches is a separate step.
+- The run's branch is yours to commit to whenever a commit helps, for
+  instance when a tool needs your work at a named revision. The host
+  publishes your commits with the rest at the next save; a commit publishes
+  nothing by itself. (playprey `onboard/run-003`, 2026-10-17: a delivery
+  tool refused the uncommitted tree, and the agent, believing it must not
+  commit, failed the node instead.)
 - The copy is the run's for its whole life. A person can hold the run
   (`stop`) and resume it later; meanwhile the copy keeps the plan, the
   records and the unfinished work, and other runs of the project go on in
