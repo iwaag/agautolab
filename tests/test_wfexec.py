@@ -419,17 +419,15 @@ BOUNDARY_STUB = textwrap.dedent('''
     while not os.path.exists(os.environ["STUB_SIGNAL"]):
         time.sleep(0.1)
     run("complete", RUN, "scope", "--outcome", "scope settled without a question")
-    refused = run("start", RUN, "build", check=False)
-    assert refused.returncode == 1 and "is a node boundary" in refused.stdout + refused.stderr, refused.stdout + refused.stderr
+    run("start", RUN, "build")  # p11: an unread instruction holds no transition
     pending = json.loads(run("instructions", RUN).stdout)["pending"]
     run("ack", RUN, *pending, "--response", "incorporate", "--note", "build follows it")
-    run("start", RUN, "build")
     open("made.txt", "w").write("made, bigger\\n")
     run("complete", RUN, "build", "--outcome", "made.txt", "--artifact", "made.txt")
 ''')
 
 
-def test_instruction_during_a_node_is_taken_up_at_the_boundary(area, monkeypatch):
+def test_instruction_during_a_node_is_read_without_holding_a_start(area, monkeypatch):
     (area["area"] / "boundary_stub.py").write_text(BOUNDARY_STUB)
     signal_file = area["area"] / "go"
     monkeypatch.setenv("STUB_SIGNAL", str(signal_file))
@@ -453,8 +451,6 @@ def test_instruction_during_a_node_is_taken_up_at_the_boundary(area, monkeypatch
     assert r["control"]["last"]["outcome"] == "exited", "a healthy attempt is not marked interrupted"
     ack = r["instructions"]["i1"]["ack"]
     assert ack["response"] == "incorporate" and ack["attempt"] == r["control"]["last"]["id"]
-    ops = [e["op"] for e in r["history"]]
-    assert ops.index("instruction.ack") < max(i for i, e in enumerate(r["history"]) if e["op"] == "node.start" and e.get("node") == "build")
 
 
 # ---- sessions (agent_session p1) --------------------------------------------------
@@ -846,7 +842,7 @@ def test_a_reported_session_mismatch_stops_the_attempt_and_nothing_continues_it(
     assert ex.tick() == "idle"
 
 
-def test_retiring_a_mismatched_session_permits_a_new_one_and_keeps_the_recovery_budget(sessions, monkeypatch):
+def test_retiring_a_mismatched_session_permits_a_new_one_without_a_recovery_budget(sessions, monkeypatch):
     monkeypatch.setenv("STUB_MODE", "other-session")
     ref = request(sessions, "keep", "pytest-sess-0009", monkeypatch)
     ex = session_executor(sessions)
@@ -861,15 +857,13 @@ def test_retiring_a_mismatched_session_permits_a_new_one_and_keeps_the_recovery_
         r = wfe(sessions, "run", "show", ref)["record"]
         assert r["control"]["hold"]["kind"] == "interrupted", "retiring lifts no hold"
         recover = ("run", "recover", ref, "--incident", f"i-test-{n}", "--attempt", r["control"]["last"]["id"], "--reason", "the conversation was retired", "--by", "Observer")
-        if n < 3:
-            wfe(sessions, *recover)
-        else:
-            assert "recover-budget" in wfe_fails(sessions, *recover), "two retirements reset nothing"
+        wfe(sessions, *recover)  # p11: recovery has no budget
     r = wfe(sessions, "run", "show", ref)["record"]
-    assert len(set(ids)) == 3, "each permitted attempt selected a new session"
+    assert len(set(ids)) == 3, "each attempt selected a new session"
     assert [s["state"] for s in r["sessions"]] == ["retired"] * 3
     assert [x["mode"] for x in prompts(sessions)] == [], "no attempt worked in any of them"
-    assert ex.tick() == "idle"
+    assert ex.tick() == "launched", "the third recovery was not refused"
+    until(ex, "finished")
 
 
 def test_a_failed_attachment_record_is_retried(sessions, monkeypatch):
