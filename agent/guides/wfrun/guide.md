@@ -213,9 +213,15 @@ reporting or integrating work.
   has running: a background command, a scheduled wakeup or a subagent is
   killed, and nothing wakes you again. A wait inside one foreground command
   (a script that retries with pauses) survives; one left in the background
-  does not. (jevlab `study/run-001`, 2026-10-13: arXiv answered 429, the
-  agent backgrounded a `sleep 60 && curl` and ended its turn to wait for
-  it, and the attempt ended as interrupted with `survey` still running.)
+  does not. The harness's "you will be notified when it completes" is not
+  true here: no notification reaches an ended session. Run a long command in
+  the foreground with a long enough timeout. (jevlab `study/run-001`,
+  2026-10-13: arXiv answered 429, the agent backgrounded a `sleep 60 &&
+  curl` and ended its turn to wait for it, and the attempt ended as
+  interrupted with `survey` still running. playprey `onboard/run-004`,
+  2026-10-18, twice in `register`: a headless Godot material build, then
+  a regression probe, were backgrounded and the agent ended its turn
+  saying it would wait for the notification.)
 - Repository bindings in the definition describe what a path is for;
   `wfe run access` reports them. They do not stop you from changing it.
 - Git is yours: commit, branch, merge, push and post with the tools you
