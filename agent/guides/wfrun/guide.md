@@ -159,6 +159,15 @@ These are different records, and none implies another:
   present stop <run> --all`). The completion that would complete the run is
   refused while one is open. Cancelling the run stops them by itself;
   stopping (holding) the run does not.
+- **Shared data** (project_migration p6): large inputs and outputs live on a
+  shared area, named `shared://<share>/<path>` in the person's words, never
+  in Git. `wfe run input` records the files you use as an input set (by
+  hash; staged in your copy's `.local/inputs/` by default); `wfe run
+  publish` puts an output folder on the share, verified, as `o<n>` of a
+  named candidate. A review question about an output is `wfe run ask …
+  --output <o>`. A set recorded as changed or missing is not the set that
+  was selected. `wfe run help input|publish` and `wfe share help` say the
+  rest.
 - The run's **future work** can change: nodes not yet started can be added,
   removed or rewired (`wfe run adjust`; `wfe run help adjust`). The change
   is a new revision of the run's definition. The original and the reusable
