@@ -15,7 +15,11 @@ copies, the `:8791` gateway window and the `autolab` CLI — was retired in
 
 ## Modules
 
-- `agautolab.wfexec` — one execution slot. Claims the next job (`wfe exec
+- `agautolab.wfexec` — one execution node (worker) of the WFE coordinator,
+  with one slot: `worker` in its settings names it (project_migration p7;
+  WFE `docs/workers.md`). On the coordinator's host it is the local worker;
+  on another PC, installed by the `wfe_worker` deployment profile, its `wfe`
+  is the coordinator's client. Claims the next job of its node (`wfe exec
   claim`), launches the workflow's agent behind a launch gate with the common
   contract (`agent/guides/wfrun/guide.md`), the run's scoped context and its
   brief, reports how the process ended, carries out stops, and reconciles
