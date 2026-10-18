@@ -22,7 +22,12 @@ What you can see, and how:
 - your working directory: this run's own copy of the project (its
   `project.yaml`, its repositories, its `devdocs/`), on the run's branch.
   The project workspace named in "This attempt" is where the person and
-  other runs work; its local resources (`.local/`) are there by name;
+  other runs work; its local resources (`.local/`) are there by name.
+  A run may be performed on another execution node (project_migration p7):
+  then "This attempt" names that node and what it has, the project
+  workspace is not on it, and `wfe` there takes your run operations to the
+  coordinator that keeps the record, uploading your run folder and the
+  files you name in the command first and bringing the record back after;
 - `wfe run` — the run's records: `wfe run state <run>` (the state, what is
   ready, what waits for whom, and every answer, instruction and delegation
   fact not yet taken up, in full; `--since <seq>` adds what was recorded
@@ -123,8 +128,9 @@ reporting or integrating work.
 
 ### Presentations, shared data and the run's graph
 
-- A **presentation** is a frozen copy of a result, served on this host for
-  the person to open with one click: the result and an explanation (what
+- A **presentation** is a frozen copy of a result, served by the
+  coordinator (from the files you register) for the person to open with one
+  click: the result and an explanation (what
   changed, how to try it, what to check) on one screen. `wfe present
   register` copies a directory and the explanation into the run folder as
   the next presentation (`p1`, `p2`, …; from a running node). `wfe present
@@ -193,9 +199,9 @@ reporting or integrating work.
   have not taken up, and `wfe delegate show` all of them. You do not see the
   child's conversation otherwise, and nothing you say outside the records
   reaches it.
-- The child runs in the same single execution slot as you: while your
-  attempt runs, it cannot. Its next fact launches you again after your
-  attempt ends.
+- Each execution node has one slot. A child performed on the same node as
+  you cannot run while your attempt holds that slot. Its next fact launches
+  you again after your attempt ends.
 - You answer the child's questions and judge its result (`wfe delegate
   dispose`: satisfied, rejected, abandoned) as yourself; `wfe delegate file`
   reads what a question presents and compares its bytes with the recorded
