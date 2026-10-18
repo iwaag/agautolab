@@ -48,7 +48,7 @@ copies, the `:8791` gateway window and the `autolab` CLI — was retired in
 
 ```bash
 uv run python -m agautolab.wfexec          # the loop (launchd: com.agdev.agautolab-wfexec)
-uv run python -m agautolab.wfexec --once   # one claim
+uv run python -m agautolab.wfexec --once   # until nothing is left to do (trials)
 uv run python -m agautolab.wfnotify --once # one delivery pass, alone
 uv run python -m agautolab.wfintake --once # one intake pass, alone
 ```
