@@ -102,7 +102,7 @@ def test_only_routed_channels_and_requesters_start_work_once(routed):
     assert runs(routed) == ["make/run-001"]
     rec = wfe(routed, "run", "show", "make/run-001")["record"]
     assert rec["input"]["source"]["message"] == origin
-    assert rec["executor"] == {"name": "maker", "backend": None, "host": "autolab"}
+    assert rec["executor"] == {"name": "maker", "backend": None, "host": "autolab", "node": "local"}  # node: project_migration p7
     assert (routed["project"] / ".local/wfe/runs/make/run-001/tree" / "devdocs" / "runs" / "make" / "run-001" / "braindump.md").read_text() == "Please make a **thing**."
     # Again, and from a restarted transport: nothing new is stored or applied.
     assert intake.pass_once()["received"] == 0

@@ -181,7 +181,7 @@ def test_hierarchy_human_wait_restart_and_separation(area, zulip, tmp_path, monk
     assert question.startswith("**Question for Test Person** — agree to the plan (q1)")
     assert "Plan: plan.md (published at" in question, "the checkpoint was published before the question went out"
     assert "Answer: in agdevworld's run view on the execution host" in question
-    assert question.splitlines()[-1] == "ref docs/run-001 #4:question"
+    assert question.splitlines()[-1] == "ref docs/run-001 #5:question"
     # The person waits; nothing runs; a restarted transport sends nothing twice.
     before = zulip.posts
     for _ in range(2):
@@ -215,7 +215,7 @@ def test_lost_response_is_reconciled_not_duplicated(area, zulip, tmp_path, monke
     n.pass_once()
     n.pass_once()
     assert zulip.posts == 2, "the started message was recorded as sent, not posted again; the question followed"
-    assert [m["content"].splitlines()[-1] for m in zulip.topic()] == ["ref docs/run-001 #2:started", "ref docs/run-001 #4:question"]
+    assert [m["content"].splitlines()[-1] for m in zulip.topic()] == ["ref docs/run-001 #2:started", "ref docs/run-001 #5:question"]
 
 
 def test_restart_between_post_and_acknowledgment(area, zulip, tmp_path, monkeypatch):  # noqa: F811
@@ -231,7 +231,7 @@ def test_restart_between_post_and_acknowledgment(area, zulip, tmp_path, monkeypa
     assert markers(zulip).count(d["marker"]) == 1, "the frozen delivery was found and acknowledged, not posted again"
     rows = {x["id"]: x for x in wfe(area, "notify", "deliveries")}
     assert rows[d["delivery"]]["state"] == "sent" and rows[d["delivery"]]["message_id"] == zulip.messages[0]["id"]
-    assert posted_events(zulip) == ["#2:started", "#4:question"]
+    assert posted_events(zulip) == ["#2:started", "#5:question"]
 
 
 def test_legacy_inflight_file_is_retired_into_the_store(area, zulip, tmp_path, monkeypatch):  # noqa: F811
@@ -246,7 +246,7 @@ def test_legacy_inflight_file_is_retired_into_the_store(area, zulip, tmp_path, m
     n.pass_once()
     assert not (tmp_path / "inflight.json").exists()
     assert list(tmp_path.glob("inflight.json.retired-*")), "the evidence is kept, retired"
-    assert posted_events(zulip) == ["#2:started", "#4:question"], "the in-flight event was found, not sent twice"
+    assert posted_events(zulip) == ["#2:started", "#5:question"], "the in-flight event was found, not sent twice"
     legacy = [d for d in wfe(area, "notify", "deliveries") if d["kind"] == "legacy"]
     assert legacy and legacy[0]["state"] == "resolved"
 
@@ -317,7 +317,7 @@ def answer_and_lose_the_next_post(area, zulip, n):
     lost. Returns the lost delivery as the store records it."""
     for _ in range(3):
         n.pass_once()
-    assert posted_events(zulip) == ["#2:started", "#4:question"]
+    assert posted_events(zulip) == ["#2:started", "#5:question"]
     wfe(area, "run", "answer", "docs/run-001", "q1", "--answer", "Agreed.", "--by", "Test Person")
     zulip.mode = "lost"
     n.pass_once()
@@ -335,14 +335,14 @@ def test_growing_batch_is_not_posted_twice(area, zulip, tmp_path, monkeypatch): 
     lost = answer_and_lose_the_next_post(area, zulip, n)
     first = zulip.messages[-1]
     assert ex.tick() == "launched"
-    until(ex, "finished")  # the run moves on: #13:reported, #15:completed …
+    until(ex, "finished")  # the run moves on: #15:reported, #17:completed …
     for _ in range(6):
         retry_now(area)
         n.pass_once()
     events = posted_events(zulip)
-    assert events.count("#6:answered") == 1, events
+    assert events.count("#7:answered") == 1, events
     assert len(events) == len(set(events)), f"nothing twice: {markers(zulip)}"
-    assert events.index("#6:answered") < events.index("#13:reported") < events.index("#15:completed"), "later events follow, in order"
+    assert events.index("#7:answered") < events.index("#15:reported") < events.index("#17:completed"), "later events follow, in order"
     rows = {d["id"]: d for d in wfe(area, "notify", "deliveries")}
     assert rows[lost["id"]]["state"] == "sent" and rows[lost["id"]]["message_id"] == first["id"], "the existing post was acknowledged"
     assert rows[lost["id"]]["content"] == first["content"], "membership and text stayed as frozen"
@@ -375,7 +375,7 @@ def test_restart_after_begin_before_post(area, zulip, tmp_path, monkeypatch):  #
     assert first["state"] == "sent" and first["attempts"] == 2, "the same delivery, begun again"
     assert first["checked"].startswith("absent from #"), f"absence was established before the retry: {first['checked']}"
     assert zulip.topic()[0]["content"] == d["content"], "the exact frozen payload"
-    assert posted_events(zulip) == ["#2:started", "#4:question"]
+    assert posted_events(zulip) == ["#2:started", "#5:question"]
 
 
 def test_acknowledgment_without_the_database_lock(area, zulip, tmp_path, monkeypatch):  # noqa: F811
@@ -402,7 +402,7 @@ def test_acknowledgment_without_the_database_lock(area, zulip, tmp_path, monkeyp
     assert list(state.values())[0]["state"] == "sending", "still begun: it may have been posted"
     for _ in range(2):
         n.pass_once()
-    assert posted_events(zulip) == ["#2:started", "#4:question"], "found by its marker, then the next message"
+    assert posted_events(zulip) == ["#2:started", "#5:question"], "found by its marker, then the next message"
     assert zulip.posts == 2
 
 
@@ -426,7 +426,7 @@ def test_two_notifiers_only_the_owner_sends(area, zulip, tmp_path, monkeypatch):
         owner_process.wait()
     # A is gone: B takes over; A's begun delivery is reconciled first.
     b.pass_once()
-    assert posted_events(zulip) == ["#2:started", "#4:question"]
+    assert posted_events(zulip) == ["#2:started", "#5:question"]
     rows = {x["id"]: x for x in wfe(area, "notify", "deliveries")}
     assert rows[d["delivery"]]["attempts"] == 2 and rows[d["delivery"]]["checked"].startswith("absent from")
     stale = subprocess.run([area["wfe"], "notify", "sent", str(d["delivery"]), "--claim", d["claim"], "--message", "1",
@@ -449,7 +449,7 @@ def test_marker_older_than_the_last_hundred_messages(area, zulip, tmp_path, monk
     zulip.pages = 0
     retry_now(area)
     n.pass_once()
-    assert posted_events(zulip).count("#6:answered") == 1
+    assert posted_events(zulip).count("#7:answered") == 1
     assert zulip.pages >= 2, "the search paged back past the newest window"
     assert {d["id"]: d for d in wfe(area, "notify", "deliveries")}[lost["id"]]["state"] == "sent"
 
@@ -483,7 +483,7 @@ def test_moved_topic_is_searched_where_it_went(area, zulip, tmp_path, monkeypatc
         m["subject"] = "run-001 (renamed)"  # a person renamed the topic, the lost post included
     retry_now(area)
     n.pass_once()
-    assert posted_events(zulip, "run-001 (renamed)").count("#6:answered") == 1
+    assert posted_events(zulip, "run-001 (renamed)").count("#7:answered") == 1
     assert zulip.topic("run-001") == []
     assert {d["id"]: d for d in wfe(area, "notify", "deliveries")}[lost["id"]]["state"] == "sent"
     with notify_db(area) as db:
@@ -499,13 +499,13 @@ def test_search_failure_is_not_absence(area, zulip, tmp_path, monkeypatch):  # n
     for _ in range(3):
         retry_now(area)
         n.pass_once()
-    assert posted_events(zulip).count("#6:answered") == 1
+    assert posted_events(zulip).count("#7:answered") == 1
     row = {d["id"]: d for d in wfe(area, "notify", "deliveries")}[lost["id"]]
     assert row["uncertain"] == 1 and "cannot establish whether it was posted" in row["last_error"]
     zulip.search_fails = False
     retry_now(area)
     n.pass_once()
-    assert posted_events(zulip).count("#6:answered") == 1
+    assert posted_events(zulip).count("#7:answered") == 1
     assert {d["id"]: d for d in wfe(area, "notify", "deliveries")}[lost["id"]]["state"] == "sent"
 
 
@@ -578,7 +578,7 @@ def test_legacy_state_is_migrated_and_reconciled(area, zulip, tmp_path, monkeypa
     old = old_release["module"].Notifier([old_release["wfe"]], zulip, zulip, inflight=tmp_path / "inflight.json", log=print)
     for _ in range(3):
         old.pass_once()
-    assert posted_events(zulip) == ["#2:started", "#4:question"]
+    assert posted_events(zulip) == ["#2:started", "#5:question"]
     wfe(area, "run", "answer", "docs/run-001", "q1", "--answer", "Agreed.", "--by", "Test Person")
     zulip.mode = "lost"
     old.pass_once()  # #6 posted, answer lost
@@ -605,9 +605,9 @@ def test_legacy_state_is_migrated_and_reconciled(area, zulip, tmp_path, monkeypa
     for _ in range(3):
         n.pass_once()
     events = posted_events(zulip)
-    assert events.count("#6:answered") == 1, f"found as posted, not sent again: {markers(zulip)}"
-    assert events.count("#13:reported") == 1 and events.count("#15:completed") == 1, "never-posted and pending events went out once"
-    assert events.index("#6:answered") < events.index("#13:reported") < events.index("#15:completed")
+    assert events.count("#7:answered") == 1, f"found as posted, not sent again: {markers(zulip)}"
+    assert events.count("#15:reported") == 1 and events.count("#17:completed") == 1, "never-posted and pending events went out once"
+    assert events.index("#7:answered") < events.index("#15:reported") < events.index("#17:completed")
     with notify_db(area) as db:
         after = {r[0]: (r[1], r[2]) for r in db.execute("SELECT id, state, message_id FROM outbox")}
         version = db.execute("PRAGMA user_version").fetchone()[0]

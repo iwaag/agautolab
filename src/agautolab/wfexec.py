@@ -60,6 +60,16 @@ and reaps the group before the attempt is finalized; if that cannot be
 confirmed, the loop keeps the process and the slot (``reconcile
 --holding``) and says so, rather than letting another writer start.
 
+Execution nodes (project_migration p7). This loop is one worker of the
+coordinator (``worker`` in the settings: its id in the coordinator's
+workers.json; empty: the coordinator's local worker). It claims only runs
+assigned to it, into its own slot, and names itself in every report. On a
+remote worker its ``wfe`` is the coordinator's client (WFE
+``cli/remote.ts``): the claim materializes the run's copy on this host, the
+end publishes it. The launch gate records how the agent's process ended in
+``<log>.exit``, and a restarted loop takes back a process it left running
+(``wfe exec adopt``) instead of waiting for it to be declared lost.
+
 Every state rule lives in the workflow editor (``shared/run.ts``,
 ``server/exec.ts``); this module only launches, watches and reports.
 
@@ -71,6 +81,7 @@ Zulip never holds up the slot.
 Run: ``uv run python -m agautolab.wfexec [--once]``. Settings:
 ``.local/wfexec.toml`` (``wfe`` = the launcher argv; optional
 ``agent_command`` = an argv that replaces the harness, for trials;
+``worker`` = this executor's node id;
 ``[notify] enabled = true`` with optional ``zulip_env`` / ``admin_env``
 turns Zulip delivery on; ``[intake] enabled = true`` with optional
 ``zulip_env`` turns on requests from Zulip, ``agautolab.wfintake``).
@@ -108,14 +119,28 @@ POLL_SECONDS = 2.0
 # How long a failed launch waits for its process group after SIGTERM and
 # again after SIGKILL before it reports the group as not confirmed gone.
 ABANDON_WAIT_SECONDS = 5.0
-# The launch gate: argv[1] is the read end of the executor's pipe. Anything
-# but `go` (EOF: the executor is gone) exits before the harness is started.
+# The launch gate: argv[1] is the read end of the executor's pipe, argv[2]
+# the exit file. Anything but `go` (EOF: the executor is gone) exits before
+# the harness is started. After `go` the gate runs the harness as its child,
+# waits for it and writes how it ended (`exit <code>` / `signal <name>`) to
+# the exit file before ending the same way (project_migration p7): an
+# executor restarted meanwhile reads there how its attempt ended instead of
+# only finding the process gone. The gate ignores the group's SIGTERM so it
+# outlives the harness; SIGKILL ends both, and then there is no exit file.
 GATE = (
-    "import os,sys\n"
-    "fd=int(sys.argv[1])\n"
+    "import os,sys,signal\n"
+    "fd=int(sys.argv[1]);ex=sys.argv[2]\n"
     "go=os.read(fd,2)\n"
     "os.close(fd)\n"
-    "sys.exit(75) if go!=b'go' else os.execvp(sys.argv[2],sys.argv[2:])\n"
+    "go==b'go' or sys.exit(75)\n"
+    "pid=os.fork()\n"
+    "pid or os.execvp(sys.argv[3],sys.argv[3:])\n"
+    "[signal.signal(s,signal.SIG_IGN) for s in (signal.SIGTERM,signal.SIGINT,signal.SIGHUP)]\n"
+    "st=os.waitpid(pid,0)[1]\n"
+    "w='signal %s'%signal.Signals(os.WTERMSIG(st)).name if os.WIFSIGNALED(st) else 'exit %d'%os.WEXITSTATUS(st)\n"
+    "open(ex+'.tmp','w').write(w+'\\n');os.replace(ex+'.tmp',ex)\n"
+    "os.WIFSIGNALED(st) and (signal.signal(os.WTERMSIG(st),signal.SIG_DFL),os.kill(os.getpid(),os.WTERMSIG(st)))\n"
+    "sys.exit(os.WEXITSTATUS(st))\n"
 )
 
 
@@ -129,6 +154,9 @@ def _profile_names() -> list[str]:
 @dataclass
 class Settings:
     wfe: list[str]
+    # The execution node this executor is (project_migration p7): the id in
+    # the coordinator's workers.json. Empty: the coordinator's local worker.
+    worker: str = ""
     agent_command: list[str] | None = None
     profile: str | None = None
     timeout_seconds: float = 4 * 3600
@@ -149,6 +177,7 @@ class Settings:
             raise SystemExit(f"{path} needs `wfe = [...]`: the argv of the wfe launcher for the agdev registry")
         return Settings(
             wfe=list(wfe) if isinstance(wfe, list) else [str(wfe)],
+            worker=str(data.get("worker") or ""),
             agent_command=list(data["agent_command"]) if data.get("agent_command") else None,
             profile=data.get("profile"),
             timeout_seconds=float(data.get("timeout_seconds", 4 * 3600)),
@@ -182,6 +211,48 @@ class Running:
     abandon: str | None = None
 
 
+class Adopted:
+    """A process this executor left running before a restart and takes back
+    (``wfe exec adopt``, project_migration p7). It is not this process's
+    child: ``poll`` looks at the pid and, once it is gone, at the exit file
+    the launch gate wrote. Gone without one, the end is not known (``lost``)."""
+
+    def __init__(self, pid: int, exit_file: Path):
+        self.pid = pid
+        self.exit_file = exit_file
+        self.returncode: int | None = None
+        self.lost = False
+        self.stdin = None
+
+    def poll(self) -> int | None:
+        if self.returncode is not None or self.lost:
+            return self.returncode
+        try:
+            os.kill(self.pid, 0)
+            return None
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            return None
+        ended = exit_of(self.exit_file)
+        if ended is None:
+            self.lost = True
+            return None
+        self.returncode = ended
+        return ended
+
+
+def exit_of(file: Path) -> int | None:
+    """The end the launch gate recorded: an exit code, or minus a signal number."""
+    try:
+        kind, value = file.read_text().split()
+    except (OSError, ValueError):
+        return None
+    if kind == "signal":
+        return -int(getattr(signal, value, signal.SIGKILL))
+    return int(value)
+
+
 class Executor:
     def __init__(self, settings: Settings, *, name: str = "autolab", log=print):
         self.s = settings
@@ -193,6 +264,9 @@ class Executor:
     # ---- wfe ---------------------------------------------------------------
 
     def wfe(self, *args: str, check: bool = True) -> dict | list:
+        # Every exec report names this executor's node (project_migration p7).
+        if args and args[0] == "exec" and self.s.worker:
+            args = (*args, "--worker", self.s.worker)
         proc = subprocess.run([*self.s.wfe, *args, "--json"], capture_output=True, text=True, timeout=300, env={**os.environ, **self.s.env})
         out = proc.stdout.strip()
         if proc.returncode != 0 and check:
@@ -328,7 +402,7 @@ class Executor:
         gate_r, gate_w = os.pipe()
         try:
             with log.open("ab") as out:
-                proc = subprocess.Popen([sys.executable, "-I", "-c", GATE, str(gate_r), *argv], cwd=cwd, env=env,
+                proc = subprocess.Popen([sys.executable, "-I", "-c", GATE, str(gate_r), f"{log}.exit", *argv], cwd=cwd, env=env,
                                         stdin=subprocess.PIPE, stdout=out, stderr=subprocess.STDOUT,
                                         start_new_session=True, pass_fds=(gate_r,))
         except BaseException:
@@ -426,6 +500,8 @@ class Executor:
                 self.log(f"attempt {r.attempt}: SIGKILL ({why}; still alive after {TERM_GRACE_SECONDS} s)")
         except ProcessLookupError:
             pass
+        except PermissionError as error:  # macOS: a group left with only an unreaped process
+            self.log(f"attempt {r.attempt}: signal refused ({error}); waiting for the process to be gone")
 
     def attach(self, r: Running) -> None:
         """Record the session id the harness announced in its init event
@@ -460,7 +536,7 @@ class Executor:
             self.log(f"attempt {r.attempt}: session {r.reported} not recorded yet (retrying): {error}")
 
     def tick(self) -> str:
-        self.wfe("exec", "heartbeat", "--name", self.name, "--pid", str(os.getpid()),
+        self.wfe("exec", "heartbeat", "--pid", str(os.getpid()),
                  "--detail", f"executing {self.current.attempt}" if self.current else "idle")
         if time.monotonic() - self.last_reconcile > RECONCILE_SECONDS:
             holding = ["--holding", self.current.attempt] if self.current else []
@@ -518,7 +594,9 @@ class Executor:
         except (ProcessLookupError, PermissionError):
             pass
         args = ["exec", "finished", r.attempt]
-        if code is not None and code < 0:
+        if getattr(r.proc, "lost", False):
+            args += ["--lost"]  # an adopted process gone without an exit file
+        elif code is not None and code < 0:
             args += ["--signal", signal.Signals(-code).name]
         else:
             args += ["--exit-code", str(code)]
@@ -527,7 +605,7 @@ class Executor:
         if r.reported and not r.attached:
             args += ["--attached", r.reported]  # recorded with the end, or named in its detail
         result = self.wfe(*args)
-        how = f"signal {signal.Signals(-code).name}" if code is not None and code < 0 else f"exit {code}"
+        how = "lost" if getattr(r.proc, "lost", False) else f"signal {signal.Signals(-code).name}" if code is not None and code < 0 else f"exit {code}"
         how = f"{r.abandon}; {how}" if r.abandon else how
         self.log(f"attempt {r.attempt}: ended ({how}) → {result.get('outcome')}; checkpoint {(result.get('checkpoint') or {}).get('state')}")
         self.current = None
@@ -564,8 +642,24 @@ class Executor:
         except Exception as error:  # noqa: BLE001 - recorded, not fatal
             return f"unresolved ({error})"
 
+    def adopt(self) -> None:
+        """Takes back the attempt this executor's node left running before a
+        restart (project_migration p7), so its stop and its end are handled
+        here again. Not done: the next ticks' reconcile judges the process."""
+        try:
+            live = self.wfe("exec", "adopt")
+        except Exception as error:  # noqa: BLE001 - the reconcile handles it later
+            self.log(f"adopt: not checked: {error}")
+            return
+        for a in live if isinstance(live, list) else []:
+            log = Path(a["log"]) if a.get("log") else None
+            self.current = Running(a["id"], Adopted(int(a["pid"]), Path(f"{log}.exit") if log else Path("/nonexistent")), time.monotonic(), log=log)  # type: ignore[arg-type]
+            self.log(f"attempt {a['id']}: adopted pid {a['pid']} left running before the restart")
+            break
+
     def serve(self, once: bool = False) -> None:
-        self.log(f"{self.name} workflow-run executor: one slot, polling every {POLL_SECONDS} s")
+        self.log(f"{self.name} workflow-run executor{f' (worker {self.s.worker})' if self.s.worker else ''}: one slot, polling every {POLL_SECONDS} s")
+        self.adopt()
         stopping = False
 
         def leave(signum, frame):  # noqa: ARG001

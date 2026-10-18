@@ -248,6 +248,36 @@ def test_restarted_executor_keeps_a_live_attempt_and_calls_a_lost_one_unknown(ar
     assert second.tick() == "idle", "nothing reruns by itself"
 
 
+def test_restarted_executor_adopts_its_live_attempt_and_carries_out_a_stop(area, monkeypatch):
+    """project_migration p7: the executor takes back the process it left
+    running (wfe exec adopt), so a stop requested after its restart is
+    carried out here, and the end is read from the launch gate's exit file."""
+    monkeypatch.setenv("STUB_MODE", "sleep")
+    req = area["area"] / "words.md"
+    req.write_text("Build.")
+    wfe(area, "request", "ship", "--braindump", str(req), "--author", "Test Person", "--receipt", "pytest-req-0103", "--workspace", "demo")
+    first = executor(area)
+    assert first.tick() == "launched"
+    attempt = first.current.attempt
+    for _ in range(100):
+        if record(area)["nodes"]["scope"]["state"] == "running":
+            break
+        time.sleep(0.1)
+    # The first executor is gone: its child is reaped as a dead parent's would be.
+    import threading
+    threading.Thread(target=first.current.proc.wait, daemon=True).start()
+    second = executor(area)
+    second.adopt()
+    assert second.current is not None and second.current.attempt == attempt, "the live attempt is taken back"
+    wfe(area, "run", "stop", "run-001", "--reason", "enough", "--by", "Test Person")
+    until(second, "finished", limit=60)
+    first.current.proc.wait()
+    r = record(area)
+    assert r["control"]["hold"]["kind"] == "stopped"
+    assert r["control"]["last"]["outcome"] == "stopped"
+    assert (Path(first.current.log).parent / f"{attempt}.jsonl.exit").read_text().strip() == "exit 143"
+
+
 def test_default_policy_plans_reports_and_resumes_a_report_without_redoing_work(area, monkeypatch):
     monkeypatch.setenv("STUB_MODE", "die-in-report")
     req = area["area"] / "words.md"
@@ -389,7 +419,7 @@ def test_workflow_settings_choose_profile_guides_and_identity(area, monkeypatch)
     assert len(contract.rstrip()) < prompt.index("# Context (run ") < prompt.index(head) < prompt.index("# This attempt")
     assert "you perform this run as guide-agent; the execution host autolab launched you" in prompt
     r = wfe(area, "run", "show", "ask/run-001")["record"]
-    assert r["executor"] == {"name": "guide-agent", "backend": None, "host": "autolab"}
+    assert r["executor"] == {"name": "guide-agent", "backend": None, "host": "autolab", "node": "local"}  # node: project_migration p7
     begin = next(e for e in r["history"] if e["op"] == "attempt.begin")
     context = begin["settings"].pop("context")
     assert context["snapshot"].startswith("ctx-") and context["fingerprint"].startswith("sha256:")
@@ -621,7 +651,8 @@ def test_run_policy_is_refused_where_no_session_can_be_resumed(sessions, monkeyp
     r = wfe(sessions, "run", "show", ref)["record"]
     assert r["control"]["attempts"] == 0 and not r.get("sessions")
     jobs = wfe(sessions, "exec", "status", ref, "--workspace", "demo")["jobs"]
-    assert jobs[-1]["state"] == "dropped" and "session policy is \"run\"" in jobs[-1]["note"]
+    # project_migration p7: the job waits for a worker that can keep the session.
+    assert jobs[-1]["state"] == "queued" and "session policy is \"run\"" in jobs[-1]["note"]
     assert prompts(sessions) == [], "never silently fresh"
 
 
