@@ -27,7 +27,6 @@ received (it needs no Zulip).
 **Separation.** Only channels the editor routes are read: workflow channels
 whose workflow declares `intake.zulip: requests` in a project the host
 enables. Nothing here posts; replies to the person are the notifier's.
-No legacy mission/task listener is involved.
 
 It runs on a thread of `agautolab.wfexec` (`[intake] enabled = true` in
 `.local/wfexec.toml`), beside the notifier, so requests are received while

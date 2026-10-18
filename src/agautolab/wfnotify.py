@@ -30,8 +30,7 @@ client, and reports each result back. It decides nothing about runs.
   is handed to the editor once (`wfe notify import-inflight`) and kept as
   `inflight.json.retired-<time>`; the store is the only record of uncertainty.
 - **Separation.** Messages mention nobody. Run topics (`run-…`) in `wf-…`
-  channels match no listener's prefixes, so no legacy listener serves
-  them; Zulip replies answer nothing — answers are recorded in agdevworld.
+  channels match no listener's prefixes, so no listener serves them; Zulip replies answer nothing — answers are recorded in agdevworld.
 
 It runs on a thread of `agautolab.wfexec` (independent of the agent and of
 the execution slot, so it keeps delivering while a run waits for a person

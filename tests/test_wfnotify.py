@@ -187,10 +187,10 @@ def test_hierarchy_human_wait_restart_and_separation(area, zulip, tmp_path, monk
     for _ in range(2):
         notifier(area, zulip, tmp_path).pass_once()
     assert zulip.posts == before
-    # Separation: no mention; no legacy listener owns these topics. autolab's
-    # routing is imported; the other agents' sweep prefixes (their own
-    # venvs) are the ones their instance modules declare today.
-    legacy = ("workplan-", "workrun-", "bmining-", "routinerun-", "front-", "watch-", "assetplan-", "assetrun-")
+    # Separation: no mention; no listener owns these topics. autolab sweeps
+    # nothing; the other agents' sweep prefixes (their own venvs) are the
+    # ones their instance modules declare today.
+    legacy = ("routinerun-", "front-", "watch-")
     for m in zulip.messages:
         assert not m["subject"].startswith(legacy) and not m["display_recipient"].startswith(("pj-", "work-"))
         assert "@**" not in m["content"]
