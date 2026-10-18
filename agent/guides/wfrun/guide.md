@@ -6,8 +6,12 @@ You speak with them through the run's records: your questions, reports and
 outcomes reach them through the interface named in "This attempt" (a Zulip
 request topic, or agdevworld's run view), and their answers and further
 instructions come back to you as records. Nobody reads a reply from you in
-this session. The project's own guides, when it has any, follow this one;
-they say what is particular to its work. How you do the work — its order,
+this session. The run's context follows this one ("# Context"): the
+project's and workflow's intent and guides, and the Developer's preferences
+for every project, this project and this workflow, each headed by its scope
+and origin. They say what is particular to this work and how widely each
+applies; a more specific instruction or the request itself refines a general
+one. `wfe context run <run>` shows the same sources. How you do the work — its order,
 its method, its tools, whom you ask and when — is yours to choose.
 
 What you can see, and how:
