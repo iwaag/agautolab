@@ -383,16 +383,23 @@ def test_workflow_settings_choose_profile_guides_and_identity(area, monkeypatch)
     prompt = out.read_text()
     contract = GUIDE.read_text()
     assert prompt.startswith(contract.rstrip()), "the common contract comes first"
-    assert "# Project guide: agent/g.md\n\n# guide-agent\nProject fact: decks are blue." in prompt
-    assert prompt.index("# Project guide: agent/g.md") < prompt.index("# This attempt")
+    # workflow_editor p13: the claim's scoped context follows the contract, once.
+    head = "## Workflow default — guide agent/g.md (agent/g.md)\n\n# guide-agent\nProject fact: decks are blue."
+    assert head in prompt and prompt.count("Project fact: decks are blue.") == 1
+    assert len(contract.rstrip()) < prompt.index("# Context (run ") < prompt.index(head) < prompt.index("# This attempt")
     assert "you perform this run as guide-agent; the execution host autolab launched you" in prompt
     r = wfe(area, "run", "show", "ask/run-001")["record"]
     assert r["executor"] == {"name": "guide-agent", "backend": None, "host": "autolab"}
     begin = next(e for e in r["history"] if e["op"] == "attempt.begin")
+    context = begin["settings"].pop("context")
+    assert context["snapshot"].startswith("ctx-") and context["fingerprint"].startswith("sha256:")
+    g = next(x for x in context["sources"] if x["key"] == "guide/agent/g.md")
+    assert g == {"key": "guide/agent/g.md", "scope": "workflow", "category": "default", "delivery": "body", "sha256": hashlib.sha256(b"# guide-agent\nProject fact: decks are blue.\n").hexdigest()}
+    delivered = [e for e in r["history"] if e["op"] == "attempt.context"]
+    assert [(e["event"], e["snapshot"]) for e in delivered] == [("delivered", context["snapshot"])], "the host records that the prompt reached the process"
     assert begin["settings"] == {
         "agent": "guide-agent", "profile": "stub", "backend": "trial command",
         "contract": {"name": "wfrun/guide.md", "sha256": hashlib.sha256(contract.encode()).hexdigest()},
-        "guides": [{"path": "agent/g.md", "sha256": hashlib.sha256(b"# guide-agent\nProject fact: decks are blue.\n").hexdigest()}],
         # workflow_editor p7/ex1: the run's node-catalog snapshot (the area's seeds)
         "catalog": {"state": "supplied", "sha256": r["context"]["catalog"]["sha256"], "templates": 2},
         # agent_session p1: no session policy declared = fresh; a trial
@@ -654,7 +661,7 @@ def test_changed_guide_or_retirement_starts_a_new_session(sessions, monkeypatch)
     r = wfe(sessions, "run", "show", ref)["record"]
     assert [s["state"] for s in r["sessions"]] == ["replaced", "open"]
     begin = [e for e in r["history"] if e["op"] == "attempt.begin"][1]["settings"]["session"]
-    assert begin["mode"] == "new" and "guide agent/g.md changed" in begin["replaces"]["reason"]
+    assert begin["mode"] == "new" and "context guide/agent/g.md changed" in begin["replaces"]["reason"]
     assert "Fact two." in prompts(sessions)[-1]["prompt"], "the new session is instructed with the new guide"
     # A person retires the current session between attempts.
     out = subprocess.run([sessions["wfe"], "run", "session", ref, "--retire", "--reason", "start clean", "--by", "Test Person"], cwd=sessions["project"], capture_output=True, text=True)

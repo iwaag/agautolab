@@ -9,12 +9,13 @@ slot, one agent process at a time.
   profiles it can launch and the hash of the common workflow contract. The
   editor records the attempt's beginning in the run record with the settings
   the run's workflow asks for (the agent identity, the profile, the
-  project's guides by hash) and hands them back. The agent is launched in the
+  context bundle by snapshot id and hashes) and hands them back. The agent is launched in the
   run's own working copy (``cwd`` of the claim; workflow_editor p9: each run
   has its own copy of the project, on its own branches) in a process group of its own, with the workflow's
   profile, ``WFE_ATTEMPT`` set so its ``wfe run`` reports carry the attempt
-  id, and a prompt composed of the common contract, the project's guides and
-  the run's brief (workflow_editor p6). The executing agent is whoever the
+  id, and a prompt composed of the common contract, the run's scoped context
+  (workflow_editor p13: the snapshot the claim prepared) and the run's brief
+  (workflow_editor p6). The executing agent is whoever the
   workflow names; autolab is the host that launches and publishes it.
 - When the process ends it reports how (``wfe exec finished``); the run
   record decides what that means (a talk question ends the process; an
@@ -96,8 +97,8 @@ from agag.harness import SESSION_HARNESSES, Session, build_argv, session_stored,
 from agautolab.instance import AGAUTOLAB_ROOT, SPEC
 
 ROLE = "wfrun"
-# The common workflow contract every run's prompt starts with; the project's
-# guides (named by its workflow) and the run's brief follow it.
+# The common workflow contract every run's prompt starts with; the run's
+# scoped context (from the claim) and the run's brief follow it.
 GUIDE = AGAUTOLAB_ROOT / "agent" / "guides" / "wfrun" / "guide.md"
 CONTRACT_NAME = "wfrun/guide.md"
 SETTINGS = AGAUTOLAB_ROOT / ".local" / "wfexec.toml"
@@ -227,10 +228,10 @@ class Executor:
         return session_stored(agent, session_id)
 
     def prompt(self, claim: dict, contract: str | None = None) -> str:
-        """A new session: the common contract, then the project's guides as
-        the claim recorded them (by hash), then the brief. A resumed session
-        already holds the contract and guides (the editor resumes only under
-        the same configuration), so it gets the editor's compact continuation
+        """A new session: the common contract, then the scoped context the
+        claim prepared (its snapshot's text), then the brief. A resumed session
+        already holds the contract and context (the editor resumes only under
+        the same configuration, context fingerprint included), so it gets the editor's compact continuation
         instead (agent_session p1 ex2). A resumed session the editor could
         not show to still hold them (compacted, or a compaction that cannot
         be ruled out: ``session.reconstruct``) gets the whole bootstrap again,
@@ -249,8 +250,12 @@ class Executor:
                 "attempt id in this conversation is ended, and processes you started in earlier attempts are gone.", "",
             ]
         parts += [(contract if contract is not None else GUIDE.read_text()).rstrip()]
-        for g in (claim.get("execution") or {}).get("guides") or []:
-            parts += ["", f"# Project guide: {g['path']}", "", str(g["text"]).rstrip()]
+        # The scoped context the editor resolved and saved for this attempt
+        # (workflow_editor p13): system, project and workflow defaults and
+        # overrides, as the exact text of its snapshot.
+        context = ((claim.get("execution") or {}).get("context") or {}).get("text")
+        if context:
+            parts += ["", str(context).rstrip()]
         parts += [
             "", "# This attempt", "",
             f"Attempt: {attempt} (in your environment as WFE_ATTEMPT; every `wfe run` report carries it).",
@@ -264,7 +269,7 @@ class Executor:
         new attempt identity, then the editor's continuation — why it runs,
         what was recorded since its previous attempt began, the compact
         state and the pending input in full (agent_session p1 ex2). The
-        contract, guides and stable run facts are already in the
+        contract, context and stable run facts are already in the
         conversation, unchanged; nothing asks it to read the whole run."""
         attempt = claim["attempt"]["id"]
         return "\n".join([
@@ -339,12 +344,26 @@ class Executor:
         finally:
             os.close(gate_w)  # before `go`: EOF, and the gate exits without starting the harness
         assert proc.stdin is not None
+        delivered, why = True, ""
         try:
             proc.stdin.write(prompt)
             proc.stdin.close()
         except BrokenPipeError:
-            pass  # the harness is gone already; its end is recorded as it ended
+            delivered, why = False, "the harness closed its input before the prompt was written"  # its end is recorded as it ended
+        self.report_context(claim, delivered, why)
         self.log(f"attempt {attempt}: launched pid {proc.pid} for {claim['ref']['workflow']}/{claim['ref']['run']} in {claim['workspace']['id']}")
+
+    def report_context(self, claim: dict, delivered: bool, detail: str = "") -> None:
+        """Records whether the prompt carrying the prepared context reached
+        the launched process (workflow_editor p13). Delivery is not proof the
+        agent read it. A failed record is logged; the attempt goes on."""
+        if not ((claim.get("execution") or {}).get("context") or {}).get("snapshot"):
+            return
+        attempt = claim["attempt"]["id"]
+        try:
+            self.wfe("exec", "context", attempt, "--delivered" if delivered else "--undelivered", *(["--detail", detail] if detail else []))
+        except Exception as error:  # noqa: BLE001 - a bookkeeping record; the attempt itself is unaffected
+            self.log(f"attempt {attempt}: context delivery not recorded: {error}")
 
     @staticmethod
     def open_gate(fd: int) -> None:
@@ -483,6 +502,7 @@ class Executor:
             self.launch(claim, argv, extra_env, contract)
         except Exception as error:  # the launch failed: the attempt ends as interrupted
             self.log(f"attempt {attempt}: launch failed: {error}")
+            self.report_context(claim, False, f"launch failed: {error}")
             if self.current is not None and self.current.attempt == attempt:
                 return self.abandon(self.current, f"launch failed: {error}")  # something was spawned
             self.wfe("exec", "finished", attempt, "--exit-code", "127")
