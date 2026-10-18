@@ -3,7 +3,8 @@ project = "agautolab"
 
 [models."ollama/qwen3.8:27b-mlx-bf16"]
 
-[models."anthropic/claude-sonnet-5"]
+# The Claude Code alias: the newest Sonnet the installed CLI knows.
+[models."anthropic/sonnet"]
 
 [models."google/gemini-2.5-flash"]
 
@@ -26,7 +27,7 @@ model = "ollama/qwen3.8:27b-mlx-bf16"
 
 [profiles.sonnet]
 harness = "claude_code"
-model = "anthropic/claude-sonnet-5"
+model = "anthropic/sonnet"
 
 [profiles.stub]
 harness = "fake"
