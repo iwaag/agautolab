@@ -202,6 +202,12 @@ reporting or integrating work.
 - Each execution node has one slot. A child performed on the same node as
   you cannot run while your attempt holds that slot. Its next fact launches
   you again after your attempt ends.
+- The wait is your run's record, not your process: end the attempt when only
+  the child's work remains, whether it takes minutes or days. The other nodes
+  you started are completed, failed or waiting by then; one left running
+  holds the run as interrupted (front/converse/run-027: a talk node beside
+  its delegate node). What needs the child's result is a node after the
+  delegate node.
 - You answer the child's questions and judge its result (`wfe delegate
   dispose`: satisfied, rejected, abandoned) as yourself; `wfe delegate file`
   reads what a question presents and compares its bytes with the recorded
