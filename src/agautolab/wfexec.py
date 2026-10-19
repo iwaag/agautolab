@@ -70,6 +70,17 @@ end publishes it. The launch gate records how the agent's process ended in
 ``<log>.exit``, and a restarted loop takes back a process it left running
 (``wfe exec adopt``) instead of waiting for it to be declared lost.
 
+Worker lanes (project_migration p8). A worker may declare extra lanes in the
+coordinator's workers.json (``"lanes": {"conversation": 1}``), so a
+conversational run is answered while a long attempt holds the default slot.
+``lanes = ["conversation"]`` in the settings makes this process serve them:
+one ``Executor`` per lane, each with its own slot and its own tick loop (the
+extra lanes' in threads), claiming with ``--lane <name>`` and carrying out
+its own attempt's stops and end. Heartbeat, reconcile (``--holding`` with
+the attempts of every lane), delivery and intake stay with the default
+lane's executor, and ``adopt`` hands each live attempt back to the executor
+of its lane. Without ``lanes`` this is exactly the one slot of before.
+
 Every state rule lives in the workflow editor (``shared/run.ts``,
 ``server/exec.ts``); this module only launches, watches and reports.
 
@@ -81,7 +92,8 @@ Zulip never holds up the slot.
 Run: ``uv run python -m agautolab.wfexec [--once]``. Settings:
 ``.local/wfexec.toml`` (``wfe`` = the launcher argv; optional
 ``agent_command`` = an argv that replaces the harness, for trials;
-``worker`` = this executor's node id;
+``worker`` = this executor's node id; ``lanes`` = the extra worker lanes
+it claims in;
 ``[notify] enabled = true`` with optional ``zulip_env`` / ``admin_env``
 turns Zulip delivery on; ``[intake] enabled = true`` with optional
 ``zulip_env`` turns on requests from Zulip, ``agautolab.wfintake``).
@@ -116,6 +128,8 @@ SETTINGS = AGAUTOLAB_ROOT / ".local" / "wfexec.toml"
 TERM_GRACE_SECONDS = 20
 RECONCILE_SECONDS = 60
 POLL_SECONDS = 2.0
+# The lane every worker has (project_migration p8): its one slot of before.
+DEFAULT_LANE = "default"
 # How long a failed launch waits for its process group after SIGTERM and
 # again after SIGKILL before it reports the group as not confirmed gone.
 ABANDON_WAIT_SECONDS = 5.0
@@ -157,6 +171,9 @@ class Settings:
     # The execution node this executor is (project_migration p7): the id in
     # the coordinator's workers.json. Empty: the coordinator's local worker.
     worker: str = ""
+    # The extra worker lanes (project_migration p8) this process claims in,
+    # one executor each, beside the default lane. Empty: the default lane only.
+    lanes: list[str] = field(default_factory=list)
     agent_command: list[str] | None = None
     profile: str | None = None
     timeout_seconds: float = 4 * 3600
@@ -178,6 +195,7 @@ class Settings:
         return Settings(
             wfe=list(wfe) if isinstance(wfe, list) else [str(wfe)],
             worker=str(data.get("worker") or ""),
+            lanes=[str(x) for x in (data.get("lanes") or []) if str(x) != DEFAULT_LANE],
             agent_command=list(data["agent_command"]) if data.get("agent_command") else None,
             profile=data.get("profile"),
             timeout_seconds=float(data.get("timeout_seconds", 4 * 3600)),
@@ -254,12 +272,23 @@ def exit_of(file: Path) -> int | None:
 
 
 class Executor:
-    def __init__(self, settings: Settings, *, name: str = "autolab", log=print):
+    def __init__(self, settings: Settings, *, name: str = "autolab", log=print, lane: str = DEFAULT_LANE):
         self.s = settings
         self.name = name
+        self.lane = lane
         self.log = log
         self.current: Running | None = None
         self.last_reconcile = 0.0
+        # The default lane's executor holds one executor per extra lane
+        # (project_migration p8); each owns its slot, its stops and its end.
+        self.lanes: dict[str, Executor] = {}
+        if lane == DEFAULT_LANE:
+            for extra in dict.fromkeys(settings.lanes):
+                self.lanes[extra] = Executor(settings, name=name, lane=extra, log=lambda m, extra=extra: log(f"[{extra}] {m}"))
+
+    def executors(self) -> list["Executor"]:
+        """Every lane's executor of this process, the default lane's first."""
+        return [self, *self.lanes.values()]
 
     # ---- wfe ---------------------------------------------------------------
 
@@ -536,14 +565,20 @@ class Executor:
             self.log(f"attempt {r.attempt}: session {r.reported} not recorded yet (retrying): {error}")
 
     def tick(self) -> str:
-        self.wfe("exec", "heartbeat", "--pid", str(os.getpid()),
-                 "--detail", f"executing {self.current.attempt}" if self.current else "idle")
-        if time.monotonic() - self.last_reconcile > RECONCILE_SECONDS:
-            holding = ["--holding", self.current.attempt] if self.current else []
-            notes = self.wfe("exec", "reconcile", *holding).get("notes", [])
-            for n in notes:
-                self.log(f"reconcile: {n}")
-            self.last_reconcile = time.monotonic()
+        # The worker's heartbeat and the reconcile are the default lane's
+        # (project_migration p8): they speak for every lane of this process,
+        # and every lane's attempt is held, so none is judged gone meanwhile.
+        if self.lane == DEFAULT_LANE:
+            def doing(ex: Executor) -> str:
+                return f"executing {ex.current.attempt}" if ex.current else "idle"
+            detail = "; ".join([doing(self), *(f"{lane}: {doing(ex)}" for lane, ex in self.lanes.items())])
+            self.wfe("exec", "heartbeat", "--pid", str(os.getpid()), "--detail", detail)
+            if time.monotonic() - self.last_reconcile > RECONCILE_SECONDS:
+                holding = [arg for ex in self.executors() if (held := ex.current) is not None for arg in ("--holding", held.attempt)]
+                notes = self.wfe("exec", "reconcile", *holding).get("notes", [])
+                for n in notes:
+                    self.log(f"reconcile: {n}")
+                self.last_reconcile = time.monotonic()
         r = self.current
         if r is not None:
             if r.abandon:
@@ -566,7 +601,8 @@ class Executor:
         profiles, contract, digest, sessions = self.offer()
         claim = self.wfe("exec", "claim", "--backend", self.backend_label(),
                          "--profiles-json", json.dumps(profiles), "--contract", f"{CONTRACT_NAME}={digest}",
-                         "--sessions-json", json.dumps(sessions))
+                         "--sessions-json", json.dumps(sessions),
+                         *(("--lane", self.lane) if self.lane != DEFAULT_LANE else ()))
         if "idle" in claim:
             return "idle"
         cwd = Path(claim["cwd"])
@@ -643,28 +679,54 @@ class Executor:
             return f"unresolved ({error})"
 
     def adopt(self) -> None:
-        """Takes back the attempt this executor's node left running before a
-        restart (project_migration p7), so its stop and its end are handled
-        here again. Not done: the next ticks' reconcile judges the process."""
+        """Takes back the attempts this executor's node left running before a
+        restart (project_migration p7), so their stops and ends are handled
+        here again: each by the executor of its lane (p8; an answer without a
+        lane is the default lane's). Not done: the next ticks' reconcile
+        judges the process."""
         try:
             live = self.wfe("exec", "adopt")
         except Exception as error:  # noqa: BLE001 - the reconcile handles it later
             self.log(f"adopt: not checked: {error}")
             return
         for a in live if isinstance(live, list) else []:
+            lane = a.get("lane") or DEFAULT_LANE
+            ex = self if lane == DEFAULT_LANE else self.lanes.get(lane)
+            if ex is None:
+                # Not served here any more: its process is judged by the
+                # coordinator's reconcile when it is gone.
+                self.log(f"attempt {a['id']}: left running in lane {lane}, which this executor does not serve; not adopted")
+                continue
+            if ex.current is not None:
+                continue
             log = Path(a["log"]) if a.get("log") else None
-            self.current = Running(a["id"], Adopted(int(a["pid"]), Path(f"{log}.exit") if log else Path("/nonexistent")), time.monotonic(), log=log)  # type: ignore[arg-type]
-            self.log(f"attempt {a['id']}: adopted pid {a['pid']} left running before the restart")
-            break
+            ex.current = Running(a["id"], Adopted(int(a["pid"]), Path(f"{log}.exit") if log else Path("/nonexistent")), time.monotonic(), log=log)  # type: ignore[arg-type]
+            ex.log(f"attempt {a['id']}: adopted pid {a['pid']} left running before the restart")
+
+    def loop(self, halt: threading.Event, once: bool = False) -> None:
+        """Ticks until halted (or, with ``once``, until nothing is left to do)."""
+        while not halt.is_set():
+            try:
+                state = self.tick()
+            except Exception as error:  # noqa: BLE001 - keep serving; the next tick retries
+                self.log(f"tick failed: {error}")
+                state = "error"
+            if once and state in ("idle", "error"):
+                break
+            halt.wait(POLL_SECONDS)
+        if self.current is not None:
+            # The agent keeps running in its own session; a restarted executor
+            # finds it alive and leaves the slot to it (reconcile).
+            self.log(f"leaving attempt {self.current.attempt} (pid {self.current.proc.pid}) running")
 
     def serve(self, once: bool = False) -> None:
-        self.log(f"{self.name} workflow-run executor{f' (worker {self.s.worker})' if self.s.worker else ''}: one slot, polling every {POLL_SECONDS} s")
+        slots = f"one slot and lanes {', '.join(self.lanes)}" if self.lanes else "one slot"
+        self.log(f"{self.name} workflow-run executor{f' (worker {self.s.worker})' if self.s.worker else ''}: {slots}, polling every {POLL_SECONDS} s")
         self.adopt()
-        stopping = False
+        halt = threading.Event()
 
         def leave(signum, frame):  # noqa: ARG001
-            nonlocal stopping
-            stopping = True
+            halt.set()
 
         signal.signal(signal.SIGTERM, leave)
         signal.signal(signal.SIGINT, leave)
@@ -688,20 +750,17 @@ class Executor:
                 self.log(f"intake: not started: {error}")
             if intake is not None:
                 threading.Thread(target=intake.run_forever, args=(quiet,), daemon=True, name="wfintake").start()
-        while not stopping:
-            try:
-                state = self.tick()
-            except Exception as error:  # noqa: BLE001 - keep serving; the next tick retries
-                self.log(f"tick failed: {error}")
-                state = "error"
-            if once and state in ("idle", "error"):
-                break
-            time.sleep(POLL_SECONDS)
+        # Each extra lane ticks in a thread of its own (p8), so a long launch
+        # or end in one lane never delays another; they end with this loop.
+        workers = [threading.Thread(target=ex.loop, args=(halt, once), name=f"wfexec-{lane}") for lane, ex in self.lanes.items()]
+        for t in workers:
+            t.start()
+        self.loop(halt, once)
+        if not once:
+            halt.set()
+        for t in workers:
+            t.join()
         quiet.set()
-        if self.current is not None:
-            # The agent keeps running in its own session; a restarted executor
-            # finds it alive and leaves the slot to it (reconcile).
-            self.log(f"leaving attempt {self.current.attempt} (pid {self.current.proc.pid}) running")
 
 
 def main(argv: list[str] | None = None) -> int:

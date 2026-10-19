@@ -924,3 +924,69 @@ def test_a_failed_attachment_record_is_retried(sessions, monkeypatch):
     (cur,) = r["sessions"]
     assert cur["attached"] == cur["id"] and not cur.get("mismatch")
     assert r["nodes"]["scope"]["state"] == "waiting" and r["control"]["hold"] is None
+
+
+# project_migration p8: a workflow claimed in the worker's conversation lane.
+CHAT_WORKFLOW = WORKFLOW.replace("id: ship\nname: Ship\n", "id: chat\nname: Chat\nexecution:\n  lane: conversation\n")
+# An agent that only works until it is stopped.
+SLEEPER = "import signal, sys, time\nsignal.signal(signal.SIGTERM, lambda *a: sys.exit(143))\ntime.sleep(120)\n"
+
+
+def test_lanes_each_claim_their_own_job_and_are_adopted_by_lane(area):
+    """A long default-lane attempt and a conversation-lane attempt run at
+    once, each claimed, stopped and ended by its own lane's executor; the
+    heartbeat and reconcile of the default lane hold both; a restarted
+    executor hands each live attempt back to its lane."""
+    (area["area"] / "workers.json").write_text(json.dumps({"default": "local", "workers": {"local": {"local": True, "lanes": {"conversation": 1}}}}))
+    (area["project"] / "devdocs" / "workflows" / "chat.yaml").write_text(CHAT_WORKFLOW)
+    for args in (["add", "-A"], ["commit", "-q", "-m", "chat"]):
+        subprocess.run(["git", *args], cwd=area["project"], check=True, capture_output=True)
+    (area["area"] / "sleeper.py").write_text(SLEEPER)
+    req = area["area"] / "words.md"
+    req.write_text("Work.")
+    wfe(area, "request", "ship", "--braindump", str(req), "--author", "Test Person", "--receipt", "pytest-lane-0001", "--workspace", "demo")
+    wfe(area, "request", "chat", "--braindump", str(req), "--author", "Test Person", "--receipt", "pytest-lane-0002", "--workspace", "demo")
+    settings = Settings(wfe=[area["wfe"]], agent_command=[sys.executable, str(area["area"] / "sleeper.py")], lanes=["conversation"])
+    first = Executor(settings, log=lambda m: print(m))
+    conv = first.lanes["conversation"]
+    assert conv.lane == "conversation" and conv.lanes == {}
+    assert first.tick() == "launched"
+    assert first.tick() == "executing", "the default slot is held"
+    assert conv.tick() == "launched", "the conversation lane claims while the default slot is held"
+    assert first.current.attempt != conv.current.attempt
+    assert wfe(area, "run", "show", "ship/run-001")["record"]["control"]["attempt"]["id"] == first.current.attempt
+    assert wfe(area, "run", "show", "chat/run-001")["record"]["control"]["attempt"]["id"] == conv.current.attempt
+    first.last_reconcile = 0
+    assert first.tick() == "executing", "reconcile holds every lane's attempt"
+    assert conv.tick() == "executing"
+    local = wfe(area, "exec", "workers")["workers"][0]
+    assert local["reported"] == f"executing {first.current.attempt}; conversation: executing {conv.current.attempt}"
+    assert [(x["attempt"], x["lane"]) for x in local["slots"]] == [(first.current.attempt, "default"), (conv.current.attempt, "conversation")]
+
+    # The executor is restarted: each live attempt goes back to its lane.
+    import threading
+    for ex in (first, conv):
+        threading.Thread(target=ex.current.proc.wait, daemon=True).start()
+    second = Executor(settings, log=lambda m: print(m))
+    second.adopt()
+    assert second.current is not None and second.current.attempt == first.current.attempt
+    assert second.lanes["conversation"].current is not None and second.lanes["conversation"].current.attempt == conv.current.attempt
+
+    # Each lane carries out its own stop and records its own end.
+    wfe(area, "run", "stop", "chat/run-001", "--reason", "enough", "--by", "Test Person")
+    until(second.lanes["conversation"], "finished", limit=60)
+    assert second.current is not None, "the default lane's attempt is untouched"
+    assert wfe(area, "run", "show", "chat/run-001")["record"]["control"]["hold"]["kind"] == "stopped"
+    assert wfe(area, "run", "show", "ship/run-001")["record"]["control"]["attempt"] is not None
+    wfe(area, "run", "stop", "ship/run-001", "--reason", "enough", "--by", "Test Person")
+    until(second, "finished", limit=60)
+    assert wfe(area, "run", "show", "ship/run-001")["record"]["control"]["hold"]["kind"] == "stopped"
+
+
+def test_lanes_setting_defaults_to_the_one_slot(tmp_path):
+    f = tmp_path / "wfexec.toml"
+    f.write_text('wfe = ["wfe"]\n')
+    assert Settings.load(f).lanes == []
+    assert Executor(Settings.load(f)).lanes == {}
+    f.write_text('wfe = ["wfe"]\nlanes = ["conversation", "default"]\n')
+    assert Settings.load(f).lanes == ["conversation"]
