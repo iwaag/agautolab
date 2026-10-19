@@ -111,6 +111,12 @@ STUB = textwrap.dedent('''
             signal.signal(signal.SIGTERM, lambda *a: sys.exit(143))
             time.sleep(120)
         run("ask", "run-001", "scope", "--question", "Small or large?", "--to", "Test Person")
+        if mode == "leftover":
+            # The session ends (its final result), but something it left in
+            # the background keeps the process alive (p8 ex1).
+            print(json.dumps({"type": "result", "subtype": "success", "is_error": False}), flush=True)
+            subprocess.Popen(["sleep", "300"])
+            time.sleep(300)
     elif nodes["scope"]["state"] == "waiting":
         run("take-up", "run-001", "q1")
         run("complete", "run-001", "scope", "--outcome", "small, as answered")
@@ -221,6 +227,27 @@ def test_stop_is_carried_out_and_confirmed(area, monkeypatch):
     assert r["control"]["hold"]["kind"] == "stopped"
     assert r["control"]["attempt"] is None
     assert ex.tick() == "idle", "a stopped run is not resumed by itself"
+
+
+def test_a_session_that_ended_is_not_kept_open_by_what_it_left_in_the_background(area, monkeypatch):
+    """project_migration p8 ex1 (front converse/run-029): the harness wrote
+    its final result and lived on for a backgrounded command. The executor
+    stops the leftovers after a grace and ends the attempt as the session
+    ended: a normal exit, the slot free, the run waiting on its question."""
+    import agautolab.wfexec as wx
+    monkeypatch.setenv("STUB_MODE", "leftover")
+    monkeypatch.setattr(wx, "SESSION_END_GRACE_SECONDS", 1)
+    req = area["area"] / "words.md"
+    req.write_text("Build it.")
+    wfe(area, "request", "ship", "--braindump", str(req), "--author", "Test Person", "--receipt", "pytest-req-0099", "--workspace", "demo")
+    ex = executor(area)
+    assert ex.tick() == "launched"
+    until(ex, "finished")
+    r = record(area)
+    assert r["control"]["last"]["outcome"] == "exited", r["control"]
+    assert r["control"]["hold"] is None
+    assert r["nodes"]["scope"]["state"] == "waiting"
+    assert ex.current is None, "the slot is free"
 
 
 def test_restarted_executor_keeps_a_live_attempt_and_calls_a_lost_one_unknown(area, monkeypatch):

@@ -126,6 +126,11 @@ GUIDE = AGAUTOLAB_ROOT / "agent" / "guides" / "wfrun" / "guide.md"
 CONTRACT_NAME = "wfrun/guide.md"
 SETTINGS = AGAUTOLAB_ROOT / ".local" / "wfexec.toml"
 TERM_GRACE_SECONDS = 20
+# How long a harness may stay alive after writing its session's final result
+# before the processes it left in the background are stopped
+# (project_migration p8 ex1: front converse/run-029 ended its turn with a
+# backgrounded `find /` still running, and the attempt held its slot).
+SESSION_END_GRACE_SECONDS = 30
 RECONCILE_SECONDS = 60
 POLL_SECONDS = 2.0
 # The lane every worker has (project_migration p8): its one slot of before.
@@ -227,6 +232,34 @@ class Running:
     # mismatch (agent_session p1 ex1). Its end is recorded, as interrupted
     # for this reason, only once the process group is confirmed gone.
     abandon: str | None = None
+    # When the harness's final result event was first seen while its
+    # process lived on (monotonic), whether that result was an error, and
+    # whether leftovers were stopped because of it (p8 ex1).
+    session_ended: float | None = None
+    session_error: bool = False
+    leftover: bool = False
+
+
+def session_result(log: Path) -> dict | None:
+    """The harness's final `result` event of its stream log, if written
+    (claude_code stream-json): the session has ended."""
+    try:
+        with log.open("rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - 262144))
+            tail = f.read().decode("utf-8", "replace")
+    except OSError:
+        return None
+    for line in reversed(tail.splitlines()):
+        if '"type":"result"' not in line.replace(" ", ""):
+            continue
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(event, dict) and event.get("type") == "result":
+            return event
+    return None
 
 
 class Adopted:
@@ -593,6 +626,7 @@ class Executor:
             if r.abandon:
                 return self.abandon(r, r.abandon)
             if r.proc.poll() is None:
+                self.watch_session_end(r)
                 return "executing"
             self.attach(r)
             if r.abandon:
@@ -621,6 +655,24 @@ class Executor:
             return "launch-failed"
         return "launched"
 
+    def watch_session_end(self, r: Running) -> None:
+        """A harness that wrote its session's final result but lives on is
+        kept alive by what it left in the background; nothing wakes an ended
+        session, so after a grace those processes are stopped and the
+        attempt ends as the session did (project_migration p8 ex1)."""
+        if r.log is None:
+            return
+        if r.session_ended is None:
+            result = session_result(r.log)
+            if result is None:
+                return
+            r.session_ended = time.monotonic()
+            r.session_error = bool(result.get("is_error"))
+            return
+        if time.monotonic() - r.session_ended > SESSION_END_GRACE_SECONDS:
+            r.leftover = True
+            self.stop_group(r, f"the session ended {SESSION_END_GRACE_SECONDS}+ s ago and only processes it left in the background keep it alive")
+
     def finish(self, r: Running) -> str:
         """The attempt's leader is gone: clear its group and record the end.
         A failure to record keeps the attempt current; the next tick retries."""
@@ -632,6 +684,9 @@ class Executor:
         args = ["exec", "finished", r.attempt]
         if getattr(r.proc, "lost", False):
             args += ["--lost"]  # an adopted process gone without an exit file
+        elif r.leftover:
+            # Stopped for leftovers after the session's own end: it ended as its result says.
+            args += ["--exit-code", "1" if r.session_error else "0"]
         elif code is not None and code < 0:
             args += ["--signal", signal.Signals(-code).name]
         else:
@@ -643,6 +698,7 @@ class Executor:
         result = self.wfe(*args)
         how = "lost" if getattr(r.proc, "lost", False) else f"signal {signal.Signals(-code).name}" if code is not None and code < 0 else f"exit {code}"
         how = f"{r.abandon}; {how}" if r.abandon else how
+        how = f"session ended, leftover background processes stopped; {how}" if r.leftover else how
         self.log(f"attempt {r.attempt}: ended ({how}) → {result.get('outcome')}; checkpoint {(result.get('checkpoint') or {}).get('state')}")
         self.current = None
         return "finished"
