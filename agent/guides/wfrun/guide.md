@@ -150,6 +150,34 @@ conversation have runs of their own, and several may be open at once
   show` prints each linked run's file route). A review page stopped before
   they looked leaves them nothing to open (p8 trial b).
 
+### A run that speaks in a discussion
+
+A discussion (workflow_editor p16, docs/discussions.md; `wfe discussion
+help`) is one shared conversation of a person, a facilitator (argue) and
+project agents. Each speaks through runs of its own project, with its own
+guide and context. Your run was started by one **invitation**: its question
+is your braindump, and `input.source` names the discussion and the
+invitation.
+
+- `wfe discussion show` (your own discussion by default) is the discussion
+  as it is: members, every message with who said it and for which run, the
+  invitations and their outcomes, and what is waiting for the person. Your
+  invitation's horizon is the newest message when you were invited; later
+  messages are marked and readable. Read the original speech you answer,
+  not a summary of it.
+- You speak with `wfe discussion contribute --re <msg>…`: the message is
+  your run's, your participant's and your invitation's. Name what you
+  answer. A reply (or result) answers your invitation; one is enough, and a
+  run that ends without one is recorded as unanswered.
+- Speak from your own project's knowledge and mission; disagreement is a
+  contribution, and nobody needs consensus. Cite what you rest on (a file
+  at a commit, a run, `#<message>`).
+- Your contribution starts nobody. Only the facilitator and the person
+  invite; say in your text whom you would ask and why.
+- Work that takes more than a turn is your project's ordinary workflow
+  (a delegate node or a request), not this run: the conversation slot is
+  shared.
+
 ### The steps the person expects to see
 
 - The person keeps a catalog of activities they recognize as distinct
