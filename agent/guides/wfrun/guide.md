@@ -182,6 +182,11 @@ invitation.
 - Work that takes more than a turn is your project's ordinary workflow
   (a delegate node or a request), not this run: the conversation slot is
   shared.
+- A result reaches the discussion when its readers can open it from your
+  message: the run view and file route (`wfe discussion show` prints each
+  linked run's), as in a conversation. File names alone open nothing
+  (p16 step 6: forge/discuss/run-004 #151, #152 named the grid overlay's
+  files without a link).
 
 ### The steps the person expects to see
 
