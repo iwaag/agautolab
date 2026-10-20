@@ -131,6 +131,14 @@ conversation have runs of their own, and several may be open at once
   question relayed only as conversation text leaves the node running when
   your attempt ends, and the run is held as interrupted (p15:
   forge/converse/run-002).
+- The person's words for work already under way — a change, an answer, a
+  further instruction for a run an earlier turn started, its delegated
+  child included — go to that run as theirs: `wfe run instruct <run>
+  --workspace <project> --from <person> --source-message <conv>:<id>` (or
+  `wfe run answer … --source-message` for its question). That run's record
+  then names the person and the message. Relayed through `wfe delegate
+  instruct` from a later turn, the words arrive as yours, with the message
+  only in the text (p15: forge/converse/run-005 → provide/run-011).
 - What a message is to a run (new work, a follow-up, a correction, a steer,
   an answer, …) is your reading. `wfe conversation link` records it for the
   next turn and the person; a later reading supersedes an earlier one, and
