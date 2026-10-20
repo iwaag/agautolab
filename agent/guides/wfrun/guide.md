@@ -121,6 +121,16 @@ conversation have runs of their own, and several may be open at once
   --question <q> --re <message>`. Their next message is then read as its
   answer, and a later turn records it on your run (p8 trial b:
   converse/run-002 asked its kit confirmation only in the run).
+- A delegate node's child may ask something only the person can answer.
+  Taking the fact up sets your delegate node running again, and it waits
+  again only when you answer the child or ask your own question from it:
+  `wfe run ask <your run> <delegate node> --to <person> …`, posted in the
+  conversation as above. The person's answer, recorded by a later turn
+  (`wfe run answer <your run> <q> --from <person> --source-message …`),
+  resumes your node, and you pass it on with `wfe delegate answer`. A
+  question relayed only as conversation text leaves the node running when
+  your attempt ends, and the run is held as interrupted (p15:
+  forge/converse/run-002).
 - What a message is to a run (new work, a follow-up, a correction, a steer,
   an answer, …) is your reading. `wfe conversation link` records it for the
   next turn and the person; a later reading supersedes an earlier one, and
