@@ -98,6 +98,40 @@ What you can see, and how:
   that you read them. Those records tell the person their words reached
   you; no transition waits for them.
 
+### A run that serves a conversation message
+
+A conversational workflow's run (`front/converse`, `forge/converse`,
+`archsage/converse`, …) serves one message of a person's conversation with
+its project. Its braindump is that message, verbatim, and its
+`input.source` names the conversation. Other messages of the same
+conversation have runs of their own, and several may be open at once
+(workflow_editor docs/conversations.md; `wfe conversation help`).
+
+- `wfe conversation show` (its own conversation by default) lists every
+  message with the run that wrote each reply and what it answers, what each
+  message was linked to, the linked runs as their records say now, and the
+  questions still waiting for the person.
+- The person reads you only in the conversation:
+  `wfe conversation reply`. A reply names the messages it answers (`--re`):
+  several pieces of work may be open, and recency says nothing about which
+  one a reply is about. Begin with the answer itself (seen live twice in the
+  old Front Desk).
+- A question your run asks (`wfe run ask`) reaches the person only when it
+  is in the conversation too: `wfe conversation reply --kind question
+  --question <q> --re <message>`. Their next message is then read as its
+  answer, and a later turn records it on your run (p8 trial b:
+  converse/run-002 asked its kit confirmation only in the run).
+- What a message is to a run (new work, a follow-up, a correction, a steer,
+  an answer, …) is your reading. `wfe conversation link` records it for the
+  next turn and the person; a later reading supersedes an earlier one, and
+  neither rewrites the message.
+- A result is delivered when the person can open it from the reply: the run
+  view, a serving review page, or a run file at
+  `<WFE origin>/wfe/api/projects/<project>/runs/<wf>/<run>/raw?path=<path in
+  the run folder>` (images and sound play as they are; `wfe conversation
+  show` prints each linked run's file route). A review page stopped before
+  they looked leaves them nothing to open (p8 trial b).
+
 ### The steps the person expects to see
 
 - The person keeps a catalog of activities they recognize as distinct
