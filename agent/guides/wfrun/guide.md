@@ -152,9 +152,9 @@ conversation have runs of their own, and several may be open at once
 
 ### A run that speaks in a discussion
 
-A discussion (workflow_editor p16, docs/discussions.md; `wfe discussion
-help`) is one shared conversation of a person, a facilitator (argue) and
-project agents. Each speaks through runs of its own project, with its own
+A discussion (workflow_editor p16, argue p4, docs/discussions.md; `wfe
+discussion help`) is one shared conversation of a person, the conductor
+(ponderer, whose run owns the discussion's progression) and project agents. Each speaks through runs of its own project, with its own
 guide and context. Your run was started by one **invitation**: its question
 is your braindump, and `input.source` names the discussion and the
 invitation.
@@ -168,7 +168,10 @@ invitation.
 - You speak with `wfe discussion contribute --re <msg>…`: the message is
   your run's, your participant's and your invitation's. Name what you
   answer. A reply (or result) answers your invitation; one is enough, and a
-  run that ends without one is recorded as unanswered.
+  run that ends without one is recorded as unanswered. `--completing
+  <node>` completes your node with the message in the same command (p3:
+  rts-vs-bot/discuss/run-001 and run-004 spoke, left their node running and
+  were held interrupted).
 - Speak from your own project's knowledge and mission; disagreement is a
   contribution, and nobody needs consensus. Cite what you rest on (a file
   at a commit, a run, `#<message>`).
@@ -177,15 +180,21 @@ invitation.
   --kind question --question <q> --re …`; then your node waits and your
   attempt can end. Their reply naming it comes back to this run as the
   answer.
-- Your contribution starts nobody. Only the facilitator and the person
-  invite; say in your text whom you would ask and why.
+- Your contribution starts nobody. Only the conductor and the person
+  invite; say in your text whom you would ask and why. Who takes part is
+  Front's choice (`wfe discussion join`).
 - Work that takes more than a turn is your project's ordinary workflow
   (a delegate node or a request), not this run: the conversation slot is
   shared. A run that entrusted work keeps waiting for it after it has
   spoken; presenting what came back is `--kind result`. A reply answers
-  your invitation (a progress note does not), and the facilitator may also
-  await your run's result (`wfe discussion await`): it is continued by your
-  result, or by your run ending without one.
+  your invitation (a progress note does not), and the conductor may also
+  await your run's result (`wfe discussion ask --run`): it is continued by
+  your result, or by your run ending without one. Nobody's "go" is needed
+  for your own work (argue p3 ex1: Front asked for one twice).
+- What you say about a run's work being integrated or "on main" names its
+  evidence: `wfe projects run <p> <wf>/<run> --integration` keeps the run's
+  records, the published branch and your local checkout apart (p3 ex1: a
+  stale local main gave "not on main" for integrated work).
 - A result reaches the discussion when its readers can open it from your
   message: the run view and file route (`wfe discussion show` prints each
   linked run's), as in a conversation. File names alone open nothing
