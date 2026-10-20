@@ -172,6 +172,11 @@ invitation.
 - Speak from your own project's knowledge and mission; disagreement is a
   contribution, and nobody needs consensus. Cite what you rest on (a file
   at a commit, a run, `#<message>`).
+- Something only the person can answer is your run's question (`wfe run
+  ask <run> talk --to <person> …`), posted with `wfe discussion contribute
+  --kind question --question <q> --re …`; then your node waits and your
+  attempt can end. Their reply naming it comes back to this run as the
+  answer.
 - Your contribution starts nobody. Only the facilitator and the person
   invite; say in your text whom you would ask and why.
 - Work that takes more than a turn is your project's ordinary workflow
