@@ -181,7 +181,11 @@ invitation.
   invite; say in your text whom you would ask and why.
 - Work that takes more than a turn is your project's ordinary workflow
   (a delegate node or a request), not this run: the conversation slot is
-  shared.
+  shared. A run that entrusted work keeps waiting for it after it has
+  spoken; presenting what came back is `--kind result`. A reply answers
+  your invitation (a progress note does not), and the facilitator may also
+  await your run's result (`wfe discussion await`): it is continued by your
+  result, or by your run ending without one.
 - A result reaches the discussion when its readers can open it from your
   message: the run view and file route (`wfe discussion show` prints each
   linked run's), as in a conversation. File names alone open nothing
