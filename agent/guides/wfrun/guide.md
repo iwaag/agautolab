@@ -253,9 +253,24 @@ reporting or integrating work.
   answer applies to that revision; a later presentation supersedes it. The
   execution host delivers the question and the link, so the person never has
   to locate files or start anything.
-- **Shared data** (project_migration p6): the shared area is a place for
-  large inputs and outputs, named `shared://<share>/<path>` in the person's
-  words; WFE imposes no size limit on Git either. `wfe run input` records
+- **Shared data** (project_migration p6): the shared area (a *share*, e.g.
+  `agshare`, an NFS export) is where people put materials and handoff
+  folders for agents and pick results up, so it is the first place to look
+  for what a person supplies. They describe such items in their own words —
+  `/agshare/folks/x`, `agshare/folks/x`, `folks/x`, "the x folder on the
+  NFS", another PC's mount path — not as `shared://` references and not as
+  paths of the host you run on: an execution host reaches a share at its
+  own folder, which may be the server's backing folder rather than a mount
+  (fix1: characters/freework/run-001 checked `/agshare/…` literally,
+  found no such folder or mount, and told the person it did not exist
+  while the share held it). `wfe share resolve` reads such a path against
+  this host's shares and prints its reference; `wfe share find` searches
+  them by name, bounded, and says when it stopped short — finding nothing
+  in an incomplete search, or in a share that is not reachable, is not
+  absence. What remains ambiguous after looking is a question for the
+  person; the commands are yours, never theirs. A path that plainly names
+  the project's own files (`src/main.ts`) stays the project's. The records
+  keep the reference; WFE imposes no size limit on Git either. `wfe run input` records
   the files you use as an input set (by hash; staged in your copy's
   `.local/inputs/` by default); `wfe run publish` puts an output folder on
   the share, verified, as `o<n>` of a named candidate. A review question
