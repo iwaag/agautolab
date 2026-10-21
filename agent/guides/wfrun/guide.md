@@ -200,6 +200,14 @@ invitation.
   linked run's), as in a conversation. File names alone open nothing
   (p16 step 6: forge/discuss/run-004 #151, #152 named the grid overlay's
   files without a link).
+- Readers see the workflows of a turn beside its speech, at the version
+  the turn had (argue p4 ex3): a definition you save or create, a run you
+  revise, request or delegate is recorded there by that command. A
+  workflow you consult as material is recorded only when you attach it
+  (`wfe discussion workflow attach`, with the nodes you mean and the
+  messages it belongs to); its name in your text is not a reference.
+  `wfe discussion workflow list` shows what your turn has recorded, and
+  `contribute --workflow <record>` shows a record with the message about it.
 
 ### The steps the person expects to see
 
