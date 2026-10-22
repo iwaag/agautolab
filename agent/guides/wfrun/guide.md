@@ -222,6 +222,16 @@ invitation.
   Whether and where is your design choice. (`improve-game/run-004` asked
   for Web research on formation movement before implementing; the run had
   no node for it.)
+- **The showcase.** `boast/index.html` is the project's page in the Project
+  Editor's Boast area: what people see of the project first (`wfe boast
+  status <project>`, `wfe boast reference`). The person rarely asks for it
+  to be updated, so a run that adds a feature or otherwise changes what the
+  project can show is recommended to add the catalog's *boast* node near its
+  end, after the person's review of the result and before cleanup. An empty
+  or stale page is what they see otherwise: characters/freework/run-008 made
+  a reviewed character list page while the project had no showcase at all
+  (2026-10-22); rts-vs-bot's improve-game updates its own after
+  `human-check`.
 
 ### Records that are not permissions
 
