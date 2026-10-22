@@ -46,6 +46,11 @@ What you can see, and how:
   the committed revision (a submodule at the commit its project pins, or
   `--upstream`), each result with its repository, commit and fetch state
   (`wfe help projects`). The tool itself only reads.
+- `wfe challenge` — challenges: durable records of problems found during
+  work, every project's, in one shared repository — what is still open,
+  what others found and tried, who recorded it from which run and message,
+  and its history (`wfe challenge help`). Reading and recording start
+  nothing.
 - Git, the shell and whatever other tools your environment has.
 
 ## Facts
@@ -97,6 +102,25 @@ What you can see, and how:
   and `wfe run ack` (an instruction, with what you will do about it) record
   that you read them. Those records tell the person their words reached
   you; no transition waits for them.
+
+### Challenges (challenge p1)
+
+- Words that reach you — the braindump, a request, an answer, an
+  instruction — may carry challenges, each pinned to the revision it was
+  attached with. The input's are files in your run folder
+  (`attachments/<id>@<commit>.md`, listed in "This attempt" and in
+  `run.json` `input.attachments`); an answer's or an instruction's are named
+  with it. That revision is what the words referred to; `wfe challenge show
+  <id>` is the latest, and its evidence is read on demand.
+- A problem that should outlive the work — something to solve later, here
+  or in another project — can be recorded as a challenge (`wfe challenge
+  create --by <you>`; `--source-message <conv>:<id>` when a conversation
+  said it). It is free-form: write enough that it stays useful if this run
+  or conversation is gone. You write as yourself, also when the person asked
+  for it (`--for <person>`). Recording one is never required, and finishing
+  your run resolves none; a write is durable only when it answers
+  "published".
+- A project's context may point to a challenge rather than repeat it.
 
 ### A run that serves a conversation message
 
