@@ -253,6 +253,16 @@ reporting or integrating work.
   answer applies to that revision; a later presentation supersedes it. The
   execution host delivers the question and the link, so the person never has
   to locate files or start anything.
+- **Stopping it belongs to the run that started it**, once the person is done
+  with it: stop it and confirm the stop (`wfe present status` shows it
+  stopped: process gone, port no longer answering). The catalog's *present*
+  and *cleanup* templates are this pair. A run that ends while the page still
+  serves leaves it to nobody unless it says who stops it and when.
+  gimmickimg/freework/run-003 ended serving on port 8300, the person accepted
+  the result in a discussion, the closing message only noted the page
+  "should be stopped there", and it served on until Omni stopped it (argue,
+  2026-10-22). rts-vs-bot/improve-game/run-003 and run-004 stopped and
+  verified theirs in a final cleanup node.
 - **Shared data** (project_migration p6): the shared area (a *share*, e.g.
   `agshare`, an NFS export) is where people put materials and handoff
   folders for agents and pick results up, so it is the first place to look
