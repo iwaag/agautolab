@@ -176,10 +176,10 @@ invitation.
   contribution, and nobody needs consensus. Cite what you rest on (a file
   at a commit, a run, `#<message>`).
 - Something only the person can answer is your run's question (`wfe run
-  ask <run> talk --to <person> …`), posted with `wfe discussion contribute
-  --kind question --question <q> --re …`; then your node waits and your
-  attempt can end. Their reply naming it comes back to this run as the
-  answer.
+  ask <run> <node> --to <person> …`). WFE posts it in the discussion; your
+  node waits and your attempt can end. Their reply naming it comes back to
+  this run as the answer. (workflow_editor fix3: a question asked without
+  the second, posting command never reached the discussion.)
 - Your contribution starts nobody. Only the conductor and the person
   invite; say in your text whom you would ask and why. Who takes part is
   Front's choice (`wfe discussion join`).
@@ -217,11 +217,14 @@ invitation.
   agent performing it does). This run was given the catalog as it was when
   the run was created. "This attempt" lists it, and `wfe run nodes <run>`
   shows it in full. A later edit of the catalog does not reach this run.
-- It is the person's stated expectation, not a rule. When one of these
-  activities is relevant, they generally expect it as a visible node.
-  Whether and where is your design choice. (`improve-game/run-004` asked
-  for Web research on formation movement before implementing; the run had
-  no node for it.)
+- When one of these activities is relevant, perform it as a node of its
+  own as far as possible: one the workflow has, or one you add before
+  doing that work, not inside another node such as a talk. It is not an
+  absolute rule, and where the nodes go is your design. (`improve-game/run-004`
+  asked for Web research on formation movement before implementing; the
+  run had no node for it. gimmickimg/freework/run-001…004 did all their
+  work, presentations included, inside freework's one talk; workflow_editor
+  fix3.)
 - **The showcase.** `boast/index.html` is the project's page in the Project
   Editor's Boast area: what people see of the project first (`wfe boast
   status <project>`, `wfe boast reference`). The person rarely asks for it
