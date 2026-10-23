@@ -47,10 +47,11 @@ What you can see, and how:
   `--upstream`), each result with its repository, commit and fetch state
   (`wfe help projects`). The tool itself only reads.
 - `wfe challenge` — challenges: durable records of problems found during
-  work, every project's, in one shared repository — what is still open,
-  what others found and tried, who recorded it from which run and message,
-  and its history (`wfe challenge help`). Reading and recording start
-  nothing.
+  work, every project's, in one shared repository, each a directory with
+  its statement, source material and the trials people and agents made on
+  it — what is still open, what others tried and learned, who wrote what
+  from which run and message, and its history (`wfe challenge help`).
+  Reading and recording start nothing.
 - Git, the shell and whatever other tools your environment has.
 
 ## Facts
@@ -103,23 +104,39 @@ What you can see, and how:
   that you read them. Those records tell the person their words reached
   you; no transition waits for them.
 
-### Challenges (challenge p1)
+### Challenges (challenge p1, p3)
 
 - Words that reach you — the braindump, a request, an answer, an
   instruction — may carry challenges, each pinned to the revision it was
   attached with. The input's are files in your run folder
-  (`attachments/<id>@<commit>.md`, listed in "This attempt" and in
-  `run.json` `input.attachments`); an answer's or an instruction's are named
-  with it. That revision is what the words referred to; `wfe challenge show
-  <id>` is the latest, and its evidence is read on demand.
+  (`attachments/<id>@<commit>.md`: the summary as it was, listed in "This
+  attempt" and in `run.json` `input.attachments`); an answer's or an
+  instruction's are named with it. That revision is what the words referred
+  to: `wfe challenge show <id> --at <commit>` reads its files and trials as
+  they were then, `wfe challenge show <id>` the latest.
+- A challenge is a directory, `challenges/<id>/`: an optional `summary.md`
+  (title, state, projects, free body), its source material, and
+  `wedo/<trial>/` — one directory per trial, named and filled by whoever did
+  the work. A trial can be an idea, a failed experiment, a partial or a
+  better solution; its evidence and results belong inside it, and shared
+  input is linked (`../../voice.wav`) rather than copied. Its `summary.md` is
+  optional and has no required headings; what was tried, what was learned,
+  which files show it and what is still open often help the next reader.
+- `wfe challenge publish <id> --trial <name> <dir|file>…` records work as
+  one commit, from where you run it (on any execution node). A new trial,
+  or a new file, needs no base; replacing a file names the revision you read
+  (`--base`). Recording work changes no state — a resolved or withdrawn
+  challenge still takes trials, and an unsuccessful one reopens nothing.
 - A problem that should outlive the work — something to solve later, here
   or in another project — can be recorded as a challenge (`wfe challenge
   create --by <you>`; `--source-message <conv>:<id>` when a conversation
-  said it). It is free-form: write enough that it stays useful if this run
-  or conversation is gone. You write as yourself, also when the person asked
-  for it (`--for <person>`). Recording one is never required, and finishing
-  your run resolves none; a write is durable only when it answers
-  "published".
+  said it; `--add` puts source material beside it). It is free-form: write
+  enough that it stays useful if this run or conversation is gone.
+- You write as yourself, also when the person asked for it (`--for
+  <person>`). Recording is never required, finishing your run resolves
+  nothing, and the states (`open`, `resolved`, `withdrawn`, or a project's
+  own) are changed by someone deciding to. A write is durable only when it
+  answers "published".
 - A project's context may point to a challenge rather than repeat it.
 
 ### A run that speaks in a conversation
