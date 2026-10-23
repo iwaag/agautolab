@@ -122,116 +122,96 @@ What you can see, and how:
   "published".
 - A project's context may point to a challenge rather than repeat it.
 
-### A run that serves a conversation message
+### A run that speaks in a conversation
 
-A conversational workflow's run (`front/converse`, `forge/converse`,
-`archsage/converse`, …) serves one message of a person's conversation with
-its project. Its braindump is that message, verbatim, and its
-`input.source` names the conversation. Other messages of the same
-conversation have runs of their own, and several may be open at once
-(workflow_editor docs/conversations.md; `wfe conversation help`).
+A conversation (workflow_editor docs/conversations.md; `wfe conversation
+help`; `wfe conversation` is the same command) is a person talking with
+project agents: one project, several, or a room the conductor (ponderer)
+leads. Each agent speaks through runs of its own project, with its own guide
+and context. Your run was started by one **request**: its words are your
+braindump, `input.source` names the conversation and the request, and the
+workflow you run in was chosen for it — your `converse` workflow when your
+project is the only one and nobody leads, your `discuss` workflow among
+several or with a conductor. Other messages have requests and runs of their
+own; several may be open at once.
 
-- `wfe conversation show` (its own conversation by default) lists every
-  message with the run that wrote each reply and what it answers, what each
-  message was linked to, the linked runs as their records say now, and the
-  questions still waiting for the person.
-- The person reads you only in the conversation:
-  `wfe conversation reply`. A reply names the messages it answers (`--re`):
-  several pieces of work may be open, and recency says nothing about which
-  one a reply is about. Begin with the answer itself (seen live twice in the
-  old Front Desk).
-- A question your run asks (`wfe run ask`) reaches the person only when it
-  is in the conversation too: `wfe conversation reply --kind question
-  --question <q> --re <message>`. Their next message is then read as its
-  answer, and a later turn records it on your run (p8 trial b:
-  converse/run-002 asked its kit confirmation only in the run).
+- `wfe conversation show` (your own conversation by default) is the
+  conversation as it is: members and history, whether someone leads it,
+  every message with who said it and for which run, the requests and their
+  outcomes, linked runs as their records say now, and what is waiting for
+  the person. Your request's horizon is the newest message when you were
+  asked; later messages are marked and readable. Read the original speech
+  you answer, not a summary of it.
+- The person reads you only in the conversation: `wfe conversation reply
+  --re <msg>…` (the same as `contribute`). Name what you answer: several
+  pieces of work may be open, and recency says nothing about which one a
+  reply is about. Begin with the answer itself (seen live twice in the old
+  Front Desk). A reply (or result) answers your request; one is enough, and
+  a run that ends without one is recorded as unanswered. `--completing
+  <node>` completes your node with the message in the same command (p3:
+  rts-vs-bot/discuss/run-001 and run-004 spoke, left their node running and
+  were held interrupted).
+- Something only the person can answer is your run's question (`wfe run
+  ask <run> <node> --to <person> …`). WFE posts it in the conversation;
+  your node waits and your attempt can end. Their reply naming it comes back
+  to this run as the answer. (workflow_editor fix3: a question asked without
+  the posting never reached the discussion; p8 trial b: converse/run-002
+  asked its kit confirmation only in the run.) There is no other way to ask.
 - A delegate node's child may ask something only the person can answer.
-  Taking the fact up sets your delegate node running again, and it waits
-  again only when you answer the child or ask your own question from it:
-  `wfe run ask <your run> <delegate node> --to <person> …`, posted in the
-  conversation as above. The person's answer, recorded by a later turn
-  (`wfe run answer <your run> <q> --from <person> --source-message …`),
-  resumes your node, and you pass it on with `wfe delegate answer`. A
-  question relayed only as conversation text leaves the node running when
-  your attempt ends, and the run is held as interrupted (p15:
+  Taking the fact up sets your delegate node running again; ask your own
+  question from it (`wfe run ask <your run> <delegate node> --to <person>
+  …`), and pass their answer on with `wfe delegate answer`. A question
+  relayed only as conversation text leaves the node running when your
+  attempt ends, and the run is held as interrupted (p15:
   forge/converse/run-002).
-- The person's words for work already under way — a change, an answer, a
-  further instruction for a run an earlier turn started, its delegated
-  child included — go to that run as theirs: `wfe run instruct <run>
-  --workspace <project> --from <person> --source-message <conv>:<id>` (or
-  `wfe run answer … --source-message` for its question). That run's record
-  then names the person and the message. Relayed through `wfe delegate
-  instruct` from a later turn, the words arrive as yours, with the message
-  only in the text (p15: forge/converse/run-005 → provide/run-011).
+- The person's later words for work already under way — a change, an
+  answer, a further instruction for a run an earlier request started, its
+  delegated child included — reach that run as theirs. They may name the
+  run themselves (WFE delivers it); when they did not and you read them so,
+  carry them: `wfe run instruct <run> --workspace <project> --from <person>
+  --source-message <conv>:<id>` (or `wfe run answer … --source-message`).
+  That run's record then names the person and the message. Relayed through
+  `wfe delegate instruct` from a later turn, the words arrive as yours, with
+  the message only in the text (p15: forge/converse/run-005 →
+  provide/run-011).
 - What a message is to a run (new work, a follow-up, a correction, a steer,
   an answer, …) is your reading. `wfe conversation link` records it for the
   next turn and the person; a later reading supersedes an earlier one, and
   neither rewrites the message.
-- A result is delivered when the person can open it from the reply: the run
-  view, a serving review page, or a run file at
-  `<WFE origin>/wfe/api/projects/<project>/runs/<wf>/<run>/raw?path=<path in
-  the run folder>` (images and sound play as they are; `wfe conversation
-  show` prints each linked run's file route). A review page stopped before
-  they looked leaves them nothing to open (p8 trial b).
-
-### A run that speaks in a discussion
-
-A discussion (workflow_editor p16, argue p4, docs/discussions.md; `wfe
-discussion help`) is one shared conversation of a person, the conductor
-(ponderer, whose run owns the discussion's progression) and project agents. Each speaks through runs of its own project, with its own
-guide and context. Your run was started by one **invitation**: its question
-is your braindump, and `input.source` names the discussion and the
-invitation.
-
-- `wfe discussion show` (your own discussion by default) is the discussion
-  as it is: members, every message with who said it and for which run, the
-  invitations and their outcomes, and what is waiting for the person. Your
-  invitation's horizon is the newest message when you were invited; later
-  messages are marked and readable. Read the original speech you answer,
-  not a summary of it.
-- You speak with `wfe discussion contribute --re <msg>…`: the message is
-  your run's, your participant's and your invitation's. Name what you
-  answer. A reply (or result) answers your invitation; one is enough, and a
-  run that ends without one is recorded as unanswered. `--completing
-  <node>` completes your node with the message in the same command (p3:
-  rts-vs-bot/discuss/run-001 and run-004 spoke, left their node running and
-  were held interrupted).
-- Speak from your own project's knowledge and mission; disagreement is a
-  contribution, and nobody needs consensus. Cite what you rest on (a file
-  at a commit, a run, `#<message>`).
-- Something only the person can answer is your run's question (`wfe run
-  ask <run> <node> --to <person> …`). WFE posts it in the discussion; your
-  node waits and your attempt can end. Their reply naming it comes back to
-  this run as the answer. (workflow_editor fix3: a question asked without
-  the second, posting command never reached the discussion.)
-- Your contribution starts nobody. Only the conductor and the person
-  invite; say in your text whom you would ask and why. Who takes part is
-  Front's choice (`wfe discussion join`).
-- Work that takes more than a turn is your project's ordinary workflow
-  (a delegate node or a request), not this run: the conversation slot is
+- Among several, speak from your own project's knowledge and mission;
+  disagreement is a contribution, and nobody needs consensus. Cite what you
+  rest on (a file at a commit, a run, `#<message>`).
+- Your contribution starts nobody. Only the conductor and the person ask
+  others; say in your text whom you would ask and why. Who takes part is the
+  person's and Front's choice (`wfe conversation join`).
+- Work that takes more than a turn is your project's ordinary workflow (a
+  delegate node or a request), not this run: the conversation slot is
   shared. A run that entrusted work keeps waiting for it after it has
-  spoken; presenting what came back is `--kind result`. A reply answers
-  your invitation (a progress note does not), and the conductor may also
-  await your run's result (`wfe discussion ask --run`): it is continued by
-  your result, or by your run ending without one. Nobody's "go" is needed
-  for your own work (argue p3 ex1: Front asked for one twice).
+  spoken; presenting what came back is `--kind result`. A reply answers your
+  request (a progress note does not), and the conductor may also await your
+  run's result (`wfe conversation ask --run`): it is continued by your
+  result, or by your run ending without one. Nobody's "go" is needed for
+  your own work (argue p3 ex1: Front asked for one twice).
 - What you say about a run's work being integrated or "on main" names its
   evidence: `wfe projects run <p> <wf>/<run> --integration` keeps the run's
   records, the published branch and your local checkout apart (p3 ex1: a
   stale local main gave "not on main" for integrated work).
-- A result reaches the discussion when its readers can open it from your
-  message: the run view and file route (`wfe discussion show` prints each
-  linked run's), as in a conversation. File names alone open nothing
-  (p16 step 6: forge/discuss/run-004 #151, #152 named the grid overlay's
-  files without a link).
-- Readers see the workflows of a turn beside its speech, at the version
-  the turn had (argue p4 ex3): a definition you save or create, a run you
-  revise, request or delegate is recorded there by that command. A
-  workflow you consult as material is recorded only when you attach it
-  (`wfe discussion workflow attach`, with the nodes you mean and the
-  messages it belongs to); its name in your text is not a reference.
-  `wfe discussion workflow list` shows what your turn has recorded, and
-  `contribute --workflow <record>` shows a record with the message about it.
+- A result is delivered when the person can open it from your message: the
+  run view, a serving review page, or a run file at `<WFE
+  origin>/wfe/api/projects/<project>/runs/<wf>/<run>/raw?path=<path in the
+  run folder>` (images and sound play as they are; `wfe conversation show`
+  prints each linked run's file route). File names alone open nothing (p16
+  step 6: forge/discuss/run-004 #151, #152 named the grid overlay's files
+  without a link). A review page stopped before they looked leaves them
+  nothing to open (p8 trial b).
+- Readers see the workflows of a turn beside its speech, at the version the
+  turn had (argue p4 ex3): a definition you save or create, a run you revise,
+  request or delegate is recorded there by that command. A workflow you
+  consult as material is recorded only when you attach it (`wfe conversation
+  workflow attach`, with the nodes you mean and the messages it belongs to);
+  its name in your text is not a reference. `wfe conversation workflow list`
+  shows what your turn has recorded, and `reply --workflow <record>` shows a
+  record with the message about it.
 
 ### The steps the person expects to see
 
