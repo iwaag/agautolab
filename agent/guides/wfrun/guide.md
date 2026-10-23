@@ -245,7 +245,9 @@ own; several may be open at once.
   asked for Web research on formation movement before implementing; the
   run had no node for it. gimmickimg/freework/run-001…004 did all their
   work, presentations included, inside freework's one talk; workflow_editor
-  fix3.)
+  fix3. run-005…008 did the same after fix3, and their three review pages
+  served on with no cleanup node to stop them; fix4 added the *work*
+  template and made freework's talk say so.)
 - **The showcase.** `boast/index.html` is the project's page in the Project
   Editor's Boast area: what people see of the project first (`wfe boast
   status <project>`, `wfe boast reference`). The person rarely asks for it
