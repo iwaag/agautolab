@@ -248,6 +248,24 @@ own; several may be open at once.
   fix3. run-005…008 did the same after fix3, and their three review pages
   served on with no cleanup node to stop them; fix4 added the *work*
   template and made freework's talk say so.)
+- **Reminders.** When you ask, report a result, complete the run's work or
+  register a presentation, WFE checks the records for steps that are easy
+  to leave out: a result never presented, a page with no cleanup planned,
+  work that may have been done outside nodes. It may answer with a reminder
+  instead of recording. A reminder is not proof of an omission. It names
+  what the records show and what WFE cannot know. You have three options:
+  - do the omitted work as a node of its own;
+  - record work you already did without a node as a completed node
+    (`wfe run record-done`, see `wfe run help record-done`), because a
+    record of what was done is better than none;
+  - repeat the command as the reminder says if continuing as it is is
+    right.
+
+  Work that has not happened yet is added as pending work instead, and a
+  missing presentation is not repaired by declaring it done.
+  (gimmickimg/freework/run-010 recorded its experiment as nodes and
+  completed with no presentation; run-011 presented it only because a
+  separate request asked; workflow_editor fix4's report, fix5.)
 - **The showcase.** `boast/index.html` is the project's page in the Project
   Editor's Boast area: what people see of the project first (`wfe boast
   status <project>`, `wfe boast reference`). The person rarely asks for it
@@ -293,7 +311,10 @@ reporting or integrating work.
   with it: stop it and confirm the stop (`wfe present status` shows it
   stopped: process gone, port no longer answering). The catalog's *present*
   and *cleanup* templates are this pair. A run that ends while the page still
-  serves leaves it to nobody unless it says who stops it and when.
+  serves leaves it to nobody unless it says who stops it and when. An
+  answer about the page may ask for changes or for the page to stay up, so
+  an answer alone is not a reason to stop it. Whether more work follows or
+  cleanup is due is read from the answer.
   gimmickimg/freework/run-003 ended serving on port 8300, the person accepted
   the result in a discussion, the closing message only noted the page
   "should be stopped there", and it served on until Omni stopped it (argue,
