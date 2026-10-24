@@ -324,6 +324,28 @@ reporting or integrating work.
   "should be stopped there", and it served on until Omni stopped it (argue,
   2026-10-22). rts-vs-bot/improve-game/run-003 and run-004 stopped and
   verified theirs in a final cleanup node.
+- **A human review** (workflow_editor p17) is the person's review of
+  finished work, a node of its own (`type: review`; the catalog's
+  *human-review* template, or `ponder --next review:<node>`). Your work ends
+  where it begins: after your own review (stopping pages you started
+  included), `wfe review prepare` hands the result to the person with a
+  summary of what was done and what to check, and the presentations to look
+  at, frozen as they are now (yours, or a delegated child's: `--subject
+  d1`). End the attempt then; nothing waits in a process. The person starts
+  it with one button whenever they come back: WFE serves every page again,
+  records their approval or requested changes, and stops what it started.
+  Your own judgement of a result is yours (`dispose satisfied`), never
+  their review; `wfe review help` says the rest. (fix6 trial A:
+  ponderer/conduct/run-037 accepted misc/freework/run-007 itself and asked
+  it to stop its page 23 s after it presented; the person never saw it.)
+- **Changes the person requested** in a review come back as a
+  continuation: "This attempt" gives their words. Your run stays open until
+  you append work for them — your own work node, or the same child again
+  (`wfe delegate revise --follow-up <rv>` reopens a result you had judged
+  satisfied) — and a new review node with the corrected presentations, or
+  say why nothing changes (`wfe review take-up --no-change`). The pages the
+  review left serving are yours: keep one to compare, or stop it (`wfe
+  review cleanup`).
 - **Shared data** (project_migration p6): the shared area (a *share*, e.g.
   `agshare`, an NFS export) is where people put materials and handoff
   folders for agents and pick results up, so it is the first place to look
