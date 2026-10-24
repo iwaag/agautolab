@@ -40,7 +40,8 @@ What you can see, and how:
   it; `wfe nodes help` — how a template becomes a node in a draft of the
   run's definition;
 - `wfe delegate` — a delegate node's child run: what it asked and delivered,
-  your answers, your judgement of its result (`wfe delegate help`).
+  the assessment of its result, your answers, your judgement of its result
+  and returning it to the same child for correction (`wfe delegate help`).
 - `wfe projects` — every other managed project, read where it lives: its
   definition, workflows, files, study and wedo, runs and their records, at
   the committed revision (a submodule at the commit its project pins, or
@@ -253,7 +254,10 @@ own; several may be open at once.
   to leave out: a result never presented, a page with no cleanup planned,
   work that may have been done outside nodes. It may answer with a reminder
   instead of recording. A reminder is not proof of an omission. It names
-  what the records show and what WFE cannot know. You have three options:
+  what the records show and what WFE cannot know, and its last line repeats
+  each reminder's omission and repair in short (misc/freework/run-003 and
+  run-004 read only the tail of the earlier wording; workflow_editor fix6).
+  You have three options:
   - do the omitted work as a node of its own;
   - record work you already did without a node as a completed node
     (`wfe run record-done`, see `wfe run help record-done`), because a
@@ -405,13 +409,38 @@ reporting or integrating work.
   dispose`: satisfied, rejected, abandoned) as yourself; `wfe delegate file`
   reads what a question presents and compares its bytes with the recorded
   hash. Asking your person is available when you want their view.
+- The child presents to you, and you relay to your person: its page's link
+  and their own answer (`--because`), not your judgement as theirs.
+- A result that comes back is assessed where you receive it ("This
+  attempt", the take-up, `wfe delegate show`): what the child's records show
+  as of that result beside what its catalog expects — whether what it
+  produced was presented, whether your person's own answer about it is
+  traceable when they accept it (`accepts: person`), whether a page of it
+  still serves — and what is unknown. Judging it satisfied and reporting it
+  (a result or synthesis post, the completion of your run) get the same
+  checks as reminders, so the omission is in front of you before the person
+  hears of the result. (misc/freework/run-001…004 completed with no
+  presentation, and ponderer/conduct/run-031…035 judged each satisfied
+  within seconds — run-035 with an 8.4 MB video nobody had seen;
+  workflow_editor fix6.)
+- What the child left out is the child's to add: `wfe delegate revise`
+  returns its result to the same child with what to add, and its next
+  completion comes back as a new result. Replacing it is a new child
+  (`dispose rejected`, then `--replaces`).
 - A failed, cancelled or rejected child is not replaced by itself: you can
   wait for it, abandon it and dispatch a replacement that names it
   (`--replaces`), complete or fail your node, or ask. Holding or cancelling
   your run never cancels the child; `wfe delegate cancel` does.
 - When your own run was requested by another run's agent, "This attempt"
   says so; that agent is your requester, and `--to <requester>` reaches it
-  through the request topic.
+  through the request topic. It acts for a person "This attempt" names,
+  and relays what you present to them: a report of file paths to the agent
+  is not a presentation to the person (misc/freework/run-001…004, fix6).
+- When the requesting run returns your completed result for correction,
+  your run is open again and "This attempt" says what to add and why
+  (`wfe run correction`). Add the missing work as nodes of their own and
+  perform it; completed work stays and is not repeated. If nothing needs to
+  change, say why with `wfe run correction <run> <c> --no-change`.
 
 ### Recording, Git and publication
 
