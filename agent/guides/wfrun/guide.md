@@ -202,6 +202,12 @@ own; several may be open at once.
 - Your contribution starts nobody. Only the conductor and the person ask
   others; say in your text whom you would ask and why. Who takes part is the
   person's and Front's choice (`wfe conversation join`).
+- A room the conductor leads has one conductor run for the room's whole
+  life. It rests between turns and the room's words wake it (workflow_editor
+  p18). Your run is the work you were asked for: it keeps its own records
+  and completes when that work is done, whatever the room does. A closed
+  room or a resting conductor decides nothing about your result; accepted,
+  integrated and cancelled are records of their own.
 - Work that takes more than a turn is your project's ordinary workflow (a
   delegate node or a request), not this run: the conversation slot is
   shared. A run that entrusted work keeps waiting for it after it has
