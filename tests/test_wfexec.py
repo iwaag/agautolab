@@ -417,7 +417,7 @@ PROMPT_STUB = textwrap.dedent('''
 
 def test_workflow_settings_choose_profile_guides_and_identity(area, monkeypatch):
     import hashlib
-    from agautolab.wfexec import GUIDE
+    from agautolab.wfexec import GUIDE, execution_contract
     project = area["project"]
     (project / "agent").mkdir()
     (project / "agent" / "g.md").write_text("# guide-agent\nProject fact: decks are blue.\n")
@@ -438,8 +438,9 @@ def test_workflow_settings_choose_profile_guides_and_identity(area, monkeypatch)
     until(ex, "finished")
     assert asked == ["stub"], "launched with the workflow's profile"
     prompt = out.read_text()
-    contract = GUIDE.read_text()
-    assert prompt.startswith(contract.rstrip()), "the common contract comes first"
+    contract = execution_contract()
+    assert prompt.startswith("# This request\n\nAsk me."), "the actual request comes first"
+    assert contract.rstrip() in prompt
     # workflow_editor p13: the claim's scoped context follows the contract, once.
     head = "## Workflow default — guide agent/g.md (agent/g.md)\n\n# guide-agent\nProject fact: decks are blue."
     assert head in prompt and prompt.count("Project fact: decks are blue.") == 1
@@ -605,7 +606,7 @@ def answer(a, ref: str, receipt: str) -> None:
 
 
 def test_run_policy_resumes_one_explicit_session_across_a_wait(sessions, monkeypatch):
-    from agautolab.wfexec import GUIDE
+    from agautolab.wfexec import GUIDE, execution_contract
     ref = request(sessions, "keep", "pytest-sess-0001", monkeypatch)
     ex = session_executor(sessions)
     assert ex.tick() == "launched"
@@ -625,7 +626,8 @@ def test_run_policy_resumes_one_explicit_session_across_a_wait(sessions, monkeyp
     assert second["settings"]["session"] == {"policy": "run", "mode": "resume", "id": sid}
     p = prompts(sessions)
     assert [x["mode"] for x in p] == ["new", "resume"] and p[0]["sid"] == p[1]["sid"] == sid
-    assert p[0]["prompt"].startswith(GUIDE.read_text().rstrip()), "a new session gets the whole bootstrap"
+    assert p[0]["prompt"].startswith("# This request"), "a new session gets the request first"
+    assert execution_contract().rstrip() in p[0]["prompt"]
     assert p[1]["prompt"].startswith(f"# This attempt: {second['attempt']}"), "a resumed one the continuation"
     assert GUIDE.read_text().strip()[:200] not in p[1]["prompt"] and "Fact one." not in p[1]["prompt"], "contract and guides are not appended again"
     assert "earlier attempt id in this conversation is ended" in p[1]["prompt"]

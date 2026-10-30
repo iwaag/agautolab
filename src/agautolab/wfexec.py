@@ -13,7 +13,7 @@ slot, one agent process at a time.
   run's own working copy (``cwd`` of the claim; workflow_editor p9: each run
   has its own copy of the project, on its own branches) in a process group of its own, with the workflow's
   profile, ``WFE_ATTEMPT`` set so its ``wfe run`` reports carry the attempt
-  id, and a prompt composed of the common contract, the run's scoped context
+  id, and a prompt composed of the request and delivery route, the common contract, the run's scoped context
   (workflow_editor p13: the snapshot the claim prepared) and the run's brief
   (workflow_editor p6). The executing agent is whoever the
   workflow names; autolab is the host that launches and publishes it.
@@ -120,9 +120,43 @@ from agag.harness import SESSION_HARNESSES, Session, build_argv, session_stored,
 from agautolab.instance import AGAUTOLAB_ROOT, SPEC
 
 ROLE = "wfrun"
-# The common workflow contract every run's prompt starts with; the run's
-# scoped context (from the claim) and the run's brief follow it.
+# The short common contract follows the request; scoped context and the brief follow it.
 GUIDE = AGAUTOLAB_ROOT / "agent" / "guides" / "wfrun" / "guide.md"
+
+def execution_contract() -> str:
+    """Keep references readable from any run cwd and fingerprint their contents.
+
+    The manifest makes a reference edit invalidate an old session contract too.
+    Only paths and hashes, not the reference bodies, enter the initial prompt.
+    """
+    directory = GUIDE.parent.resolve()
+    notes = sorted((directory / "reference").glob("*.md"))
+    manifest = "\n".join(f"- {p.relative_to(directory)}: {hashlib.sha256(p.read_bytes()).hexdigest()}" for p in notes)
+    return GUIDE.read_text().rstrip() + f"\n\nGuide directory: {directory}\nRead relative guide links from this directory using the shell.\nReference revision hashes (for session identity):\n{manifest}\n"
+
+
+def request_intro(claim: dict) -> str:
+    """Read the fixed input from the claimed copy; never guess a room route."""
+    if not claim.get("cwd") or not claim.get("ref"):
+        return ""
+    ref = claim["ref"]
+    folder = Path(claim["cwd"]) / "devdocs" / "runs" / ref["workflow"] / ref["run"]
+    record = json.loads((folder / "run.json").read_text())
+    given = record["input"]
+    source = given.get("source") or {}
+    path = (folder / given["file"]).resolve()
+    if not path.is_relative_to(folder.resolve()):
+        raise ValueError("run input leaves its run folder")
+    text = path.read_text()
+    if given.get("kind") == "request":
+        destination = "The requesting agent receives your run's recorded outcome and artifacts and relays them to the person. The brief below identifies that requester."
+    elif source.get("kind") == "conversation":
+        destination = f"Conversation {source['conversation']}, message #{source['message']}. Read it with wfe conversation show; reply using wfe conversation reply --re {source['message']} (see reference/delivery.md)."
+    else:
+        destination = "The run view exposes outcomes and attached files; any request-topic coordination is delivered by WFE. Put the answer in the outcome or attach its body with --artifact when completing the node."
+    return f"# This request\n\n{text}\n\n# Delivery\n\n{destination}\nYour final session text is only an execution log, not the delivered answer.\n"
+
+
 CONTRACT_NAME = "wfrun/guide.md"
 SETTINGS = AGAUTOLAB_ROOT / ".local" / "wfexec.toml"
 TERM_GRACE_SECONDS = 20
@@ -364,7 +398,7 @@ class Executor:
         return session_stored(agent, session_id)
 
     def prompt(self, claim: dict, contract: str | None = None) -> str:
-        """A new session: the common contract, then the scoped context the
+        """A new session: the request, common contract, then the scoped context the
         claim prepared (its snapshot's text), then the brief. A resumed session
         already holds the contract and context (the editor resumes only under
         the same configuration, context fingerprint included), so it gets the editor's compact continuation
@@ -385,7 +419,10 @@ class Executor:
                 "session gets them. Where they or the record differ from what you remember, they decide. Every earlier "
                 "attempt id in this conversation is ended, and processes you started in earlier attempts are gone.", "",
             ]
-        parts += [(contract if contract is not None else GUIDE.read_text()).rstrip()]
+        intro = request_intro(claim)
+        if intro:
+            parts += [intro, ""]
+        parts += [(contract if contract is not None else execution_contract()).rstrip()]
         # The scoped context the editor resolved and saved for this attempt
         # (workflow_editor p13): system, project and workflow defaults and
         # overrides, as the exact text of its snapshot.
@@ -421,7 +458,7 @@ class Executor:
         """The profiles this host can launch (name → backend label), the
         common contract with its hash, and which profiles keep explicit
         sessions ('' = the host's default profile), as offered at claim."""
-        contract = GUIDE.read_text()
+        contract = execution_contract()
         digest = hashlib.sha256(contract.encode()).hexdigest()
         if self.s.agent_command:
             names = _profile_names()

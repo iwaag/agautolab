@@ -21,8 +21,8 @@ copies, the `:8791` gateway window and the `autolab` CLI — was retired in
   on another PC, installed by the `wfe_worker` deployment profile, its `wfe`
   is the coordinator's client. Claims the next job of its node (`wfe exec
   claim`), launches the workflow's agent behind a launch gate with the common
-  contract (`agent/guides/wfrun/guide.md`), the run's scoped context and its
-  brief, reports how the process ended, carries out stops, and reconciles
+  request and delivery destination, the short common
+  contract (`agent/guides/wfrun/guide.md`), the run's scoped context and its brief, reports how the process ended, carries out stops, and reconciles
   vanished processes every minute. Sessions, launch ownership and every state
   rule are described in its module docstring; the rules themselves live in
   WFE.
@@ -73,3 +73,9 @@ skip when node or the package is unavailable.
 
 `devenv/gitea/` describes agstudio's Gitea, where WFE creates managed
 projects' repositories.
+
+## Execution guide
+
+The initial prompt includes the fixed request text and its delivery route before the common guide. Detailed operational notes live in `agent/guides/wfrun/reference/`; the prompt names their absolute directory on the execution host, so they can be read from any run copy. The offered contract includes their hashes: changing a note invalidates session reuse under the old contract. Ordinary continuations retain WFE's compact continuation prompt.
+
+The common guide and notes ship with this repository; deploy the whole checkout to every executor host. Project context and WFE's current-state brief are still supplied unchanged. Historical rationale for the replacement is recorded in the development episode `unslop_guides/p1`; it is not injected into agent prompts.
