@@ -8,3 +8,4 @@
 - Environment summaries have observation dates and coverage limits. Check facts that affect your decision; installation paths do not establish that a service is healthy now.
 
 - Challenge attachments are pinned to the revision the person supplied; read that revision before comparing with the latest. `wfe challenge help` explains attachments, trial publication and revision selection. A draft is durable only after publication succeeds.
+- Files a person's message carried (pasted images, documents) are named in your brief with their source message. Their bytes are on a share, not in the run's Git history; `wfe conversation help` (*Files*) describes listing and fetching them on this host, with the hash checked. A fetched image is local and can be opened like any other image file. A name in the brief is not its content.
