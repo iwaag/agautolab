@@ -708,8 +708,9 @@ class Executor:
             pass
         try:
             if sys.platform == "darwin":
-                total = int(subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True, timeout=2).stdout.strip() or 0)
-                vm = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=2).stdout
+                # launchd's PATH lacks /usr/sbin: name the tools by their place.
+                total = int(subprocess.run(["/usr/sbin/sysctl", "-n", "hw.memsize"], capture_output=True, text=True, timeout=2).stdout.strip() or 0)
+                vm = subprocess.run(["/usr/bin/vm_stat"], capture_output=True, text=True, timeout=2).stdout
                 page = int((vm.split("page size of")[1].split()[0]) if "page size of" in vm else 4096)
                 free = 0
                 for line in vm.splitlines():
