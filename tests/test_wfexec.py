@@ -1117,3 +1117,28 @@ def test_two_attempts_on_one_worker_are_tended_apart_and_both_adopted_after_a_re
         second.tick()
         time.sleep(0.2)
     assert not second.held()
+
+
+def test_the_keeper_does_not_reconcile_while_a_claim_is_being_prepared(tmp_path):
+    """improve_wfrun p4: the reconcile runs beside the ticks, and a remote claim that materializes a copy can
+    outlast the two minutes after which an unheld `launching` row is called lost."""
+    calls: list[tuple] = []
+    ex = Executor(Settings(wfe=["wfe"], lanes=["coordination"]), log=lambda m: None)
+
+    def fake(*args, **kw):
+        calls.append(args)
+        return {"notes": []}
+
+    ex.wfe = fake
+    ex.lanes["coordination"].claiming = time.monotonic()
+    ex.keep()
+    assert [c[1] for c in calls] == ["heartbeat"], "another lane's claim in progress holds the reconcile back too"
+    ex.lanes["coordination"].claiming = time.monotonic() - 10 * 3600
+    calls.clear()
+    ex.keep()
+    assert [c[1] for c in calls] == ["heartbeat", "reconcile"], "a stuck claim does not stop reconciliation for good"
+    ex.lanes["coordination"].claiming = None
+    ex.last_reconcile = 0
+    calls.clear()
+    ex.keep()
+    assert [c[1] for c in calls] == ["heartbeat", "reconcile"]

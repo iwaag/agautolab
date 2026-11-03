@@ -174,6 +174,7 @@ TERM_GRACE_SECONDS = 20
 # backgrounded `find /` still running, and the attempt held its slot).
 SESSION_END_GRACE_SECONDS = 30
 RECONCILE_SECONDS = 60
+CLAIM_PREPARE_SECONDS = 30 * 60
 POLL_SECONDS = 2.0
 # The lane every worker has (project_migration p8): its one slot of before.
 DEFAULT_LANE = "default"
@@ -361,6 +362,10 @@ class Executor:
         # In `serve`, the keeper thread reports and reconciles; a tick then
         # does neither (tests and --once tick without a keeper).
         self.keeper: threading.Thread | None = None
+        # While a claim is being prepared and launched its attempt is `launching`
+        # and not yet held; a remote worker's claim materializes a copy, which can
+        # outlast the two minutes after which a reconcile calls such a row lost.
+        self.claiming: float | None = None
         self._gpu: tuple[float, list[dict]] = (0.0, [])
         # The default lane's executor holds one executor per extra lane
         # (project_migration p8); each owns its attempts, their stops and ends.
@@ -688,7 +693,11 @@ class Executor:
             return f"executing {', '.join(ids)}" if ids else "idle"
         detail = "; ".join([doing(self), *(f"{lane}: {doing(ex)}" for lane, ex in self.lanes.items())])
         self.wfe("exec", "heartbeat", "--pid", str(os.getpid()), "--detail", detail, "--facts-json", json.dumps({"load": self.host_load()}))
-        if time.monotonic() - self.last_reconcile > RECONCILE_SECONDS:
+        # The keeper runs beside the ticks (p4): no reconcile judges a launch in
+        # progress. Bounded, so a stuck claim cannot stop reconciliation for good.
+        now = time.monotonic()
+        preparing = any(ex.claiming is not None and now - ex.claiming < CLAIM_PREPARE_SECONDS for ex in self.executors())
+        if not preparing and now - self.last_reconcile > RECONCILE_SECONDS:
             holding = [arg for ex in self.executors() for held in ex.held() for arg in ("--holding", held.attempt)]
             notes = self.wfe("exec", "reconcile", *holding).get("notes", [])
             for n in notes:
@@ -792,6 +801,13 @@ class Executor:
         """Asks the coordinator for one more job of this lane and launches it.
         What may start is the coordinator's rule (improve_wfrun p4); here an
         idle answer is simply nothing to do now."""
+        self.claiming = time.monotonic()
+        try:
+            return self._claim_once()
+        finally:
+            self.claiming = None
+
+    def _claim_once(self) -> str:
         profiles, contract, digest, sessions = self.offer()
         claim = self.wfe("exec", "claim", "--backend", self.backend_label(),
                          "--profiles-json", json.dumps(profiles), "--contract", f"{CONTRACT_NAME}={digest}",
