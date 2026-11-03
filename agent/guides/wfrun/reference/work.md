@@ -5,6 +5,8 @@
 - Read the request and current graph with `wfe run show <run>`. Use `wfe run help start|progress|complete|fail` for recording work (ask for each command separately).
 - A talk is consultation. For substantive work, the person's catalog describes activities they want visible as separate nodes: `wfe run nodes <run>`.
 - `wfe nodes help` explains creating nodes from templates; `wfe run help adjust` explains changing this run's graph. The reusable workflow remains separate. Choose steps that fit the request rather than adding every available template.
+- The brief lists any groups, examples and expectations in this run's definition. An example is a model, not a task: choose the concrete work and its count from the request and the group's description, then replace it before performing that work (`wfe run help specialize`). A list's example count fixes nothing.
+- An expectation says what the author expects of a node's result. `wfe run help expectation` records what actually holds, with evidence. An expectation you could not meet stays visible as you state it; a preferred one you met differently is explained there. Where a host, share or store comes from is your context's, not the key's.
 - Work already done outside a node can be recorded honestly with `wfe run help record-done`. Future work remains pending.
 - Questions requiring the person's answer belong in `wfe run ask`; see `wfe run help ask`. A recorded question can wait without a running process. Answers and new instructions appear in `wfe run state`; `take-up` and `ack` record your response to them.
 - Generated documentation steps are optional. Pending documentation does not prevent execution from becoming completed. Use documents when they carry the result or evidence the reader needs.
