@@ -447,7 +447,7 @@ def test_workflow_settings_choose_profile_guides_and_identity(area, monkeypatch)
     assert len(contract.rstrip()) < prompt.index("# Context (run ") < prompt.index(head) < prompt.index("# This attempt")
     assert "you perform this run as guide-agent; the execution host autolab launched you" in prompt
     r = wfe(area, "run", "show", "ask/run-001")["record"]
-    assert r["executor"] == {"name": "guide-agent", "backend": None, "host": "autolab", "node": "local"}  # node: project_migration p7
+    assert r["executor"] == {"name": "guide-agent", "backend": None, "host": "autolab", "node": "local", "placed": "default"}  # node: project_migration p7; placed: improve_wfrun p4
     begin = next(e for e in r["history"] if e["op"] == "attempt.begin")
     context = begin["settings"].pop("context")
     assert context["snapshot"].startswith("ctx-") and context["fingerprint"].startswith("sha256:")
@@ -1019,3 +1019,101 @@ def test_lanes_setting_defaults_to_the_one_slot(tmp_path):
     assert Executor(Settings.load(f)).lanes == {}
     f.write_text('wfe = ["wfe"]\nlanes = ["conversation", "default"]\n')
     assert Settings.load(f).lanes == ["conversation"]
+
+
+# improve_wfrun p4: with coordination configured, a worker holds as many
+# attempts as warden admitted; one claim loop launches them one tick after
+# another, tends each on its own, and a restart adopts them all.
+COORDINATE_WORKFLOW = """schema: ag.workflow.v2
+documentation: {policy: manual}
+id: coordinate
+name: Coordinate
+intent: |
+  Decide what runs where.
+execution:
+  agent: coordination-agent
+  lane: coordination
+  node: local
+intake:
+  zulip: ""
+repositories:
+  root: {path: ., access: editable}
+nodes:
+  coordinate:
+    type: do
+    description: Look, decide, apply.
+"""
+# A coordination agent of the simplest kind: admits every awaiting job on its node. A stub: it proves the
+# mechanism carries decisions, never that an agent decides well.
+ADMIT_ALL_STUB = textwrap.dedent('''
+    import json, os, subprocess
+    wfe = os.environ["WFE_BIN"]
+    subprocess.run([wfe, "coordinate", "events", "--take", "--json"], capture_output=True, text=True)
+    view = json.loads(subprocess.run([wfe, "coordinate", "view", "--json"], capture_output=True, text=True).stdout)
+    for q in view["queued"]:
+        if q["admission"] == "awaiting":
+            subprocess.run([wfe, "coordinate", "start", f"{q['workspace']}:{q['workflow']}/{q['run']}", "--reason", "stub: admit everything", "--basis", q["basis"], "--json"], capture_output=True, text=True)
+''')
+
+
+def test_two_attempts_on_one_worker_are_tended_apart_and_both_adopted_after_a_restart(area):
+    """Two long jobs admitted by coordination run at once in the default lane; the coordination lane
+    launches the coordination run; stopping one attempt leaves the other; a restarted executor
+    takes both back; the heartbeat carries the host's load."""
+    warden = area["area"] / "pj-warden"
+    subprocess.run([area["wfe"], "create", str(warden), "--name", "Warden", "--no-gitea"], check=True, capture_output=True)
+    (warden / "devdocs" / "workflows" / "coordinate.yaml").write_text(COORDINATE_WORKFLOW)
+    for args in (["add", "-A"], ["commit", "-q", "-m", "coordinate"]):
+        subprocess.run(["git", *args], cwd=warden, check=True, capture_output=True)
+    (area["area"] / "workers.json").write_text(json.dumps({"default": "local", "coordination": {"worker": "local", "lane": "coordination", "workspace": "warden", "workflow": "coordinate"},
+                                                          "workers": {"local": {"local": True, "lanes": ["coordination"]}}}))
+    (area["area"] / "sleeper.py").write_text(SLEEPER)
+    (area["area"] / "admit.py").write_text(ADMIT_ALL_STUB)
+    req = area["area"] / "words.md"
+    req.write_text("Work.")
+    wfe(area, "request", "ship", "--braindump", str(req), "--author", "Test Person", "--receipt", "pytest-coord-0001", "--workspace", "demo")
+    wfe(area, "request", "ship", "--braindump", str(req), "--author", "Test Person", "--receipt", "pytest-coord-0002", "--workspace", "demo")
+    # One command for both lanes: the sleeper for ordinary runs, the admit-all stub for coordination runs.
+    (area["area"] / "either.py").write_text("import os, runpy, sys\nrunpy.run_path(os.environ['ADMIT'] if 'coordinate' in os.getcwd() else os.environ['SLEEP'], run_name='__main__')\n")
+    os.environ["ADMIT"], os.environ["SLEEP"] = str(area["area"] / "admit.py"), str(area["area"] / "sleeper.py")
+    settings = Settings(wfe=[area["wfe"]], agent_command=[sys.executable, str(area["area"] / "either.py")], lanes=["coordination"])
+    first = Executor(settings, log=lambda m: print(m))
+    coord = first.lanes["coordination"]
+    assert first.tick() == "idle", "nothing is admitted yet: both await warden"
+    assert coord.tick() == "launched", "the coordination run is launched without a decision"
+    until(coord, "finished", limit=60)
+    assert first.tick() == "launched"
+    assert first.tick() == "launched", "a second attempt beside the first: no slot count"
+    assert first.tick() == "executing"
+    assert len(first.held()) == 2
+    local = wfe(area, "exec", "workers")["workers"][0]
+    assert sorted(x["lane"] for x in local["slots"]) == ["default", "default"]
+    assert local["load"] and local["load"]["cpus"], "the heartbeat carries the measured load"
+    assert local["reported"].startswith("executing ") and ", " in local["reported"].split(";")[0]
+    # Stopping one attempt ends only it.
+    a, b = (r.attempt for r in first.held())
+    run_of = {wfe(area, "exec", "status", "ship/run-00%d" % i)["attempts"][0]["id"]: "ship/run-00%d" % i for i in (1, 2)}
+    wfe(area, "run", "stop", run_of[a], "--reason", "enough", "--by", "Test Person")
+    until(first, "finished", limit=60)
+    assert [r.attempt for r in first.held()] == [b]
+    assert wfe(area, "run", "show", run_of[a])["record"]["control"]["hold"]["kind"] == "stopped"
+    assert wfe(area, "run", "show", run_of[b])["record"]["control"]["attempt"] is not None, "the other attempt is untouched"
+    # A resume of the stopped run is admitted by its standing decision and launched beside the other.
+    wfe(area, "run", "resume", run_of[a], "--reason", "go on", "--by", "Test Person")
+    assert first.tick() == "launched"
+    assert len(first.held()) == 2
+    # A restart takes both back.
+    import threading
+    for r in first.held():
+        threading.Thread(target=r.proc.wait, daemon=True).start()
+    second = Executor(settings, log=lambda m: print(m))
+    second.adopt()
+    assert sorted(r.attempt for r in second.held()) == sorted(r.attempt for r in first.held())
+    for ref in ("ship/run-001", "ship/run-002"):
+        if wfe(area, "run", "show", ref)["record"]["control"]["attempt"]:
+            wfe(area, "run", "stop", ref, "--reason", "done", "--by", "Test Person")
+    deadline = time.monotonic() + 60
+    while second.held() and time.monotonic() < deadline:
+        second.tick()
+        time.sleep(0.2)
+    assert not second.held()

@@ -2,8 +2,9 @@
 
 A person requests a run through agdevworld (the workflow editor service);
 the request becomes a run record in the project's devdocs and a job in the
-execution host's queue. This loop is autolab's side of it: one execution
-slot, one agent process at a time.
+execution host's queue. This loop is autolab's side of it: it launches one
+agent process per attempt the coordinator hands it, several at once since
+improve_wfrun p4.
 
 - It takes the next job (``wfe exec claim``), offering the execution
   profiles it can launch and the hash of the common workflow contract. The
@@ -70,16 +71,23 @@ end publishes it. The launch gate records how the agent's process ended in
 ``<log>.exit``, and a restarted loop takes back a process it left running
 (``wfe exec adopt``) instead of waiting for it to be declared lost.
 
-Worker lanes (project_migration p8). A worker may declare extra lanes in the
-coordinator's workers.json (``"lanes": {"conversation": 1}``), so a
-conversational run is answered while a long attempt holds the default slot.
-``lanes = ["conversation"]`` in the settings makes this process serve them:
-one ``Executor`` per lane, each with its own slot and its own tick loop (the
-extra lanes' in threads), claiming with ``--lane <name>`` and carrying out
-its own attempt's stops and end. Heartbeat, reconcile (``--holding`` with
-the attempts of every lane), delivery and intake stay with the default
-lane's executor, and ``adopt`` hands each live attempt back to the executor
-of its lane. Without ``lanes`` this is exactly the one slot of before.
+Worker lanes (project_migration p8) and several attempts at once
+(improve_wfrun p4). A worker may declare extra lanes in the coordinator's
+workers.json (``"lanes": ["coordination"]``); ``lanes = ["coordination"]`` in
+the settings makes this process serve them: one ``Executor`` per lane, each
+with its own tick loop (the extra lanes' in threads), claiming with ``--lane
+<name>`` and carrying out its own attempts' stops and ends. Since p4 an
+executor holds as many attempts as the coordinator hands it: each tick tends
+every running attempt (stop, timeout, session, end) and then claims once
+more; what may start is the coordinator's rule (warden's coordination
+decisions, WFE ``docs/coordination.md``), never a count kept here. Heartbeat
+(with what this host measures of its load, ``--facts-json``), reconcile
+(``--holding`` with the attempts of every lane), delivery and intake stay
+with the default lane's executor, on a keeper thread of their own in
+``serve`` so a slow launch or publication never delays them, and ``adopt``
+hands each live attempt back to the executor of its lane. The end of an
+attempt (its report and checkpoint) runs where it is found; stopping or
+losing one attempt touches no other.
 
 Every state rule lives in the workflow editor (``shared/run.ts``,
 ``server/exec.ts``); this module only launches, watches and reports.
@@ -253,6 +261,8 @@ class Running:
     started: float
     term_sent: float | None = None
     log: Path | None = None
+    # The run's lane as the coordinator recorded it (views; p4).
+    lane: str = DEFAULT_LANE
     # The session this attempt was launched in (agent_session p1), until the
     # harness's init event says which id it actually uses.
     session_id: str | None = None
@@ -344,14 +354,46 @@ class Executor:
         self.name = name
         self.lane = lane
         self.log = log
-        self.current: Running | None = None
+        # Every attempt this executor holds, by id, oldest first (p4).
+        self.running: dict[str, Running] = {}
+        self.guard = threading.RLock()
         self.last_reconcile = 0.0
+        # In `serve`, the keeper thread reports and reconciles; a tick then
+        # does neither (tests and --once tick without a keeper).
+        self.keeper: threading.Thread | None = None
+        self._gpu: tuple[float, list[dict]] = (0.0, [])
         # The default lane's executor holds one executor per extra lane
-        # (project_migration p8); each owns its slot, its stops and its end.
+        # (project_migration p8); each owns its attempts, their stops and ends.
         self.lanes: dict[str, Executor] = {}
         if lane == DEFAULT_LANE:
             for extra in dict.fromkeys(settings.lanes):
                 self.lanes[extra] = Executor(settings, name=name, lane=extra, log=lambda m, extra=extra: log(f"[{extra}] {m}"))
+
+    @property
+    def current(self) -> Running | None:
+        """The oldest attempt this executor holds (what "the slot" held before p4), or None."""
+        with self.guard:
+            return next(iter(self.running.values()), None)
+
+    @current.setter
+    def current(self, r: Running | None) -> None:
+        with self.guard:
+            if r is None:
+                self.running.clear()
+            else:
+                self.running[r.attempt] = r
+
+    def hold(self, r: Running) -> None:
+        with self.guard:
+            self.running[r.attempt] = r
+
+    def release(self, r: Running) -> None:
+        with self.guard:
+            self.running.pop(r.attempt, None)
+
+    def held(self) -> list[Running]:
+        with self.guard:
+            return list(self.running.values())
 
     def executors(self) -> list["Executor"]:
         """Every lane's executor of this process, the default lane's first."""
@@ -510,7 +552,7 @@ class Executor:
         finally:
             os.close(gate_r)
         sid = ((claim.get("execution") or {}).get("session") or {}).get("id")
-        self.current = Running(attempt, proc, time.monotonic(), log=log, session_id=sid, attached=not sid)
+        self.hold(Running(attempt, proc, time.monotonic(), log=log, session_id=sid, attached=not sid, lane=str(claim.get("lane") or self.lane)))
         try:
             self.wfe("exec", "started", attempt, "--pid", str(proc.pid))
             self.open_gate(gate_w)
@@ -634,41 +676,118 @@ class Executor:
         except RuntimeError as error:
             self.log(f"attempt {r.attempt}: session {r.reported} not recorded yet (retrying): {error}")
 
+    def keep(self) -> None:
+        """The worker's heartbeat (with its measured load) and, every minute,
+        the reconcile: the default lane's, speaking for every lane of this
+        process (project_migration p8); every lane's attempts are held, so
+        none is judged gone meanwhile."""
+        if self.lane != DEFAULT_LANE:
+            return
+        def doing(ex: Executor) -> str:
+            ids = [r.attempt for r in ex.held()]
+            return f"executing {', '.join(ids)}" if ids else "idle"
+        detail = "; ".join([doing(self), *(f"{lane}: {doing(ex)}" for lane, ex in self.lanes.items())])
+        self.wfe("exec", "heartbeat", "--pid", str(os.getpid()), "--detail", detail, "--facts-json", json.dumps({"load": self.host_load()}))
+        if time.monotonic() - self.last_reconcile > RECONCILE_SECONDS:
+            holding = [arg for ex in self.executors() for held in ex.held() for arg in ("--holding", held.attempt)]
+            notes = self.wfe("exec", "reconcile", *holding).get("notes", [])
+            for n in notes:
+                self.log(f"reconcile: {n}")
+            self.last_reconcile = time.monotonic()
+
+    def host_load(self) -> dict:
+        """What this host measures of itself now (improve_wfrun p4): evidence
+        for warden's judgment, kept with the heartbeat. Best effort; a
+        measurement that fails is left out, never guessed."""
+        out: dict = {"at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+        try:
+            out["cpus"] = os.cpu_count()
+            l1, l5, _ = os.getloadavg()
+            out["load1"], out["load5"] = round(l1, 2), round(l5, 2)
+        except (OSError, AttributeError):
+            pass
+        try:
+            if sys.platform == "darwin":
+                total = int(subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True, timeout=2).stdout.strip() or 0)
+                vm = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=2).stdout
+                page = int((vm.split("page size of")[1].split()[0]) if "page size of" in vm else 4096)
+                free = 0
+                for line in vm.splitlines():
+                    if line.startswith(("Pages free", "Pages inactive", "Pages speculative")):
+                        free += int(line.split(":")[1].strip().rstrip(".")) * page
+                out["memTotalMB"], out["memFreeMB"] = total // 1048576, free // 1048576
+            else:
+                info = {}
+                for line in Path("/proc/meminfo").read_text().splitlines():
+                    k, _, v = line.partition(":")
+                    info[k] = int(v.split()[0]) if v.strip() else 0
+                out["memTotalMB"], out["memFreeMB"] = info.get("MemTotal", 0) // 1024, info.get("MemAvailable", 0) // 1024
+        except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+            pass
+        if shutil.which("nvidia-smi"):
+            at, gpus = self._gpu
+            if time.monotonic() - at > 30:
+                gpus = []
+                try:
+                    q = subprocess.run(["nvidia-smi", "--query-gpu=name,memory.used,memory.total,utilization.gpu", "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=3)
+                    for line in q.stdout.splitlines():
+                        name, used, total, util = [x.strip() for x in line.split(",")]
+                        gpus.append({"name": name, "memUsedMB": int(float(used)), "memTotalMB": int(float(total)), "utilPercent": int(float(util))})
+                except (OSError, ValueError, subprocess.SubprocessError):
+                    gpus = []
+                self._gpu = (time.monotonic(), gpus)
+            if gpus:
+                out["gpu"] = gpus
+        return out
+
+    def tend(self, r: Running, due: dict) -> str:
+        """One attempt's tick: stop or time out, read its session id, and end
+        it once its process is gone. Returns executing, finished or
+        stop-unconfirmed; a failure here is this attempt's alone."""
+        if r.abandon:
+            # A failed launch not yet confirmed stopped: keep stopping it.
+            return self.abandon(r, r.abandon)
+        if r.attempt in due:
+            self.stop_group(r, "stop or cancel requested")
+        elif time.monotonic() - r.started > self.s.timeout_seconds:
+            self.stop_group(r, "the attempt's time budget ran out")
+        self.attach(r)
+        if r.abandon:
+            return self.abandon(r, r.abandon)
+        if r.proc.poll() is None:
+            self.watch_session_end(r)
+            return "executing"
+        self.attach(r)
+        if r.abandon:
+            return self.abandon(r, r.abandon)
+        return self.finish(r)
+
     def tick(self) -> str:
-        # The worker's heartbeat and the reconcile are the default lane's
-        # (project_migration p8): they speak for every lane of this process,
-        # and every lane's attempt is held, so none is judged gone meanwhile.
-        if self.lane == DEFAULT_LANE:
-            def doing(ex: Executor) -> str:
-                return f"executing {ex.current.attempt}" if ex.current else "idle"
-            detail = "; ".join([doing(self), *(f"{lane}: {doing(ex)}" for lane, ex in self.lanes.items())])
-            self.wfe("exec", "heartbeat", "--pid", str(os.getpid()), "--detail", detail)
-            if time.monotonic() - self.last_reconcile > RECONCILE_SECONDS:
-                holding = [arg for ex in self.executors() if (held := ex.current) is not None for arg in ("--holding", held.attempt)]
-                notes = self.wfe("exec", "reconcile", *holding).get("notes", [])
-                for n in notes:
-                    self.log(f"reconcile: {n}")
-                self.last_reconcile = time.monotonic()
-        r = self.current
-        if r is not None:
-            if r.abandon:
-                # A failed launch not yet confirmed stopped: keep stopping it.
-                return self.abandon(r, r.abandon)
+        """Report (unless the keeper does), tend every attempt, then claim
+        once. Returns finished when an attempt ended this tick, launched when
+        one started, stop-unconfirmed, executing while attempts run, idle."""
+        if self.keeper is None:
+            self.keep()
+        held = self.held()
+        outcome = "idle"
+        if held:
             due = {a["id"]: a for a in self.wfe("exec", "stops")}
-            if r.attempt in due:
-                self.stop_group(r, "stop or cancel requested")
-            elif time.monotonic() - r.started > self.s.timeout_seconds:
-                self.stop_group(r, "the attempt's time budget ran out")
-            self.attach(r)
-            if r.abandon:
-                return self.abandon(r, r.abandon)
-            if r.proc.poll() is None:
-                self.watch_session_end(r)
-                return "executing"
-            self.attach(r)
-            if r.abandon:
-                return self.abandon(r, r.abandon)
-            return self.finish(r)
+            for r in held:
+                try:
+                    state = self.tend(r, due)
+                except Exception as error:  # noqa: BLE001 - one attempt's failure; the others go on
+                    self.log(f"attempt {r.attempt}: tick failed: {error}")
+                    state = "executing"
+                if state in ("finished", "stop-unconfirmed"):
+                    return state
+            outcome = "executing"
+        claimed = self.claim_once()
+        return claimed if claimed != "idle" else outcome
+
+    def claim_once(self) -> str:
+        """Asks the coordinator for one more job of this lane and launches it.
+        What may start is the coordinator's rule (improve_wfrun p4); here an
+        idle answer is simply nothing to do now."""
         profiles, contract, digest, sessions = self.offer()
         claim = self.wfe("exec", "claim", "--backend", self.backend_label(),
                          "--profiles-json", json.dumps(profiles), "--contract", f"{CONTRACT_NAME}={digest}",
@@ -686,8 +805,9 @@ class Executor:
         except Exception as error:  # the launch failed: the attempt ends as interrupted
             self.log(f"attempt {attempt}: launch failed: {error}")
             self.report_context(claim, False, f"launch failed: {error}")
-            if self.current is not None and self.current.attempt == attempt:
-                return self.abandon(self.current, f"launch failed: {error}")  # something was spawned
+            spawned = next((r for r in self.held() if r.attempt == attempt), None)
+            if spawned is not None:
+                return self.abandon(spawned, f"launch failed: {error}")  # something was spawned
             self.wfe("exec", "finished", attempt, "--exit-code", "127")
             return "launch-failed"
         return "launched"
@@ -737,7 +857,7 @@ class Executor:
         how = f"{r.abandon}; {how}" if r.abandon else how
         how = f"session ended, leftover background processes stopped; {how}" if r.leftover else how
         self.log(f"attempt {r.attempt}: ended ({how}) → {result.get('outcome')}; checkpoint {(result.get('checkpoint') or {}).get('state')}")
-        self.current = None
+        self.release(r)
         return "finished"
 
     def session_of(self, claim: dict) -> Session | None:
@@ -784,16 +904,18 @@ class Executor:
             return
         for a in live if isinstance(live, list) else []:
             lane = a.get("lane") or DEFAULT_LANE
-            ex = self if lane == DEFAULT_LANE else self.lanes.get(lane)
+            # An ordinary lane this process does not serve as a loop of its own
+            # is the default lane's (p4: every ordinary lane's work is one loop).
+            ex = self if lane == DEFAULT_LANE else self.lanes.get(lane, self if lane not in self.s.lanes else None)
             if ex is None:
                 # Not served here any more: its process is judged by the
                 # coordinator's reconcile when it is gone.
                 self.log(f"attempt {a['id']}: left running in lane {lane}, which this executor does not serve; not adopted")
                 continue
-            if ex.current is not None:
+            if any(r.attempt == a["id"] for r in ex.held()):
                 continue
             log = Path(a["log"]) if a.get("log") else None
-            ex.current = Running(a["id"], Adopted(int(a["pid"]), Path(f"{log}.exit") if log else Path("/nonexistent")), time.monotonic(), log=log)  # type: ignore[arg-type]
+            ex.hold(Running(a["id"], Adopted(int(a["pid"]), Path(f"{log}.exit") if log else Path("/nonexistent")), time.monotonic(), log=log, lane=lane))  # type: ignore[arg-type]
             ex.log(f"attempt {a['id']}: adopted pid {a['pid']} left running before the restart")
 
     def loop(self, halt: threading.Event, once: bool = False) -> None:
@@ -807,16 +929,29 @@ class Executor:
             if once and state in ("idle", "error"):
                 break
             halt.wait(POLL_SECONDS)
-        if self.current is not None:
+        for r in self.held():
             # The agent keeps running in its own session; a restarted executor
-            # finds it alive and leaves the slot to it (reconcile).
-            self.log(f"leaving attempt {self.current.attempt} (pid {self.current.proc.pid}) running")
+            # finds it alive and adopts it (adopt, reconcile).
+            self.log(f"leaving attempt {r.attempt} (pid {r.proc.pid}) running")
+
+    def keep_forever(self, halt: threading.Event) -> None:
+        """The keeper (p4): heartbeat and reconcile on a thread of their own,
+        so a launch or a publication in a tick never delays them."""
+        while not halt.is_set():
+            try:
+                self.keep()
+            except Exception as error:  # noqa: BLE001 - said; the next beat retries
+                self.log(f"keeper: {error}")
+            halt.wait(POLL_SECONDS)
 
     def serve(self, once: bool = False) -> None:
-        slots = f"one slot and lanes {', '.join(self.lanes)}" if self.lanes else "one slot"
-        self.log(f"{self.name} workflow-run executor{f' (worker {self.s.worker})' if self.s.worker else ''}: {slots}, polling every {POLL_SECONDS} s")
+        lanes = f"lanes {', '.join(self.lanes)} beside the default lane" if self.lanes else "the default lane"
+        self.log(f"{self.name} workflow-run executor{f' (worker {self.s.worker})' if self.s.worker else ''}: {lanes}, as many attempts as the coordinator admits, polling every {POLL_SECONDS} s")
         self.adopt()
         halt = threading.Event()
+        if not once:
+            self.keeper = threading.Thread(target=self.keep_forever, args=(halt,), daemon=True, name="wfexec-keeper")
+            self.keeper.start()
 
         def leave(signum, frame):  # noqa: ARG001
             halt.set()

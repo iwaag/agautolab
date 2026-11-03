@@ -15,17 +15,22 @@ copies, the `:8791` gateway window and the `autolab` CLI — was retired in
 
 ## Modules
 
-- `agautolab.wfexec` — one execution node (worker) of the WFE coordinator,
-  with one slot: `worker` in its settings names it (project_migration p7;
-  WFE `docs/workers.md`). On the coordinator's host it is the local worker;
-  on another PC, installed by the `wfe_worker` deployment profile, its `wfe`
-  is the coordinator's client. Claims the next job of its node (`wfe exec
-  claim`), launches the workflow's agent behind a launch gate with the common
-  request and delivery destination, the short common
-  contract (`agent/guides/wfrun/guide.md`), the run's scoped context and its brief, reports how the process ended, carries out stops, and reconciles
-  vanished processes every minute. Sessions, launch ownership and every state
-  rule are described in its module docstring; the rules themselves live in
-  WFE.
+- `agautolab.wfexec` — one execution node (worker) of the WFE coordinator:
+  `worker` in its settings names it (project_migration p7; WFE
+  `docs/workers.md`). On the coordinator's host it is the local worker; on
+  another PC, installed by the `wfe_worker` deployment profile, its `wfe` is
+  the coordinator's client. It claims the admitted jobs of its node (`wfe
+  exec claim`; since improve_wfrun p4 what may start is warden's coordination
+  decision, WFE `docs/coordination.md`, and the executor holds as many
+  attempts at once as were admitted), launches each workflow's agent behind a
+  launch gate with the request and delivery destination, the short common
+  contract (`agent/guides/wfrun/guide.md`), the run's scoped context and its
+  brief, reports how each process ended, carries out stops per attempt,
+  reports its host's measured load with every heartbeat, and reconciles
+  vanished processes every minute. `lanes = ["coordination"]` makes it serve
+  the coordination lane as a loop of its own. Sessions, launch ownership and
+  every state rule are described in its module docstring; the rules
+  themselves live in WFE.
 - `agautolab.wfnotify` — delivers each run's coordination to its `run-…`
   topic in the workflow's `wf-…` channel, creating a project's channel folder
   and a workflow's channel when WFE asks. Runs on a thread of `wfexec`.
@@ -41,9 +46,11 @@ copies, the `:8791` gateway window and the `autolab` CLI — was retired in
   the `wfrun` role with its tool grant.
 - `.local/agents.local.toml`: host overlay (harness commands, provider URLs,
   secret file paths).
-- `.local/wfexec.toml`: `wfe` = the launcher argv; `[notify] enabled` and
-  `[intake] enabled`, with optional `zulip_env` / `admin_env`; optional
-  `agent_command` replaces the harness for trials.
+- `.local/wfexec.toml`: `wfe` = the launcher argv; `worker` = this node's
+  id; `lanes` = the extra lanes it serves (the coordination lane on the
+  coordinator's host); `[notify] enabled` and `[intake] enabled`, with
+  optional `zulip_env` / `admin_env`; optional `agent_command` replaces the
+  harness for trials.
 - `.local/zulip.env`: the autolab bot's credential (posts run topics, reads
   routed channels). `../.local/zulip/provisioner.env`: the realm credential
   for creating folders and channels.

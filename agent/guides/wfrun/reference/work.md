@@ -1,5 +1,7 @@
 # Organize the work
 
+- Other runs may execute on the same node at the same time (warden decides; the brief's *Execution coordination* lines say who shares it and any note warden left). Shared host state — `/tmp` paths, ports, displays, GPU memory, process names — is shared with them: use paths and names of your own, and never kill processes by a pattern that could match another run's. If their work interferes with yours, or yours becomes much heavier than it looked: `wfe coordinate reconsider --reason "<what you see>"`.
+
 - Read the request and current graph with `wfe run show <run>`. Use `wfe run help start|progress|complete|fail` for recording work (ask for each command separately).
 - A talk is consultation. For substantive work, the person's catalog describes activities they want visible as separate nodes: `wfe run nodes <run>`.
 - `wfe nodes help` explains creating nodes from templates; `wfe run help adjust` explains changing this run's graph. The reusable workflow remains separate. Choose steps that fit the request rather than adding every available template.
