@@ -1142,3 +1142,12 @@ def test_the_keeper_does_not_reconcile_while_a_claim_is_being_prepared(tmp_path)
     calls.clear()
     ex.keep()
     assert [c[1] for c in calls] == ["heartbeat", "reconcile"]
+
+
+def test_harness_input_is_stream_json_only_for_a_harness_that_asks_for_it():
+    import json
+    from agautolab.wfexec import harness_input
+    plain = "# Run\nbegin"
+    assert harness_input(["claude", "-p", "--output-format", "stream-json"], plain) == plain
+    sent = json.loads(harness_input(["agy", "--input-format", "stream-json", "--output-format", "stream-json"], plain))
+    assert sent["message"]["content"] == plain

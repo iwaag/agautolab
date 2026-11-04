@@ -123,7 +123,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from agag.agent import resolve_spec_role
-from agag.harness import SESSION_HARNESSES, Session, build_argv, session_stored, stream_session_id
+from agag.harness import SESSION_HARNESSES, Session, _agy_stdin, build_argv, session_stored, stream_session_id
 
 from agautolab.instance import AGAUTOLAB_ROOT, SPEC
 
@@ -253,6 +253,15 @@ class Settings:
             trial_sessions=bool(data.get("trial_sessions", False)),
             trial_session_store=Path(data["trial_session_store"]) if data.get("trial_session_store") else None,
         )
+
+
+def harness_input(argv: list[str], prompt: str) -> str:
+    """What the harness reads on stdin. agy takes one stream-json line per turn:
+    a plain prompt ended every attempt in seconds with `failed to decode stream
+    input` (forge provide/run-014, improve_workflow p3), the first time a
+    workflow run used the `agy` profile."""
+    streamed = "--input-format" in argv and argv[argv.index("--input-format") + 1:argv.index("--input-format") + 2] == ["stream-json"]
+    return _agy_stdin(prompt) if streamed else prompt
 
 
 @dataclass
@@ -542,7 +551,7 @@ class Executor:
         wfe_dir = str(Path(self.s.wfe[0]).parent) if "/" in self.s.wfe[0] else ""
         if wfe_dir:
             env["PATH"] = f"{wfe_dir}:{env.get('PATH', '')}"
-        prompt = self.prompt(claim, contract).encode()
+        prompt = harness_input(argv, self.prompt(claim, contract)).encode()
         if shutil.which(argv[0], path=env.get("PATH")) is None:
             raise FileNotFoundError(f"{argv[0]}: no such command")
         gate_r, gate_w = os.pipe()
