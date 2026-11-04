@@ -18,6 +18,7 @@
 - `wfe run show <run> --history`: the workflow, state and recorded events. `wfe run state <run>`: current work and unread input. Command details: `wfe run help <command>`.
 - `wfe projects --help`: discover and read managed projects, their files and published runs. `wfe status`: this project's setup.
 - `wfe knowledge --help`: findings that projects keep from practice, what each rests on and where it stops, at a stated revision. They are yours to use, adapt or reject, and nothing requires them. When one bore on your work, including one read from your own copy, your report says which revision you read, what you did with it and why: `wfe knowledge cite` prints the block (improve_workflow p2: two runs worked from or beside a finding and their reports never said so).
+- `wfe run help knowledge`: a node may point at a category of knowledge and at findings at stated revisions. That is a reference, and your run's graph can change it with a reason. Your report's decision block says what you did, and `cite --node` names the node it is about.
 - `wfe context run <run>`: instructions and environment information supplied to this run. Referenced details are available through `wfe context detail`.
 - Scoped context follows this guide: explicit requests and more specific instructions refine general defaults. Environment information is dated evidence, not an instruction.
 - Read the relevant note when the task needs it; these are not a sequence of required steps:
